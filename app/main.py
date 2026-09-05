@@ -64,7 +64,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="X1", version="0.32.0", description="Local-first CPU/RAM AI platform", lifespan=lifespan)
+app = FastAPI(title="X1", version="0.33.0", description="Local-first CPU/RAM AI platform", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=3)
 
 
@@ -104,5 +104,5 @@ def _include_optional_router(module: str) -> None:
 for router in (health_router, admin_ui_router, media_admin_ui_router, admin_router, operations_router,safety_admin_router, account_router, auth_router, projects_router, memory_router,files_router, conversations_router, usage_router, diagnostics_router, documents_router,code_router, images_router, media_admin_router, runtime_router, development_router,engineering_router, execution_router, sandbox_router, git_router, development_chat_router,quality_router, research_router, tasks_router, chat_router):
     app.include_router(router)
 
-for module in ("app.api.routes.complaints", "app.api.routes.reliability"):
+for module in ("app.api.routes.complaints", "app.api.routes.reliability", "app.api.routes.commerce", "app.api.routes.api_client", "app.api.routes.beta"):
     _include_optional_router(module)
