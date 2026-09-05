@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     image_storage_path:str="./data/images"; image_backend:str="disabled"; image_model_name:str=""; image_model_path:str=""; image_max_dimension:int=1536; image_max_pixels:int=1536*1536; image_max_steps:int=50; image_default_steps:int=24; image_max_active_per_user:int=1; image_job_priority:int=150; image_worker_idle_exit_seconds:int=30
     image_qa_max_repairs:int=1; image_perceptual_error_max:float=4.0; image_preview_max_side:int=512; image_storage_min_free_bytes:int=2*1024*1024*1024; image_storage_min_free_percent:float=10.0; image_user_storage_quota_bytes:int=2*1024*1024*1024; image_rejected_retention_days:int=7; image_vision_qa_url:str=""; image_vision_qa_timeout_seconds:int=45
     monthly_server_cost_rub:float=4000.0; chat_history_messages:int=48; chat_message_page_size:int=100
+    commerce_cpu_microunits_per_second:int=1000; commerce_gpu_microunits_per_second:int=10000; commerce_image_worker_microunits_per_second:int=5000; commerce_sandbox_microunits_per_second:int=2000
+    payment_ingest_secret:str=""; api_default_rate_limit_per_minute:int=60; api_max_rate_limit_per_minute:int=600
+    backup_storage_path:str="./backups"; health_checkpoint_stale_seconds:int=300; health_backup_max_age_hours:float=36.0
 
 @lru_cache
 def get_settings()->Settings: return Settings()
