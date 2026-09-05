@@ -6,7 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import ComplaintCase, Conversation, RegressionCase, RegressionRun, ReleaseGateDecision, User
+from app.models import Conversation, User
+from app.models_sprint30 import ComplaintCase, RegressionCase, RegressionRun, ReleaseGateDecision
 from app.services.access import require_project_role
 from app.services.admin import audit, require_admin
 from app.services.auth import get_current_user
