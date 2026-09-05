@@ -1,0 +1,62 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: x1
+      POSTGRES_USER: x1
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-x1-dev-only}
+    volumes:
+      - x1_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U x1 -d x1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      X1_DATABASE_AUTO_CREATE_SCHEMA: "false"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+
+  llama:
+    profiles: ["inference"]
+    image: ghcr.io/ggml-org/llama.cpp:server
+    restart: unless-stopped
+    volumes:
+      - ./models:/models:ro
+    command:
+      - -m
+      - /models/Qwen3.6-35B-A3B-Q4_K_M.gguf
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - -c
+      - "8192"
+      - -np
+      - "1"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+    expose:
+      - "8080"
+
+volumes:
+  x1_pgdata:
