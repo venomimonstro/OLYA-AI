@@ -1,67 +1,168 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from time import perf_counter
+import hashlib
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, inspect, select, text
+from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
 
-from app.models import AnswerAudit, BackgroundJob, EngineeringExecution, FrustrationEvent, ImageGeneration, UsageEvent
 from app.models_sprint31 import SystemCheckpoint, SystemHealthSnapshot
+from app.services.reliability import collect_system_health as _legacy_collect
+from app.services.reliability import latest_checkpoints as _legacy_points
+
+STABLE = "stable"
+DEGRADED = "degraded"
+CRITICAL = "failed"
+UNKNOWN = "unknown"
 
 
-def _now() -> datetime: return datetime.now(timezone.utc)
-def _count(db: Session, stmt) -> int: return int(db.scalar(stmt) or 0)
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
-def _checkpoint(key:str, subsystem:str, status:str, message:str, *, critical:bool=False, dependency:str="", latency_ms:int=0, details:dict[str,Any]|None=None)->dict[str,Any]:
-    return {"key":key,"subsystem":subsystem,"status":status,"message":message,"critical":critical,"dependency":dependency,"latency_ms":latency_ms,"severity":"critical" if critical and status=="failed" else "warning" if status!="stable" else "info","details":details or {}}
 
-def _persist(db:Session,item:dict[str,Any])->None:
-    row=db.scalar(select(SystemCheckpoint).where(SystemCheckpoint.key==item["key"])); now=_now()
-    if row is None:
-        row=SystemCheckpoint(key=item["key"],subsystem=item["subsystem"]); db.add(row); db.flush()
-    prev=row.consecutive_failures; row.subsystem=item["subsystem"]; row.dependency=item.get("dependency",""); row.status=item["status"]; row.severity=item["severity"]; row.critical=bool(item.get("critical")); row.latency_ms=int(item.get("latency_ms",0)); row.message=str(item["message"])[:500]; row.details=item.get("details",{}); row.last_checked_at=now
-    if item["status"]=="stable": row.consecutive_failures=0; row.last_ok_at=now
-    else: row.consecutive_failures=prev+1
+def _aware(value):
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
-def _aggregate(checks:list[dict[str,Any]])->dict[str,Any]:
-    stable=sum(x["status"]=="stable" for x in checks); degraded=sum(x["status"]=="degraded" for x in checks); failed=sum(x["status"]=="failed" for x in checks); critical_failed=sum(x["status"]=="failed" and x.get("critical") for x in checks)
-    status="failed" if critical_failed else "degraded" if failed or degraded else "stable"; score=max(0,min(100,round((stable*100+degraded*55)/max(1,len(checks)))))
-    return {"status":status,"score":score,"stable":stable,"degraded":degraded,"failed":failed,"critical_failed":critical_failed,"checks":checks,"checked_at":_now()}
 
-async def collect_system_health(app,db:Session,*,persist:bool=True)->dict[str,Any]:
-    checks=[]; started=perf_counter()
+def _check(key: str, subsystem: str, status: str, message: str, *, critical: bool = False,
+           dependency: str = "", details: dict | None = None, action: str = "") -> dict[str, Any]:
+    return {"key": key, "subsystem": subsystem, "status": status, "message": message,
+            "critical": critical, "dependency": dependency, "latency_ms": 0,
+            "severity": "critical" if status == CRITICAL and critical else "warning" if status != STABLE else "info",
+            "details": {**(details or {}), "recommended_action": action}}
+
+
+def _migration_check(db: Session, settings) -> dict[str, Any]:
     try:
-        db.execute(text("SELECT 1")); db_ms=int((perf_counter()-started)*1000); checks.append(_checkpoint("core.database","core","stable","Database query succeeded",critical=True,latency_ms=db_ms))
+        tables = set(inspect(db.get_bind()).get_table_names())
+        if "alembic_version" not in tables:
+            prod = str(getattr(settings, "env", "development")).lower() in {"production", "prod", "stable"}
+            return _check("core.migrations", "core", CRITICAL if prod else STABLE,
+                          "Alembic version table is missing" if prod else "Development schema is not Alembic-stamped",
+                          critical=prod, dependency="core.database", details={"mode": "development-create_all" if not prod else "production"},
+                          action="Run alembic upgrade head before accepting traffic." if prod else "")
+        current = str(db.scalar(text("SELECT version_num FROM alembic_version LIMIT 1")) or "")
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+        root = Path(__file__).resolve().parents[2]
+        heads = sorted(ScriptDirectory.from_config(Config(str(root / "alembic.ini"))).get_heads())
+        if current not in heads:
+            return _check("core.migrations", "core", CRITICAL, "Database migration head is stale", critical=True,
+                          dependency="core.database", details={"current": current, "expected_heads": heads},
+                          action="Run alembic upgrade head and repeat readiness check.")
+        return _check("core.migrations", "core", STABLE, "Database migration head is current", critical=True,
+                      dependency="core.database", details={"current": current})
     except Exception as exc:
-        db.rollback(); checks.append(_checkpoint("core.database","core","failed",f"Database unavailable: {type(exc).__name__}",critical=True)); return _aggregate(checks)
-    required={"users","conversations","messages","usage_events","background_jobs","image_generations","engineering_runs"}; tables=set(inspect(db.get_bind()).get_table_names()); missing=sorted(required-tables)
-    checks.append(_checkpoint("core.schema","core","failed" if missing else "stable","Critical schema tables are missing" if missing else "Critical schema is present",critical=True,dependency="core.database",details={"missing":missing}))
-    llama=getattr(app.state,"llama",None); started=perf_counter()
-    if llama is None: inference_ok=False; error="client_not_initialized"
-    else:
-        try: inference_ok=bool(await llama.health()); error=""
-        except Exception as exc: inference_ok=False; error=type(exc).__name__
-    checks.append(_checkpoint("core.inference","inference","stable" if inference_ok else "failed","Local inference healthy" if inference_ok else "Local inference unavailable",critical=True,latency_ms=int((perf_counter()-started)*1000),details={"error":error}))
-    governor=getattr(app.state,"governor",None); waiting=int(getattr(governor,"waiting",0)) if governor else 0; max_queue=max(1,int(getattr(governor,"max_queue",1))) if governor else 1
-    stale=_count(db,select(func.count()).select_from(BackgroundJob).where(BackgroundJob.status=="running",BackgroundJob.lease_expires_at.is_not(None),BackgroundJob.lease_expires_at<_now())); ratio=waiting/max_queue; qstatus="failed" if stale or ratio>=1 else "degraded" if ratio>=.7 else "stable"
-    checks.append(_checkpoint("runtime.queue","runtime",qstatus,"Queue pressure or stale leases detected" if qstatus!="stable" else "Queue healthy",critical=True,details={"waiting":waiting,"max_queue":max_queue,"stale_job_leases":stale}))
-    since=_now()-timedelta(hours=1); req=_count(db,select(func.count()).select_from(UsageEvent).where(UsageEvent.created_at>=since)); bad=_count(db,select(func.count()).select_from(UsageEvent).where(UsageEvent.created_at>=since,UsageEvent.success.is_(False))); ratio=bad/req if req else 0.0; status="failed" if req>=5 and ratio>=.20 else "degraded" if req>=5 and ratio>=.05 else "stable"
-    checks.append(_checkpoint("link.chat_pipeline","chat",status,"Chat pipeline failure rate elevated" if status!="stable" else "Chat pipeline healthy",critical=True,details={"requests_1h":req,"failed_1h":bad,"failure_rate":round(ratio,4)}))
-    quality=_count(db,select(func.count()).select_from(AnswerAudit).where(AnswerAudit.created_at>=since)); quality_bad=_count(db,select(func.count()).select_from(AnswerAudit).where(AnswerAudit.created_at>=since,AnswerAudit.status=="failed")); qratio=quality_bad/quality if quality else 0.0
-    checks.append(_checkpoint("link.quality","quality","degraded" if quality>=5 and qratio>=.10 else "stable","Quality failure rate elevated" if quality>=5 and qratio>=.10 else "Answer verification healthy",details={"audits_1h":quality,"failed_1h":quality_bad,"failure_rate":round(qratio,4)}))
-    itotal=_count(db,select(func.count()).select_from(ImageGeneration).where(ImageGeneration.created_at>=since)); ifailed=_count(db,select(func.count()).select_from(ImageGeneration).where(ImageGeneration.created_at>=since,ImageGeneration.status.in_(["failed","error"]))); iold=_count(db,select(func.count()).select_from(ImageGeneration).where(ImageGeneration.status=="queued",ImageGeneration.created_at<_now()-timedelta(minutes=10))); iratio=ifailed/itotal if itotal else 0.0; istatus="failed" if iold>=3 else "degraded" if (itotal>=3 and iratio>=.15) or iold else "stable"
-    checks.append(_checkpoint("link.image_pipeline","images",istatus,"Image generation instability detected" if istatus!="stable" else "Image generation healthy",details={"generations_1h":itotal,"failed_1h":ifailed,"stale_queue":iold,"failure_rate":round(iratio,4)}))
-    atotal=_count(db,select(func.count()).select_from(EngineeringExecution).where(EngineeringExecution.created_at>=_now()-timedelta(hours=24))); afailed=_count(db,select(func.count()).select_from(EngineeringExecution).where(EngineeringExecution.created_at>=_now()-timedelta(hours=24),EngineeringExecution.status.in_(["blocked","rolled_back"]))); aratio=afailed/atotal if atotal else 0.0; astatus="degraded" if atotal>=3 and aratio>=.20 else "stable"
-    checks.append(_checkpoint("link.agent_pipeline","engineering",astatus,"Agent execution failure rate elevated" if astatus!="stable" else "Agent execution pipeline healthy",details={"executions_24h":atotal,"blocked_or_rolled_back":afailed,"failure_rate":round(aratio,4)}))
-    fr=_count(db,select(func.count()).select_from(FrustrationEvent).where(FrustrationEvent.created_at>=since,FrustrationEvent.resolved.is_(False))); checks.append(_checkpoint("ux.frustration","ux","degraded" if fr>=5 else "stable","User frustration signals elevated" if fr>=5 else "User frustration signals normal",details={"open_events_1h":fr}))
-    result=_aggregate(checks)
+        prod = str(getattr(settings, "env", "development")).lower() in {"production", "prod", "stable"}
+        return _check("core.migrations", "core", CRITICAL if prod else UNKNOWN,
+                      f"Migration state could not be verified: {type(exc).__name__}", critical=prod,
+                      dependency="core.database", details={"error_type": type(exc).__name__},
+                      action="Run x1 doctor and migration verification.")
+
+
+def _route_contract(app) -> dict[str, Any]:
+    paths = {str(getattr(route, "path", "")) for route in app.routes}
+    prefixes = {"auth": "/v1/auth", "chat": "/v1/chat", "projects": "/v1/projects",
+                "documents": "/v1/documents", "images": "/v1/images", "research": "/v1/research",
+                "development": "/v1/development", "engineering": "/v1/engineering",
+                "sandbox": "/v1/sandbox", "git": "/v1/git", "commerce": "/v1/commerce",
+                "external_api": "/v1/api", "complaints": "/v1/complaints", "beta": "/v1/admin/beta",
+                "reliability": "/v1/admin/reliability", "operations": "/v1/admin/operations"}
+    missing = sorted(name for name, prefix in prefixes.items() if not any(p.startswith(prefix) for p in paths))
+    if missing:
+        return _check("product.route_contract", "api", CRITICAL, "Required product API surfaces are not registered",
+                      critical=True, details={"missing_features": missing, "route_count": len(paths)},
+                      action="Restore/register missing routers before Stable release.")
+    return _check("product.route_contract", "api", STABLE, "Required product API surfaces are registered",
+                  critical=True, details={"features": sorted(prefixes), "route_count": len(paths)})
+
+
+def _verify_manifest(folder: Path) -> list[str]:
+    manifest = folder / "SHA256SUMS"
+    if not manifest.exists():
+        return ["SHA256SUMS missing"]
+    errors = []
+    for line in manifest.read_text("utf-8", errors="replace").splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        expected, name = parts
+        target = folder / name.lstrip("*")
+        if not target.is_file():
+            errors.append(f"missing:{name}")
+        elif hashlib.sha256(target.read_bytes()).hexdigest() != expected:
+            errors.append(f"checksum:{name}")
+    return errors
+
+
+def _backup_check(settings, *, deep: bool) -> dict[str, Any]:
+    root = Path(getattr(settings, "backup_storage_path", "./backups")).expanduser().resolve()
+    prod = str(getattr(settings, "env", "development")).lower() in {"production", "prod", "stable"}
+    if not root.exists():
+        return _check("ops.backup", "operations", DEGRADED if prod else STABLE, "No backup directory found",
+                      details={"path": str(root)}, action="Create and verify a backup." if prod else "")
+    dirs = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not dirs:
+        return _check("ops.backup", "operations", DEGRADED if prod else STABLE, "No backup snapshots found",
+                      details={"path": str(root)}, action="Create a backup and run a restore drill." if prod else "")
+    latest = dirs[0]
+    age_hours = max(0.0, (_now().timestamp() - latest.stat().st_mtime) / 3600)
+    if deep:
+        errors = _verify_manifest(latest)
+        if errors:
+            return _check("ops.backup", "operations", CRITICAL, "Latest backup checksum verification failed",
+                          critical=True, details={"path": str(latest), "errors": errors, "age_hours": round(age_hours, 2)},
+                          action="Create a new verified backup immediately.")
+    stale = age_hours > float(getattr(settings, "health_backup_max_age_hours", 36.0))
+    return _check("ops.backup", "operations", DEGRADED if stale else STABLE,
+                  "Latest backup is stale" if stale else "Latest backup is recent",
+                  details={"path": str(latest), "age_hours": round(age_hours, 2), "checksum_verified": deep},
+                  action="Create a fresh backup and verify restore." if stale else "")
+
+
+def _root_causes(checks: list[dict[str, Any]]) -> list[str]:
+    by_key = {x["key"]: x for x in checks}; roots = set()
+    for item in checks:
+        if item.get("status") == STABLE:
+            item["root_cause"] = ""; continue
+        key, seen = item["key"], set()
+        while key not in seen:
+            seen.add(key); current = by_key.get(key); dep = current.get("dependency", "") if current else ""; parent = by_key.get(dep) if dep else None
+            if not parent or parent.get("status") == STABLE: break
+            key = dep
+        item["root_cause"] = key; roots.add(key)
+    return sorted(roots)
+
+
+def _persist_extra(db: Session, item: dict[str, Any]) -> None:
+    row = db.scalar(select(SystemCheckpoint).where(SystemCheckpoint.key == item["key"])); now = _now()
+    if row is None:
+        row = SystemCheckpoint(key=item["key"], subsystem=item["subsystem"]); db.add(row); db.flush()
+    previous = int(row.consecutive_failures or 0)
+    row.subsystem=item["subsystem"]; row.dependency=item.get("dependency", ""); row.status=item["status"]; row.severity=item.get("severity", "info"); row.critical=bool(item.get("critical")); row.latency_ms=int(item.get("latency_ms", 0)); row.message=str(item.get("message", ""))[:500]; row.details={**(item.get("details") or {}), "root_cause": item.get("root_cause", "")}; row.last_checked_at=now
+    if item["status"] == STABLE: row.consecutive_failures=0; row.last_ok_at=now
+    else: row.consecutive_failures=previous+1
+
+
+async def collect_system_health(app, db: Session, *, persist: bool = True, deep: bool = False) -> dict[str, Any]:
+    base = await _legacy_collect(app, db, persist=False, deep=deep); checks=list(base.get("checks") or [])
+    checks.extend([_migration_check(db, app.state.settings), _route_contract(app), _backup_check(app.state.settings, deep=deep)])
+    roots=_root_causes(checks); stable=sum(x.get("status")==STABLE for x in checks); degraded=sum(x.get("status")==DEGRADED for x in checks); failed=sum(x.get("status")==CRITICAL for x in checks); unknown=sum(x.get("status")==UNKNOWN for x in checks); critical_failed=sum(x.get("status")==CRITICAL and x.get("critical") for x in checks)
+    status=CRITICAL if critical_failed else DEGRADED if failed or degraded else UNKNOWN if unknown else STABLE; score=max(0,min(100,round((stable*100+degraded*55+unknown*30)/max(1,len(checks)))))
+    result={"status":status,"score":score,"stable":stable,"degraded":degraded,"failed":failed,"critical":failed,"unknown":unknown,"critical_failed":critical_failed,"root_causes":roots,"checks":checks,"checked_at":_now()}
     if persist:
-        for item in checks: _persist(db,item)
-        snap=SystemHealthSnapshot(overall_status=result["status"],score=result["score"],stable_count=result["stable"],degraded_count=result["degraded"],failed_count=result["failed"],critical_failed_count=result["critical_failed"],checks=checks); db.add(snap); db.flush(); result["snapshot_id"]=snap.id
+        await _legacy_collect(app, db, persist=True, deep=deep)
+        for item in checks: _persist_extra(db,item)
+        snap=SystemHealthSnapshot(overall_status=status,score=score,stable_count=stable,degraded_count=degraded+unknown,failed_count=failed,critical_failed_count=critical_failed,checks=checks); db.add(snap); db.flush(); result["snapshot_id"]=snap.id
     return result
 
-def latest_checkpoints(db:Session)->list[dict[str,Any]]:
-    rows=list(db.scalars(select(SystemCheckpoint).order_by(SystemCheckpoint.critical.desc(),SystemCheckpoint.subsystem,SystemCheckpoint.key)).all())
-    return [{"key":x.key,"subsystem":x.subsystem,"dependency":x.dependency,"status":x.status,"severity":x.severity,"critical":x.critical,"latency_ms":x.latency_ms,"message":x.message,"details":x.details,"consecutive_failures":x.consecutive_failures,"last_ok_at":x.last_ok_at,"last_checked_at":x.last_checked_at} for x in rows]
+
+def latest_checkpoints(db: Session, *, stale_after_seconds: int = 300) -> list[dict[str, Any]]:
+    rows=_legacy_points(db); now=_now(); result=[]
+    for item in rows:
+        checked=_aware(item.get("last_checked_at")); age=(now-checked).total_seconds() if checked else float("inf"); stale=age>max(30,stale_after_seconds); details=dict(item.get("details") or {}); out=dict(item); out["stored_status"]=item.get("status"); out["status"]=UNKNOWN if stale else item.get("status",UNKNOWN); out["stale"]=stale; out["age_seconds"]=None if age==float("inf") else round(age,1); out["root_cause"]=details.get("root_cause",""); out["recommended_action"]="Refresh system health checks." if stale else details.get("recommended_action",""); out["message"]="Checkpoint is stale" if stale else out.get("message",""); result.append(out)
+    return result
