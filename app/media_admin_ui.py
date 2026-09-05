@@ -1,0 +1,26 @@
+from fastapi import APIRouter
+from fastapi.responses import HTMLResponse
+
+router = APIRouter(tags=["admin-media-ui"])
+
+PAGE = r'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>X1 Media Center</title><style>
+body{font-family:system-ui,sans-serif;margin:0;background:#f6f7f9;color:#151515}header{padding:18px 24px;background:#111;color:#fff}main{max-width:1250px;margin:auto;padding:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:#fff;border:1px solid #ddd;border-radius:12px;padding:16px;margin:10px 0}input,textarea,button{padding:9px;border:1px solid #bbb;border-radius:8px}textarea{width:100%;min-height:110px}table{width:100%;border-collapse:collapse;background:#fff}td,th{padding:9px;border-bottom:1px solid #eee;text-align:left;font-size:13px}.muted{color:#666}</style></head><body><header><b>X1 Admin · Media Center</b></header><main>
+<div class="card"><b>Авторизация</b> <input id="token" type="password" style="width:min(700px,80%)"><button onclick="save()">Открыть</button><span id="auth"></span></div>
+<h2>Медиа</h2><div id="summary" class="grid"></div><div id="generations"></div>
+<h2>Самоулучшение изображений</h2><div class="card"><button onclick="refreshTraining()">Обновить кандидатов</button> <button onclick="freezeDataset()">Заморозить dataset</button></div><div id="training"></div><div id="datasets"></div><div id="improvements"></div>
+<h2>Image Safety Policy</h2><div class="card"><input id="pname" value="Image Safety Policy"><textarea id="superprompt" placeholder="Системный суперпромпт генерации изображений"></textarea><textarea id="blocked" placeholder="Запрещённые фразы, по одной на строку"></textarea><button onclick="createPolicy()">Создать draft</button></div><div id="policies"></div>
+</main><script>
+const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+function save(){sessionStorage.x1AdminToken=document.getElementById('token').value;load()}
+async function api(path,opts={}){let t=sessionStorage.x1AdminToken||'';let r=await fetch(path,{...opts,headers:{...(opts.headers||{}),'Authorization':'Bearer '+t,'Content-Type':'application/json'}});if(!r.ok)throw new Error(r.status+' '+await r.text());return r.status===204?null:r.json()}
+function cards(o){return Object.entries(o).filter(([k])=>!['top_users','qa_events'].includes(k)).map(([k,v])=>`<div class="card"><div class="muted">${esc(k)}</div><b>${esc(v)}</b></div>`).join('')}
+function tbl(rows,cols){if(!rows.length)return '<div class="card muted">Нет данных</div>';return '<table><tr>'+cols.map(c=>'<th>'+esc(c[0])+'</th>').join('')+'</tr>'+rows.map(r=>'<tr>'+cols.map(c=>'<td>'+esc(r[c[1]])+'</td>').join('')+'</tr>').join('')+'</table>'}
+async function refreshTraining(){await api('/v1/admin/media/training/refresh',{method:'POST'});await load()}
+async function freezeDataset(){try{await api('/v1/admin/media/training/datasets',{method:'POST'});await load()}catch(e){alert(e.message)}}
+async function createPolicy(){let blocked=document.getElementById('blocked').value.split('\n').map(x=>x.trim()).filter(Boolean);await api('/v1/admin/media/policies',{method:'POST',body:JSON.stringify({name:document.getElementById('pname').value,superprompt:document.getElementById('superprompt').value,rules:{blocked_phrases:blocked,required_negative_phrases:[]}})});await load()}
+async function load(){try{document.getElementById('token').value=sessionStorage.x1AdminToken||'';let [s,g,p,t,d,i]=await Promise.all([api('/v1/admin/media/summary'),api('/v1/admin/media/generations?limit=100'),api('/v1/admin/media/policies'),api('/v1/admin/media/training/examples'),api('/v1/admin/media/training/datasets'),api('/v1/admin/media/training/improvements')]);document.getElementById('auth').textContent=' ✓';document.getElementById('summary').innerHTML=cards(s);document.getElementById('generations').innerHTML=tbl(g,[['ID','id'],['User','user_id'],['Статус','status'],['QA','qa_status'],['Доставка','delivery_status'],['Модель','model_name'],['Дата','created_at']]);document.getElementById('training').innerHTML=tbl(t,[['ID','id'],['Generation','generation_id'],['Label','label'],['State','state'],['Дата','created_at']]);document.getElementById('datasets').innerHTML=tbl(d,[['Dataset','id'],['Positive','positive_count'],['Regression','regression_count'],['State','state'],['SHA','manifest_sha256']]);document.getElementById('improvements').innerHTML=tbl(i,[['Candidate','candidate_name'],['Type','component_type'],['State','state'],['Причина','decision_reason']]);document.getElementById('policies').innerHTML=tbl(p,[['Версия','version'],['Название','name'],['Состояние','state'],['Создана','created_at'],['Опубликована','published_at']])}catch(e){document.getElementById('auth').textContent=' '+e.message}}
+if(sessionStorage.x1AdminToken)load();</script></body></html>'''
+
+@router.get('/admin/media', response_class=HTMLResponse, include_in_schema=False)
+def media_console() -> HTMLResponse:
+    return HTMLResponse(PAGE, headers={"Cache-Control":"no-store","X-Frame-Options":"DENY","Content-Security-Policy":"default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'"})
