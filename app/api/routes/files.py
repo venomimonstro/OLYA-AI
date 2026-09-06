@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import mimetypes
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import select, update
@@ -25,6 +26,34 @@ from app.services.files import (
 router = APIRouter(prefix="/v1/projects", tags=["files"])
 
 
+async def _read_limited_body(request: Request, limit: int) -> bytes:
+    """Read a raw upload without ever buffering more than the configured limit."""
+    declared = request.headers.get("content-length")
+    if declared:
+        try:
+            declared_size = int(declared)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length")
+        if declared_size < 0:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length")
+        if declared_size > limit:
+            raise HTTPException(status_code=413, detail="File is too large")
+
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > limit:
+            raise HTTPException(status_code=413, detail="File is too large")
+        data.extend(chunk)
+    return bytes(data)
+
+
+def _download_disposition(filename: str) -> str:
+    safe = safe_filename(filename)
+    fallback = safe.encode("ascii", errors="ignore").decode("ascii").replace('"', "_") or "file"
+    encoded = quote(safe, safe="")
+    return f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{encoded}'
+
+
 @router.post("/{project_id}/files", response_model=FileRead, status_code=status.HTTP_201_CREATED)
 async def upload_file(
     project_id: str,
@@ -36,11 +65,9 @@ async def upload_file(
 ) -> ProjectFile:
     _project, role = require_project_role(db, user, project_id, "member")
     settings = request.app.state.settings
-    content = await request.body()
+    content = await _read_limited_body(request, int(settings.max_file_size_bytes))
     if not content:
         raise HTTPException(status_code=400, detail="Empty file")
-    if len(content) > settings.max_file_size_bytes:
-        raise HTTPException(status_code=413, detail="File is too large")
 
     name = safe_filename(logical_name or filename)
     current_same_name = db.scalar(
@@ -94,7 +121,11 @@ async def upload_file(
             max_pdf_pages=settings.max_pdf_pages,
             max_docx_unpacked_bytes=settings.max_docx_unpacked_bytes,
         )
-        chunks = chunk_segments(segments, max_chars=settings.file_chunk_chars, overlap_chars=settings.file_chunk_overlap_chars)
+        chunks = chunk_segments(
+            segments,
+            max_chars=settings.file_chunk_chars,
+            overlap_chars=settings.file_chunk_overlap_chars,
+        )
         if not chunks:
             raise ValueError("No readable text found")
         for ordinal, item in enumerate(chunks):
@@ -146,7 +177,12 @@ def list_files(
 
 
 @router.get("/{project_id}/files/{file_id}", response_model=FileRead)
-def get_file(project_id: str, file_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ProjectFile:
+def get_file(
+    project_id: str,
+    file_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ProjectFile:
     require_project_role(db, user, project_id, "viewer")
     file = db.get(ProjectFile, file_id)
     if file is None or file.project_id != project_id:
@@ -155,7 +191,12 @@ def get_file(project_id: str, file_id: str, user: User = Depends(get_current_use
 
 
 @router.get("/{project_id}/files/{file_id}/content")
-def download_file(project_id: str, file_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
+def download_file(
+    project_id: str,
+    file_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Response:
     require_project_role(db, user, project_id, "viewer")
     file = db.get(ProjectFile, file_id)
     if file is None or file.project_id != project_id:
@@ -166,7 +207,7 @@ def download_file(project_id: str, file_id: str, user: User = Depends(get_curren
     return Response(
         content=path.read_bytes(),
         media_type=file.media_type,
-        headers={"Content-Disposition": f'attachment; filename="{file.original_name}"'},
+        headers={"Content-Disposition": _download_disposition(file.original_name)},
     )
 
 
@@ -181,13 +222,24 @@ def search_files(
     require_project_role(db, user, project_id, "viewer")
     rows = retrieve_chunks(db, project_id, q, limit=limit)
     return [
-        FileChunkRead(id=chunk.id, ordinal=chunk.ordinal, page_number=chunk.page_number, content=chunk.content, score=score)
+        FileChunkRead(
+            id=chunk.id,
+            ordinal=chunk.ordinal,
+            page_number=chunk.page_number,
+            content=chunk.content,
+            score=score,
+        )
         for chunk, _file, score in rows
     ]
 
 
 @router.delete("/{project_id}/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_file(project_id: str, file_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
+def delete_file(
+    project_id: str,
+    file_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Response:
     require_project_role(db, user, project_id, "manager")
     file = db.get(ProjectFile, file_id)
     if file is None or file.project_id != project_id:
