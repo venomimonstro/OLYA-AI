@@ -25,34 +25,51 @@ was_running() { printf '%s\n' "$RUNNING_SERVICES" | grep -qx "$1"; }
 WRITERS_QUIESCED=0
 WRITERS_RESUMED=0
 
+quiesce_sandbox_containers() {
+  local ids
+  ids="$({
+    docker ps -aq --filter 'label=x1.sandbox.preview=true' 2>/dev/null || true
+    docker ps -aq --filter 'label=x1.sandbox.execution=true' 2>/dev/null || true
+  } | awk 'NF' | sort -u)"
+  [ -z "$ids" ] || docker rm -f $ids >/dev/null
+}
+
 resume_writers() {
   [ "$WRITERS_RESUMED" -eq 0 ] || return 0
   WRITERS_RESUMED=1
+  local failed=0
   set +e
   if was_running sandbox-worker; then
-    docker compose up -d sandbox-worker >/dev/null 2>&1
+    docker compose up -d sandbox-worker >/dev/null 2>&1 || failed=1
   fi
   if was_running app; then
-    docker compose up -d app >/dev/null 2>&1
+    docker compose up -d app >/dev/null 2>&1 || failed=1
   fi
   if was_running image-worker; then
-    docker compose --profile images up -d image-worker >/dev/null 2>&1
+    docker compose --profile images up -d image-worker >/dev/null 2>&1 || failed=1
   fi
   set -e
+  return "$failed"
 }
 
 cleanup() {
+  local original_status=$?
   rm -rf "$TMP_DEST"
   if [ "$WRITERS_QUIESCED" -eq 1 ]; then
-    resume_writers
+    resume_writers || true
   fi
+  return "$original_status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 if was_running app || was_running image-worker || was_running sandbox-worker; then
   WRITERS_QUIESCED=1
   docker compose stop app image-worker sandbox-worker >/dev/null 2>&1 || true
 fi
+# Detached previews and an execution whose Docker CLI lost its parent survive
+# stopping sandbox-worker. Remove only X1-labelled containers before archiving.
+quiesce_sandbox_containers
 
 mkdir -p "$TMP_DEST"
 
@@ -103,7 +120,10 @@ git rev-parse HEAD > "$TMP_DEST/git-head.txt" 2>/dev/null || true
 mkdir -p "$(dirname "$FINAL_DEST")"
 mv "$TMP_DEST" "$FINAL_DEST"
 if [ "$WRITERS_QUIESCED" -eq 1 ]; then
-  resume_writers
+  resume_writers || {
+    echo "backup created but one or more writer services failed to resume" >&2
+    exit 5
+  }
 fi
 trap - EXIT INT TERM
 printf '%s\n' "$FINAL_DEST"
