@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, Header, HTTPException, Request, status
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -25,12 +25,7 @@ def _minute_start(now: datetime) -> datetime:
 
 
 def _consume_rate_limit(db: Session, api_key: ApiKey, now: datetime) -> None:
-    """Atomically consume one request from the fixed-minute API window.
-
-    A read/increment/write ORM sequence permits lost updates under concurrent
-    requests. The conditional UPDATE below makes the database the serialization
-    point so the configured per-key limit cannot be bypassed by a burst.
-    """
+    """Atomically consume one request from a bounded fixed-minute API window."""
     window_start = _minute_start(now)
     window = db.scalar(
         select(ApiRateLimitWindow).where(
@@ -38,14 +33,23 @@ def _consume_rate_limit(db: Session, api_key: ApiKey, now: datetime) -> None:
             ApiRateLimitWindow.window_start == window_start,
         )
     )
+    created = False
     if window is None:
-        window = ApiRateLimitWindow(api_key_id=api_key.id, window_start=window_start, request_count=0)
-        db.add(window)
+        candidate = ApiRateLimitWindow(
+            api_key_id=api_key.id,
+            window_start=window_start,
+            request_count=0,
+        )
         try:
-            db.flush()
+            # A savepoint contains the unique-window race. A competing request
+            # must not force rollback of unrelated state already present in the
+            # request Session.
+            with db.begin_nested():
+                db.add(candidate)
+                db.flush()
+            window = candidate
+            created = True
         except IntegrityError:
-            # Another request created the same unique minute window first.
-            db.rollback()
             window = db.scalar(
                 select(ApiRateLimitWindow).where(
                     ApiRateLimitWindow.api_key_id == api_key.id,
@@ -54,6 +58,17 @@ def _consume_rate_limit(db: Session, api_key: ApiKey, now: datetime) -> None:
             )
     if window is None:
         raise HTTPException(status_code=503, detail="API rate limiter unavailable")
+
+    if created:
+        # Keep a short overlap so an in-flight request that started just before a
+        # minute boundary is never racing a DELETE of the row it is updating.
+        # In steady state this bounds the table to only a few rows per API key.
+        db.execute(
+            delete(ApiRateLimitWindow).where(
+                ApiRateLimitWindow.api_key_id == api_key.id,
+                ApiRateLimitWindow.window_start < window_start - timedelta(minutes=2),
+            )
+        )
 
     result = db.execute(
         update(ApiRateLimitWindow)
