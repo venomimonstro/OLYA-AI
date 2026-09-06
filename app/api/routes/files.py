@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 from pathlib import Path
 from urllib.parse import quote
@@ -13,10 +14,10 @@ from app.models import FileChunk, ProjectFile, User
 from app.schemas.files import FileChunkRead, FileRead
 from app.services.access import require_project_role
 from app.services.auth import get_current_user
+from app.services.file_parse_isolation import FileParseError, parse_file_isolated
 from app.services.files import (
     chunk_segments,
     next_file_version,
-    parse_content,
     retrieve_chunks,
     safe_filename,
     sha256_bytes,
@@ -115,11 +116,18 @@ async def upload_file(
     file.storage_path = str(destination)
 
     try:
-        segments = parse_content(
+        # PDF/DOCX parsers are complex and process attacker-controlled bytes. Do
+        # not run them inside the single async API process: a malformed parser
+        # workload must be killable without freezing chat/auth/health endpoints.
+        segments = await asyncio.to_thread(
+            parse_file_isolated,
+            destination,
             filename,
-            content,
-            max_pdf_pages=settings.max_pdf_pages,
-            max_docx_unpacked_bytes=settings.max_docx_unpacked_bytes,
+            max_pdf_pages=int(settings.max_pdf_pages),
+            max_docx_unpacked_bytes=int(settings.max_docx_unpacked_bytes),
+            max_extracted_chars=2_000_000,
+            timeout_seconds=45,
+            memory_mb=768,
         )
         chunks = chunk_segments(
             segments,
@@ -127,7 +135,7 @@ async def upload_file(
             overlap_chars=settings.file_chunk_overlap_chars,
         )
         if not chunks:
-            raise ValueError("No readable text found")
+            raise FileParseError("No readable text found")
         for ordinal, item in enumerate(chunks):
             chunk_digest = sha256_bytes(item.text.encode("utf-8"))
             db.add(
@@ -140,7 +148,6 @@ async def upload_file(
                     char_count=len(item.text),
                 )
             )
-        # A new version becomes current only after successful parsing.
         db.execute(
             update(ProjectFile)
             .where(
@@ -251,6 +258,5 @@ def delete_file(
         if path.is_file():
             path.unlink()
     except OSError:
-        # DB state is authoritative; orphan cleanup is safe to retry later.
         pass
     return Response(status_code=status.HTTP_204_NO_CONTENT)
