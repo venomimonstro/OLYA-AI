@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,13 +29,21 @@ def _integer(value: Any, default: int = 0) -> int:
         return default
 
 
-def _metrics(payload: dict[str, Any]) -> dict[str, Any]:
-    value = payload.get("metrics")
-    return dict(value) if isinstance(value, dict) else {}
+def _metric(payload: dict[str, Any], key: str, fallback: str | None = None) -> Any:
+    metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+    if key in metrics:
+        return metrics[key]
+    if key in payload:
+        return payload[key]
+    if fallback and fallback in metrics:
+        return metrics[fallback]
+    if fallback and fallback in payload:
+        return payload[fallback]
+    return 0
 
 
 def signal_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
-    metrics = _metrics(payload)
+    """Normalize either a full beta snapshot or an already compact wave baseline."""
     return {
         "request_count": _integer(payload.get("request_count")),
         "success_count": _integer(payload.get("success_count")),
@@ -46,15 +53,15 @@ def signal_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         "compute_minutes_total": _number(payload.get("compute_minutes_total")),
         "p95_duration_ms": _integer(payload.get("p95_duration_ms")),
         "p95_queue_ms": _integer(payload.get("p95_queue_ms")),
-        "request_success_rate": _number(metrics.get("request_success_rate")),
-        "frustration_per_request": _number(metrics.get("frustration_per_request")),
-        "verified_request_success_per_cpu_minute": _number(metrics.get("verified_request_success_per_cpu_minute")),
+        "request_success_rate": _number(_metric(payload, "request_success_rate")),
+        "frustration_per_request": _number(_metric(payload, "frustration_per_request")),
+        "verified_request_success_per_cpu_minute": _number(_metric(payload, "verified_request_success_per_cpu_minute")),
         "completed_task_success_per_cpu_minute": _number(
-            metrics.get("completed_task_success_per_cpu_minute", metrics.get("verified_task_success_per_cpu_minute"))
+            _metric(payload, "completed_task_success_per_cpu_minute", "verified_task_success_per_cpu_minute")
         ),
-        "d1_retention": _number(metrics.get("d1_retention")),
-        "d7_retention": _number(metrics.get("d7_retention")),
-        "d30_retention": _number(metrics.get("d30_retention")),
+        "d1_retention": _number(_metric(payload, "d1_retention")),
+        "d7_retention": _number(_metric(payload, "d7_retention")),
+        "d30_retention": _number(_metric(payload, "d30_retention")),
         "measured_at": str(payload.get("measured_at") or utcnow().isoformat()),
     }
 
@@ -67,13 +74,8 @@ def compare_wave_signals(current_payload: dict[str, Any], baseline_payload: dict
     delta_frustration = max(0, current["frustration_count"] - baseline["frustration_count"])
     min_requests = max(1, int(getattr(settings, "beta_wave_min_observation_requests", 50)))
     enough_observation = delta_requests >= min_requests
-
-    if delta_requests:
-        wave_success_rate = delta_successes / delta_requests
-        wave_frustration_rate = delta_frustration / delta_requests
-    else:
-        wave_success_rate = 0.0
-        wave_frustration_rate = 0.0
+    wave_success_rate = delta_successes / delta_requests if delta_requests else 0.0
+    wave_frustration_rate = delta_frustration / delta_requests if delta_requests else 0.0
 
     regressions: list[str] = []
     warnings: list[str] = []
@@ -82,21 +84,15 @@ def compare_wave_signals(current_payload: dict[str, Any], baseline_payload: dict
             regressions.append("wave_request_success_below_guardrail")
         if wave_frustration_rate > float(getattr(settings, "beta_max_frustration_per_request", 0.05)):
             regressions.append("wave_frustration_above_guardrail")
-
         base_queue = baseline["p95_queue_ms"]
-        queue_ratio = float(getattr(settings, "beta_wave_max_queue_regression_ratio", 1.5))
-        if base_queue > 0 and current["p95_queue_ms"] > base_queue * queue_ratio:
+        if base_queue > 0 and current["p95_queue_ms"] > base_queue * float(getattr(settings, "beta_wave_max_queue_regression_ratio", 1.5)):
             regressions.append("p95_queue_regressed")
-
         base_duration = baseline["p95_duration_ms"]
-        duration_ratio = float(getattr(settings, "beta_wave_max_duration_regression_ratio", 1.5))
-        if base_duration > 0 and current["p95_duration_ms"] > base_duration * duration_ratio:
+        if base_duration > 0 and current["p95_duration_ms"] > base_duration * float(getattr(settings, "beta_wave_max_duration_regression_ratio", 1.5)):
             regressions.append("p95_duration_regressed")
-
         base_efficiency = baseline["verified_request_success_per_cpu_minute"]
         current_efficiency = current["verified_request_success_per_cpu_minute"]
-        min_efficiency_ratio = float(getattr(settings, "beta_wave_min_cpu_efficiency_ratio", 0.70))
-        if base_efficiency > 0 and current_efficiency > 0 and current_efficiency < base_efficiency * min_efficiency_ratio:
+        if base_efficiency > 0 and current_efficiency > 0 and current_efficiency < base_efficiency * float(getattr(settings, "beta_wave_min_cpu_efficiency_ratio", 0.70)):
             regressions.append("verified_cpu_efficiency_regressed")
     else:
         warnings.append("observation_window_incomplete")
@@ -162,15 +158,21 @@ def create_wave(
     existing = active_wave(db, cohort)
     if existing is not None:
         raise ValueError(f"Wave {existing.wave_number} is still {existing.state}")
+    target = max(1, min(100, int(target_participants)))
+    if compute_budget_seconds <= 0:
+        from app.core.config import get_settings
+
+        compute_budget_seconds = target * int(get_settings().default_monthly_compute_seconds)
     number = int(db.scalar(select(func.max(BetaWave.wave_number)).where(BetaWave.cohort == cohort)) or 0) + 1
+    baseline_compact = signal_snapshot(baseline)
     wave = BetaWave(
         cohort=cohort,
         wave_number=number,
         state="planned",
-        target_participants=max(1, min(100, int(target_participants))),
-        compute_budget_seconds=max(0, int(compute_budget_seconds)),
-        baseline_metrics=signal_snapshot(baseline),
-        latest_metrics=signal_snapshot(baseline),
+        target_participants=target,
+        compute_budget_seconds=max(60, int(compute_budget_seconds)),
+        baseline_metrics=baseline_compact,
+        latest_metrics=baseline_compact,
         decision={"status": "planned", "admission_allowed": False, "reasons": ["wave_not_open"]},
         created_by=actor_id,
     )
@@ -187,8 +189,6 @@ def evaluate_wave(
     settings,
     persist: bool = False,
 ) -> dict[str, Any]:
-    reasons: list[str] = []
-    warnings: list[str] = []
     comparison = compare_wave_signals(current, wave.baseline_metrics if wave else current, settings)
     compute_spent_seconds = max(
         0,
@@ -197,6 +197,8 @@ def evaluate_wave(
     comparison["compute_spent_seconds"] = compute_spent_seconds
     comparison["compute_budget_seconds"] = int(wave.compute_budget_seconds or 0) if wave is not None else 0
 
+    reasons: list[str] = []
+    warnings = list(comparison["warnings"])
     if wave is None:
         reasons.append("no_active_wave")
     else:
@@ -218,9 +220,8 @@ def evaluate_wave(
     if capacity_report.get("status") != "passed":
         reasons.append("target_node_capacity_not_current")
     reasons.extend(comparison["regressions"])
-    warnings.extend(comparison["warnings"])
-
     admission_allowed = not reasons and wave is not None and wave.state == "open"
+
     if wave is not None and wave.state == "observing" and comparison["enough_observation"] and not comparison["regressions"] and capacity_report.get("status") == "passed":
         status = "ready_to_close"
     elif admission_allowed:
@@ -306,11 +307,7 @@ def active_plan(db: Session) -> CapacityPlan | None:
 def compare_plans(candidate: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
     previous = dict(previous or {})
     keys = sorted(set(candidate) | set(previous))
-    changes = {
-        key: {"from": previous.get(key), "to": candidate.get(key)}
-        for key in keys
-        if previous.get(key) != candidate.get(key)
-    }
+    changes = {key: {"from": previous.get(key), "to": candidate.get(key)} for key in keys if previous.get(key) != candidate.get(key)}
     return {"changed": bool(changes), "changes": changes}
 
 
@@ -361,7 +358,6 @@ def approve_plan(plan: CapacityPlan, *, actor_id: str | None) -> None:
 
 
 def _env_text(plan: CapacityPlan) -> str:
-    values = dict(plan.plan or {})
     mapping = {
         "max_context_tokens": "X1_MAX_CONTEXT_TOKENS",
         "deep_context_tokens": "X1_DEEP_CONTEXT_TOKENS",
@@ -370,10 +366,9 @@ def _env_text(plan: CapacityPlan) -> str:
         "inference_queue_timeout_seconds": "X1_INFERENCE_QUEUE_TIMEOUT_SECONDS",
         "default_monthly_compute_seconds": "X1_DEFAULT_MONTHLY_COMPUTE_SECONDS",
     }
+    values = dict(plan.plan or {})
     lines = [f"# X1 capacity plan v{plan.version}; contains no secrets."]
-    for key, env_name in mapping.items():
-        if key in values:
-            lines.append(f"{env_name}={values[key]}")
+    lines.extend(f"{env_name}={values[key]}" for key, env_name in mapping.items() if key in values)
     return "\n".join(lines) + "\n"
 
 
@@ -393,7 +388,6 @@ def apply_live_safe(app, plan: CapacityPlan) -> dict[str, Any]:
     boot_deep = int(getattr(app.state, "capacity_boot_deep_context_tokens", settings.deep_context_tokens))
     boot_context = int(getattr(app.state, "capacity_boot_max_context_tokens", settings.max_context_tokens))
     boot_concurrency = int(getattr(app.state, "capacity_boot_max_concurrent_generations", settings.max_concurrent_generations))
-
     desired_deep = int(desired.get("deep_context_tokens", settings.deep_context_tokens))
     desired_context = int(desired.get("max_context_tokens", settings.max_context_tokens))
     desired_concurrency = int(desired.get("max_concurrent_generations", settings.max_concurrent_generations))
@@ -414,12 +408,8 @@ def apply_live_safe(app, plan: CapacityPlan) -> dict[str, Any]:
     settings.max_context_tokens = desired_context
     settings.deep_context_tokens = desired_deep
     settings.max_queue_size = int(desired.get("max_queue_size", settings.max_queue_size))
-    settings.inference_queue_timeout_seconds = float(
-        desired.get("inference_queue_timeout_seconds", settings.inference_queue_timeout_seconds)
-    )
-    settings.default_monthly_compute_seconds = int(
-        desired.get("default_monthly_compute_seconds", settings.default_monthly_compute_seconds)
-    )
+    settings.inference_queue_timeout_seconds = float(desired.get("inference_queue_timeout_seconds", settings.inference_queue_timeout_seconds))
+    settings.default_monthly_compute_seconds = int(desired.get("default_monthly_compute_seconds", settings.default_monthly_compute_seconds))
     app.state.context.max_chars = max(128, desired_deep * 6)
     app.state.governor.max_queue = settings.max_queue_size
     app.state.governor.wait_timeout_seconds = settings.inference_queue_timeout_seconds
@@ -432,11 +422,16 @@ def activate_plan(db: Session, app, plan: CapacityPlan) -> dict[str, Any]:
     if plan.status != "approved":
         raise ValueError("Capacity plan must be approved before activation")
     current = active_plan(db)
+    result = apply_live_safe(app, plan)
+    if not result["runtime_applied"]:
+        # Keep the previous known-good plan active until the operator applies the
+        # generated env artifact and restarts. A pending restart must never make
+        # database state claim that un-applied limits are active.
+        return result
     if current is not None and current.id != plan.id:
         current.status = "superseded"
         if not plan.previous_plan_id:
             plan.previous_plan_id = current.id
-    result = apply_live_safe(app, plan)
     plan.status = "active"
     plan.activated_at = utcnow()
     return result
@@ -474,7 +469,8 @@ def rollback_plan(db: Session, app, *, actor_id: str | None, target_plan_id: str
     )
     db.add(rollback)
     db.flush()
-    current.status = "rolled_back"
-    current.rolled_back_at = utcnow()
     result = activate_plan(db, app, rollback)
+    if result["runtime_applied"]:
+        current.status = "rolled_back"
+        current.rolled_back_at = utcnow()
     return rollback, result
