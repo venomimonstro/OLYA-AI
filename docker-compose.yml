@@ -78,7 +78,7 @@ services:
       - --port
       - "8080"
       - -c
-      - "8192"
+      - "${X1_DEEP_CONTEXT_TOKENS:-16384}"
       - -np
       - "1"
       - --cache-type-k
