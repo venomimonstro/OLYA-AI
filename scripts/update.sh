@@ -36,23 +36,29 @@ fi
 
 git merge-base --is-ancestor "$OLD_HEAD" "$TARGET_HEAD" || fail "origin/main is not a fast-forward from the installed revision"
 
-# Backup/restore format is a pair. Always cache restore.sh from the target
-# revision before touching the working tree; this guarantees that a v3 backup
-# created by the target-compatible helper is never handed to an old v1/v2
-# restore implementation during rollback.
+# Backup, restore-drill, restore and legacy migration are a single format-aware
+# toolset. Cache every helper from target HEAD before modifying the working tree,
+# so even a very old installation can safely create and validate today's backup.
+BACKUP_COPY="$(mktemp -t x1-backup.XXXXXX.sh)"
+DRILL_COPY="$(mktemp -t x1-restore-drill.XXXXXX.sh)"
 RESTORE_COPY="$(mktemp -t x1-restore.XXXXXX.sh)"
 MIGRATE_COPY="$(mktemp -t x1-migrate-legacy.XXXXXX.sh)"
+git show origin/main:scripts/backup.sh > "$BACKUP_COPY"
+git show origin/main:scripts/restore_drill.sh > "$DRILL_COPY"
 git show origin/main:scripts/restore.sh > "$RESTORE_COPY"
 git show origin/main:scripts/migrate_legacy_data.sh > "$MIGRATE_COPY"
-chmod 700 "$RESTORE_COPY" "$MIGRATE_COPY"
+chmod 700 "$BACKUP_COPY" "$DRILL_COPY" "$RESTORE_COPY" "$MIGRATE_COPY"
 BACKUP_PATH=""
+
+cleanup_helpers() {
+  rm -f "$BACKUP_COPY" "$DRILL_COPY" "$RESTORE_COPY" "$MIGRATE_COPY"
+}
 
 rollback() {
   local reason="$1"
   trap - ERR INT TERM
   set +e
   printf '[X1 update] ROLLBACK: %s\n' "$reason" >&2
-  rm -f "$ROOT/scripts/.x1-target-backup."*.sh >/dev/null 2>&1 || true
   docker compose stop app image-worker sandbox-worker >/dev/null 2>&1 || true
   git reset --hard "$OLD_HEAD" >/dev/null 2>&1 || true
   if [ -n "$BACKUP_PATH" ] && [ -d "$BACKUP_PATH" ]; then
@@ -63,7 +69,7 @@ rollback() {
   if printf '%s\n' "$RUNNING_SERVICES" | grep -qx image-worker; then
     docker compose --profile images up -d image-worker >/dev/null 2>&1 || true
   fi
-  rm -f "$RESTORE_COPY" "$MIGRATE_COPY"
+  cleanup_helpers
   printf '[X1 update] Previous revision restored: %s\n' "$OLD_HEAD" >&2
   exit 2
 }
@@ -80,19 +86,11 @@ docker compose stop app image-worker sandbox-worker >/dev/null 2>&1 || true
 info "Checking for legacy named-volume user data"
 X1_INSTALL_DIR="$ROOT" bash "$MIGRATE_COPY"
 
-info "Creating consistent pre-update backup"
-if grep -q 'docker compose exec -T app python' scripts/backup.sh 2>/dev/null; then
-  BACKUP_HELPER="$ROOT/scripts/.x1-target-backup.$$.sh"
-  git show origin/main:scripts/backup.sh > "$BACKUP_HELPER"
-  chmod 700 "$BACKUP_HELPER"
-  BACKUP_PATH="$(X1_HOST_DATA_ROOT="${X1_HOST_DATA_ROOT:-$ROOT/data}" bash "$BACKUP_HELPER")"
-  rm -f "$BACKUP_HELPER"
-else
-  BACKUP_PATH="$(bash scripts/backup.sh)"
-fi
+info "Creating consistent pre-update backup with target-version helper"
+BACKUP_PATH="$(X1_INSTALL_DIR="$ROOT" X1_HOST_DATA_ROOT="${X1_HOST_DATA_ROOT:-$ROOT/data}" bash "$BACKUP_COPY")"
 [ -d "$BACKUP_PATH" ] || rollback "backup path was not created"
-info "Validating pre-update backup by non-destructive restore drill"
-bash scripts/restore_drill.sh "$BACKUP_PATH" >/dev/null
+info "Validating pre-update backup by target-version non-destructive restore drill"
+X1_INSTALL_DIR="$ROOT" bash "$DRILL_COPY" "$BACKUP_PATH" >/dev/null
 
 info "Fast-forwarding code to $TARGET_HEAD"
 git merge --ff-only origin/main
@@ -105,6 +103,6 @@ if printf '%s\n' "$RUNNING_SERVICES" | grep -qx image-worker; then
 fi
 
 trap - ERR INT TERM
-rm -f "$RESTORE_COPY" "$MIGRATE_COPY"
+cleanup_helpers
 info "Update committed successfully: $OLD_HEAD -> $(git rev-parse HEAD)"
 info "Rollback snapshot retained at: $BACKUP_PATH"
