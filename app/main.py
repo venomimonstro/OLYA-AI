@@ -52,9 +52,6 @@ async def lifespan(app: FastAPI):
     if settings.database_auto_create_schema:
         init_db()
     app.state.settings = settings
-    # Sprint 37 keeps the immutable boot ceiling separate from live-safe
-    # reductions. A capacity plan may lower limits immediately, but an increase
-    # above the llama/governor boot envelope requires an explicit restart.
     app.state.capacity_boot_max_context_tokens = int(settings.max_context_tokens)
     app.state.capacity_boot_deep_context_tokens = int(settings.deep_context_tokens)
     app.state.capacity_boot_max_concurrent_generations = int(settings.max_concurrent_generations)
@@ -84,20 +81,25 @@ async def lifespan(app: FastAPI):
     app.state.discovery = ProviderPoolDiscovery(providers) if providers else DisabledDiscovery()
 
     beta_scheduler_task = None
+    public_launch_task = None
     is_production = settings.env.lower() in {"production", "prod", "stable"}
     if is_production and settings.beta_operations_scheduler_enabled:
         from app.services.beta_scheduler import beta_operations_loop
-
         beta_scheduler_task = asyncio.create_task(beta_operations_loop(settings), name="x1-beta-operations")
         app.state.beta_operations_task = beta_scheduler_task
+    if is_production and settings.public_launch_watchdog_enabled:
+        from app.services.public_launch_scheduler import public_launch_watchdog_loop
+        public_launch_task = asyncio.create_task(public_launch_watchdog_loop(settings), name="x1-public-launch-watchdog")
+        app.state.public_launch_watchdog_task = public_launch_task
 
     try:
         yield
     finally:
-        if beta_scheduler_task is not None:
-            beta_scheduler_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await beta_scheduler_task
+        for task in (public_launch_task, beta_scheduler_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         await app.state.llama.close()
 
 
@@ -105,7 +107,7 @@ _boot_settings = get_settings()
 _is_production = _boot_settings.env.lower() in {"production", "prod", "stable"}
 app = FastAPI(
     title="X1",
-    version="0.37.0",
+    version="0.38.0",
     description="Local-first CPU/RAM AI platform",
     lifespan=lifespan,
     docs_url=None if _is_production else "/docs",
@@ -193,6 +195,7 @@ for module in (
     "app.api.routes.api_client",
     "app.api.routes.beta",
     "app.api.routes.beta_ops",
+    "app.api.routes.launch",
     "app.beta_admin_ui",
 ):
     _include_optional_router(module)
