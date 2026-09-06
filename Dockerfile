@@ -28,4 +28,8 @@ COPY --chown=x1:x1 tests ./tests
 
 USER x1
 
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+# One worker is intentional: in-memory inference admission/governor state must be
+# authoritative on a single low-cost node. Uvicorn bounds HTTP tasks before the
+# much more expensive inference queue, so a connection storm cannot allocate an
+# unbounded number of Python request tasks.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --limit-concurrency ${X1_HTTP_LIMIT_CONCURRENCY:-128} --backlog ${X1_HTTP_BACKLOG:-2048} --timeout-keep-alive ${X1_HTTP_KEEPALIVE_SECONDS:-5}"]
