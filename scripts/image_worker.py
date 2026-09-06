@@ -122,17 +122,26 @@ def run(*, persistent: bool = False) -> None:
                 db.commit()
             except Exception as exc:  # durable worker boundary
                 db.rollback()
+                # Lease loss is not a worker crash: another worker may already own
+                # and be processing this durable job. Never mutate/requeue it using
+                # a stale token; simply abandon this result and continue polling.
+                if isinstance(exc, JobLeaseLostError) or heartbeat_lost.is_set():
+                    continue
                 with SessionLocal() as failure_db:
                     leased = failure_db.get(type(job), job.id)
                     if leased and leased.lease_token == token:
                         generation_id = (leased.payload or {}).get("generation_id")
-                        fail_job(
-                            failure_db,
-                            job.id,
-                            worker_id=worker_id,
-                            lease_token=token,
-                            error_message=str(exc),
-                        )
+                        try:
+                            fail_job(
+                                failure_db,
+                                job.id,
+                                worker_id=worker_id,
+                                lease_token=token,
+                                error_message=str(exc),
+                            )
+                        except JobLeaseLostError:
+                            failure_db.rollback()
+                            continue
                         if leased.status == "failed" and generation_id:
                             failed_generation = failure_db.get(ImageGeneration, generation_id)
                             if failed_generation is not None:
