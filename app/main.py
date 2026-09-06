@@ -40,10 +40,11 @@ from app.core.config import get_settings
 from app.db import init_db
 from app.inference.client import LlamaClient
 from app.services.context import ContextCompiler
+from app.services.discovery import BraveSearchDiscovery, DisabledDiscovery, ProviderPoolDiscovery
+from app.services.http_limits import RequestBodyLimitMiddleware
 from app.services.resource_governor import ResourceGovernor
 from app.services.user_resource_governor import UserResourceGovernor
 from app.services.research import ResearchFetcher
-from app.services.discovery import BraveSearchDiscovery, DisabledDiscovery, ProviderPoolDiscovery
 from app.services.searxng_discovery import SearxngDiscovery
 
 
@@ -88,6 +89,10 @@ async def lifespan(app: FastAPI):
 
 _boot_settings=get_settings(); _is_production=_boot_settings.env.lower() in {"production","prod","stable"}
 app=FastAPI(title="X1",version="0.39.0",description="Local-first CPU/RAM AI platform",lifespan=lifespan,docs_url=None if _is_production else "/docs",redoc_url=None if _is_production else "/redoc",openapi_url=None if _is_production else "/openapi.json")
+# Covers both Content-Length and chunked/HTTP2 bodies before request parsing.
+# 32 MiB remains above X1's 25 MiB workspace archive limit and 20 MiB file
+# limit, while stopping arbitrary JSON/body memory amplification.
+app.add_middleware(RequestBodyLimitMiddleware,max_bytes=32*1024*1024)
 app.add_middleware(GZipMiddleware,minimum_size=1024,compresslevel=3)
 
 
