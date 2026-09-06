@@ -1,4 +1,5 @@
 from collections.abc import Generator
+import os
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -10,8 +11,33 @@ class Base(DeclarativeBase):
     pass
 
 
+def _env_int(name: str, default: int, *, minimum: int) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return max(minimum, int(default))
+
+
 def _connect_args(database_url: str) -> dict:
-    return {"check_same_thread": False} if database_url.startswith("sqlite") else {}
+    if database_url.startswith("sqlite"):
+        return {"check_same_thread": False}
+    if database_url.startswith(("postgresql", "postgres")):
+        # Bound every layer of database waiting. Pool timeouts alone do not stop
+        # a request that already owns a connection from waiting forever on a row
+        # lock, pathological SQL or a half-open network connection.
+        connect_timeout = _env_int("X1_DATABASE_CONNECT_TIMEOUT_SECONDS", 5, minimum=1)
+        statement_timeout = _env_int("X1_DATABASE_STATEMENT_TIMEOUT_MS", 30_000, minimum=1_000)
+        lock_timeout = _env_int("X1_DATABASE_LOCK_TIMEOUT_MS", 10_000, minimum=250)
+        idle_tx_timeout = _env_int("X1_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS", 60_000, minimum=1_000)
+        return {
+            "connect_timeout": connect_timeout,
+            "options": (
+                f"-c statement_timeout={statement_timeout} "
+                f"-c lock_timeout={lock_timeout} "
+                f"-c idle_in_transaction_session_timeout={idle_tx_timeout}"
+            ),
+        }
+    return {}
 
 
 def build_engine(database_url: str | None = None):
