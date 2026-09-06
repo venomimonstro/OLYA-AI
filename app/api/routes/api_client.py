@@ -9,13 +9,14 @@ from sqlalchemy.orm import Session
 
 from app.api.routes.chat import chat as chat_handler
 from app.db import get_db
-from app.models import ApiKey, ApiRequestTelemetry, Conversation, PersistentApiContext, User
+from app.models import ApiKey, ApiRequestTelemetry, BetaParticipant, Conversation, PersistentApiContext, User
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.schemas.commerce import ApiChatRequest, ApiContextCreate, ApiContextRead
 from app.services.access import require_project_role
 from app.services.api_access import require_api_scope
 from app.services.commerce import ensure_organization_budget, price_resource_ms, record_telemetry
 from app.services.measured_plans import ensure_channel_budget, reset_channel_override, set_channel_override
+from app.services.progressive_launch import active_rollout, rollout_allows_user
 
 router = APIRouter(prefix="/v1/api", tags=["api-client"])
 
@@ -25,6 +26,15 @@ def _context_access(db: Session, key: ApiKey, user: User, context_id: str) -> Pe
     if row is None or row.owner_id != user.id or row.organization_id != key.organization_id:
         raise HTTPException(status_code=404, detail="API context not found")
     return row
+
+
+def _require_public_api_exposure(request: Request, db: Session, user: User) -> None:
+    if not bool(getattr(request.app.state.settings, "public_launch_enforce_exposure", False)) or bool(getattr(user, "is_admin", False)):
+        return
+    beta = db.scalar(select(BetaParticipant.id).where(BetaParticipant.user_id == user.id, BetaParticipant.state != "removed").limit(1))
+    if beta or rollout_allows_user(active_rollout(db), user.id):
+        return
+    raise HTTPException(status_code=403, detail={"code": "public_rollout_not_exposed", "message": "API access is not enabled for this account at the current rollout stage."})
 
 
 @router.post("/contexts", response_model=ApiContextRead, status_code=status.HTTP_201_CREATED)
@@ -61,6 +71,7 @@ def get_context(context_id: str, principal=Depends(require_api_scope("contexts:r
 @router.post("/chat", response_model=ChatResponse)
 async def api_chat(payload: ApiChatRequest, request: Request, principal=Depends(require_api_scope("chat")), db: Session = Depends(get_db)):
     key, user = principal
+    _require_public_api_exposure(request, db, user)
     context = None
     if payload.context_id:
         context = _context_access(db, key, user, payload.context_id)
