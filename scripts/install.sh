@@ -75,8 +75,6 @@ threads=$cores; (( threads > 2 )) && threads=$((threads - 1)); (( threads > 24 )
 grep -qE 'avx2|avx512' /proc/cpuinfo || info "WARNING: AVX2/AVX512 not detected; local inference can be very slow"
 
 mkdir -p data models backups
-# Preserve upgrades from the pre-Sprint-39 named x1_data volume before the new
-# host bind becomes authoritative for both app and sandbox worker.
 bash scripts/migrate_legacy_data.sh
 chown -R 10001:10001 data backups
 chmod 750 data backups models
@@ -120,6 +118,9 @@ setv('X1_LLAMA_MODEL_NAME','Qwen3-30B-A3B-Q4_K_M'); setv('X1_LLAMA_BASE_URL','ht
 if values.get('X1_SEARCH_PROVIDER','') in {'','disabled'}: setv('X1_SEARCH_PROVIDER','searxng')
 if values.get('X1_SEARCH_PROVIDERS','') in {'','disabled'}: setv('X1_SEARCH_PROVIDERS','searxng')
 setv('X1_SEARXNG_BASE_URL','http://searxng:8080')
+# Production AI access is always protected by the measured rollout gate. A full
+# launch is represented by a 100% rollout, not by disabling the guard itself.
+setv('X1_PUBLIC_LAUNCH_ENFORCE_EXPOSURE','true')
 if new_env:
     setv('X1_MAX_CONTEXT_TOKENS',min(8192,safe_context)); setv('X1_DEEP_CONTEXT_TOKENS',safe_context); setv('X1_LLAMA_THREADS',threads); setv('X1_LLAMA_THREADS_BATCH',threads)
 else:
@@ -208,4 +209,4 @@ if [ "$WITH_INFERENCE" -eq 0 ] && [ "$doctor_status" -eq 2 ]; then fail "Control
 info "Installation complete"
 info "X1: http://127.0.0.1:${X1_PORT:-8000} (bind is local-only; use a TLS reverse proxy for public access)"
 info "Admin bootstrap token is stored only in $ROOT/.env (mode 600)."
-info "Public traffic remains disabled by rollout policy until you deliberately enable it."
+info "Public registration/login are available; expensive AI access remains controlled by rollout policy until a user is eligible."
