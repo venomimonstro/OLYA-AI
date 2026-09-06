@@ -56,11 +56,13 @@ def test_stale_research_cannot_verify_current_fact():
         [source.id],
         "Какая текущая цена Bitcoin сейчас?",
         freshness_max_age_seconds=3600,
+        freshness_min_independent_hosts=1,
     )
     assert FRESHNESS_SENTINEL in verified
     assert source.final_url not in verified
-    assert any(message.role == "system" and "too old" in message.content for message in messages)
-    assert any("stale_for_current_claims" in message.content for message in messages)
+    supplied = "\n".join(message.content for message in messages)
+    assert "STALE" in supplied
+    assert "outside the current-fact freshness window" in supplied
 
 
 def test_fresh_relevant_research_can_verify_current_fact():
@@ -71,10 +73,11 @@ def test_fresh_relevant_research_can_verify_current_fact():
         [source.id],
         "Какая текущая цена Bitcoin сейчас?",
         freshness_max_age_seconds=3600,
+        freshness_min_independent_hosts=1,
     )
     assert FRESHNESS_SENTINEL in verified
     assert source.final_url in verified
-    assert any("fresh_for_current_claims" in message.content for message in messages)
+    assert any("ELIGIBLE" in message.content for message in messages)
 
 
 def test_irrelevant_source_is_not_promoted_to_verified_evidence():
@@ -85,6 +88,7 @@ def test_irrelevant_source_is_not_promoted_to_verified_evidence():
         [source.id],
         "Какая текущая цена Bitcoin сейчас?",
         freshness_max_age_seconds=3600,
+        freshness_min_independent_hosts=1,
     )
     assert source.final_url not in verified
 
@@ -108,6 +112,7 @@ def test_only_sources_actually_selected_into_prompt_are_verified():
         [primary.id, secondary.id],
         "Bitcoin current price market data сейчас",
         freshness_max_age_seconds=3600,
+        freshness_min_independent_hosts=1,
     )
     assert primary.final_url in verified
     assert secondary.final_url not in verified
