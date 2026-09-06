@@ -22,6 +22,8 @@ def init_db()->None:
     import app.models_sprint27  # noqa:F401
     import app.models_sprint29  # noqa:F401
     import app.models_sprint31  # noqa:F401
+    import app.models_sprint37  # noqa:F401
+    import app.models_sprint38  # noqa:F401
     try: import app.models_sprint30  # noqa:F401
     except ModuleNotFoundError: pass
     Base.metadata.create_all(bind=engine)
