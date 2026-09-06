@@ -37,19 +37,24 @@ trap cleanup EXIT
   sha256sum -c SHA256SUMS
 ) >/dev/null
 
-# Validate archive paths, reject links/devices and actually extract into an
-# isolated temporary directory. This catches corrupt archives and traversal
-# payloads without ever writing into the production x1_data volume.
-python3 - "$BACKUP/files.tar" "$TMP_ROOT/files" <<'PY'
+# Validate archive paths, reject links/devices, preflight actual free disk and
+# extract into an isolated temporary directory. The drill must never fill the
+# host just to prove that a large but valid production backup is restorable.
+python3 - "$BACKUP/files.tar" "$TMP_ROOT/files" "${X1_RESTORE_MAX_DATA_BYTES:-0}" <<'PY'
 from __future__ import annotations
 import json
+import shutil
 import sys
 import tarfile
 from pathlib import Path, PurePosixPath
 
 archive_path = Path(sys.argv[1])
 destination = Path(sys.argv[2])
+operator_limit = max(0, int(sys.argv[3] or 0))
 destination.mkdir(parents=True, exist_ok=True)
+free_bytes = shutil.disk_usage(destination).free
+disk_budget = int(free_bytes * 0.90)
+max_bytes = min(disk_budget, operator_limit) if operator_limit else disk_budget
 file_count = 0
 total_bytes = 0
 with tarfile.open(archive_path, "r:*") as archive:
@@ -63,9 +68,13 @@ with tarfile.open(archive_path, "r:*") as archive:
             raise SystemExit(f"unsafe archive member: {member.name}")
         if member.isfile():
             file_count += 1
-            total_bytes += int(member.size)
+            total_bytes += max(0, int(member.size))
+            if total_bytes > max_bytes:
+                raise SystemExit(
+                    f"backup application data ({total_bytes} bytes) exceeds safe drill capacity ({max_bytes} bytes)"
+                )
     archive.extractall(destination, filter="data")
-print(json.dumps({"files": file_count, "bytes": total_bytes}))
+print(json.dumps({"files": file_count, "bytes": total_bytes, "capacity_bytes": max_bytes}))
 PY
 
 # Real PostgreSQL restore into a disposable database on the same PostgreSQL
