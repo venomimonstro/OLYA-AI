@@ -12,11 +12,14 @@ from app.models import (
     BetaSnapshot,
     CapacityPlan,
     CircuitBreakerEvent,
+    ImageGeneration,
     MeasuredPlanCatalog,
+    ProjectSandboxRun,
     PublicRollout,
     ResourceExpenseEvent,
     SystemCheckpoint,
     UsageEvent,
+    UserQuota,
 )
 from app.services.beta_trends import build_trend
 from app.services.capacity import read_capacity_report
@@ -27,6 +30,17 @@ PLAN_ORDER = ("free", "x1", "pro", "max", "business")
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _aware(value):
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _elapsed_ms(start, end) -> int:
+    start, end = _aware(start), _aware(end)
+    return 0 if not start or not end or end <= start else int((end - start).total_seconds() * 1000)
 
 
 def active_rollout(db: Session) -> PublicRollout | None:
@@ -224,6 +238,34 @@ def activate_catalog(db: Session, row: MeasuredPlanCatalog) -> None:
     row.activated_at = utcnow()
 
 
+def rollback_catalog(db: Session, current: MeasuredPlanCatalog, *, actor_id: str | None) -> MeasuredPlanCatalog:
+    if current.status != "active":
+        raise ValueError("Only the active measured catalog can be rolled back")
+    if not current.previous_catalog_id:
+        raise ValueError("Active measured catalog has no previous catalog")
+    target = db.get(MeasuredPlanCatalog, current.previous_catalog_id)
+    if target is None or target.status not in {"superseded", "active"}:
+        raise ValueError("Previous measured catalog is unavailable")
+    version = int(db.scalar(select(func.max(MeasuredPlanCatalog.version))) or 0) + 1
+    current.status = "superseded"
+    row = MeasuredPlanCatalog(
+        version=version,
+        status="active",
+        source="rollback",
+        catalog=dict(target.catalog or {}),
+        economics=dict(target.economics or {}),
+        guardrails={"blockers": [], "rollback_of_version": target.version},
+        previous_catalog_id=current.id,
+        created_by=actor_id,
+        approved_by=actor_id,
+        approved_at=utcnow(),
+        activated_at=utcnow(),
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
 def open_breakers(db: Session, scope: str = "public-launch") -> list[CircuitBreakerEvent]:
     return list(db.scalars(select(CircuitBreakerEvent).where(CircuitBreakerEvent.scope == scope, CircuitBreakerEvent.status == "open")).all())
 
@@ -255,6 +297,32 @@ def _latest_trend(db: Session, settings, cohort: str = "closed-beta-1") -> dict[
     window = rows[0].window_days
     rows = [row for row in rows if row.window_days == window]
     return build_trend(rows, settings) if len(rows) >= 2 else {"status": "insufficient_data", "latest": None}
+
+
+def _global_resource_spend(db: Session, settings, since: datetime) -> dict[str, Any]:
+    from app.services.commerce import price_resource_ms
+
+    cpu_ms = int(db.scalar(select(func.coalesce(func.sum(UsageEvent.inference_ms), 0)).where(UsageEvent.created_at >= since)) or 0)
+    gpu_ms = int(db.scalar(select(func.coalesce(func.sum(ResourceExpenseEvent.quantity_ms), 0)).where(ResourceExpenseEvent.created_at >= since, ResourceExpenseEvent.resource_kind == "gpu")) or 0)
+    images = list(db.scalars(select(ImageGeneration).where(ImageGeneration.created_at >= since, ImageGeneration.started_at.is_not(None), ImageGeneration.finished_at.is_not(None))).all())
+    image_ms = sum(_elapsed_ms(row.started_at, row.finished_at) for row in images)
+    sandboxes = list(db.scalars(select(ProjectSandboxRun).where(ProjectSandboxRun.created_at >= since, ProjectSandboxRun.started_at.is_not(None), ProjectSandboxRun.completed_at.is_not(None))).all())
+    sandbox_ms = sum(_elapsed_ms(row.started_at, row.completed_at) for row in sandboxes)
+    usage = {"cpu": cpu_ms, "gpu": gpu_ms, "image_worker": image_ms, "sandbox": sandbox_ms}
+    costs = {kind: price_resource_ms(settings, kind, quantity_ms) for kind, quantity_ms in usage.items()}
+    return {"usage_ms": usage, "cost_microunits": costs, "total_cost_microunits": sum(costs.values())}
+
+
+def _derived_global_budget(db: Session, catalog: MeasuredPlanCatalog | None) -> int:
+    if catalog is None or not catalog.catalog:
+        return 0
+    rows = db.execute(select(UserQuota.plan, func.count()).group_by(UserQuota.plan)).all()
+    budget = 0
+    for plan_name, count in rows:
+        policy = (catalog.catalog or {}).get(plan_name)
+        if isinstance(policy, dict):
+            budget += int(count or 0) * max(0, int(policy.get("resource_budget_microunits") or 0))
+    return budget
 
 
 def evaluate_public_launch(db: Session, settings, *, persist: bool = True) -> dict[str, Any]:
@@ -294,12 +362,17 @@ def evaluate_public_launch(db: Session, settings, *, persist: bool = True) -> di
             trip_breaker(db, kind="failure_rate", reason="24h request failure rate exceeded public-launch guardrail", details={"requests": request_count, "failures": failed_count, "failure_rate": round(failure_rate, 6)})
 
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    spend = int(db.scalar(select(func.coalesce(func.sum(ResourceExpenseEvent.cost_microunits), 0)).where(ResourceExpenseEvent.created_at >= month_start)) or 0)
-    budget = max(0, int(getattr(settings, "public_launch_global_budget_microunits", 0)))
+    resource_spend = _global_resource_spend(db, settings, month_start)
+    explicit_budget = max(0, int(getattr(settings, "public_launch_global_budget_microunits", 0)))
+    budget = explicit_budget or _derived_global_budget(db, catalog)
+    budget_source = "operator" if explicit_budget else "active_measured_catalog"
+    spend = int(resource_spend["total_cost_microunits"])
     if budget > 0 and spend >= budget:
         blockers.append("global_resource_budget_breaker")
         if persist:
-            trip_breaker(db, kind="resource_budget", reason="Global measured resource budget exhausted", details={"spent_microunits": spend, "budget_microunits": budget})
+            trip_breaker(db, kind="resource_budget", reason="Global measured resource budget exhausted", details={"spent_microunits": spend, "budget_microunits": budget, "budget_source": budget_source, **resource_spend})
+    elif budget <= 0:
+        warnings.append("global_resource_budget_not_derivable")
 
     breaker_rows = open_breakers(db)
     if breaker_rows:
@@ -314,16 +387,21 @@ def evaluate_public_launch(db: Session, settings, *, persist: bool = True) -> di
         "active_measured_catalog_id": catalog.id if catalog else None,
         "trend": trend,
         "request_24h": {"count": request_count, "failed": failed_count, "failure_rate": round(failure_rate, 6)},
-        "resource_month": {"spent_microunits": spend, "budget_microunits": budget},
+        "resource_month": {**resource_spend, "budget_microunits": budget, "budget_source": budget_source},
         "open_breakers": [{"id": row.id, "kind": row.kind, "reason": row.reason, "opened_at": row.opened_at} for row in breaker_rows],
         "evaluated_at": now.isoformat(),
     }
 
 
 def create_rollout(db: Session, *, baseline: dict[str, Any], actor_id: str | None) -> PublicRollout:
-    current = active_rollout(db)
-    if current is not None:
-        raise ValueError("An active public rollout already exists")
+    existing = db.scalar(
+        select(PublicRollout)
+        .where(PublicRollout.state.in_(["planned", "active", "paused"]))
+        .order_by(PublicRollout.version.desc())
+        .limit(1)
+    )
+    if existing is not None:
+        raise ValueError(f"Public rollout v{existing.version} is still {existing.state}")
     version = int(db.scalar(select(func.max(PublicRollout.version))) or 0) + 1
     row = PublicRollout(version=version, state="planned", exposure_percent=0, baseline_metrics=baseline, latest_metrics=baseline, guardrails={"stages": list(ROLLOUT_STAGES)}, decision={"status": "planned"}, created_by=actor_id)
     db.add(row)
