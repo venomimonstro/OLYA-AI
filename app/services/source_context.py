@@ -11,6 +11,7 @@ from app.services.quality import needs_fresh_grounding
 from app.services.research import lexical_excerpts
 
 FRESHNESS_SENTINEL = "x1://freshness-required"
+DEFAULT_FRESHNESS_MAX_AGE_SECONDS = 15 * 60
 
 
 def _aware(value: datetime) -> datetime:
@@ -29,7 +30,7 @@ class SourceContextBuilder:
         source_ids: list[str],
         query: str,
         current_project_id: str | None = None,
-        freshness_max_age_seconds: int = 21_600,
+        freshness_max_age_seconds: int = DEFAULT_FRESHNESS_MAX_AGE_SECONDS,
     ) -> tuple[list[ChatMessage], set[str]]:
         if not query.strip():
             return [], set()
