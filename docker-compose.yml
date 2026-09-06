@@ -12,11 +12,56 @@ services:
       test: ["CMD-SHELL", "pg_isready -U x1 -d x1"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 8
     deploy:
       resources:
         limits:
           memory: 1536M
+
+  searxng:
+    image: ghcr.io/searxng/searxng:2026.9.4-15b0c8ef3
+    restart: unless-stopped
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - x1_searx_cache:/var/cache/searxng
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:8080/search?q=x1&format=json' || exit 1"]
+      interval: 20s
+      timeout: 8s
+      retries: 8
+      start_period: 25s
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+
+  sandbox-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox-worker
+    restart: unless-stopped
+    environment:
+      X1_SANDBOX_WORKER_TOKEN: ${X1_PROJECT_SANDBOX_WORKER_TOKEN:?Set X1_PROJECT_SANDBOX_WORKER_TOKEN in .env}
+      X1_HOST_DATA_ROOT: ${X1_HOST_DATA_ROOT:?Set X1_HOST_DATA_ROOT in .env}
+      X1_SANDBOX_MIRROR_DATA_ROOT: /app/data
+      X1_SANDBOX_RUNTIME_IMAGE: ${X1_PROJECT_SANDBOX_IMAGE:-x1-sandbox:0.39}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/app/data
+    expose:
+      - "8090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 384M
 
   app:
     build:
@@ -28,24 +73,31 @@ services:
     environment:
       X1_DATABASE_AUTO_CREATE_SCHEMA: "false"
       X1_DATABASE_URL: postgresql+psycopg://x1:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/x1
+      X1_DATA_ROOT: /app/data
+      X1_SEARXNG_BASE_URL: http://searxng:8080
+      X1_PROJECT_SANDBOX_WORKER_URL: http://sandbox-worker:8090
     ports:
       - "${X1_BIND_ADDRESS:-127.0.0.1}:${X1_PORT:-8000}:8000"
     volumes:
-      - x1_data:/app/data
+      - ./data:/app/data
       - ./backups:/app/backups
     depends_on:
       db:
+        condition: service_healthy
+      searxng:
+        condition: service_healthy
+      sandbox-worker:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
       interval: 15s
       timeout: 5s
-      retries: 5
-      start_period: 30s
+      retries: 8
+      start_period: 45s
     deploy:
       resources:
         limits:
-          memory: 1024M
+          memory: 1536M
 
   gate:
     profiles: ["gate"]
@@ -58,6 +110,7 @@ services:
       X1_ENV: test
       X1_DATABASE_AUTO_CREATE_SCHEMA: "true"
       X1_DATABASE_URL: sqlite+pysqlite:///./data/release_gate.db
+      X1_DATA_ROOT: /app/data
     command: ["python", "-m", "pytest", "-q"]
     deploy:
       resources:
@@ -75,9 +128,10 @@ services:
     environment:
       X1_DATABASE_AUTO_CREATE_SCHEMA: "false"
       X1_DATABASE_URL: postgresql+psycopg://x1:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/x1
+      X1_DATA_ROOT: /app/data
     command: ["python", "-m", "scripts.image_worker", "--persistent"]
     volumes:
-      - x1_data:/app/data
+      - ./data:/app/data
       - ./models:/models:ro
     depends_on:
       db:
@@ -95,22 +149,32 @@ services:
       - ./models:/models:ro
     command:
       - -m
-      - /models/Qwen3.6-35B-A3B-Q4_K_M.gguf
+      - /models/Qwen3-30B-A3B-Q4_K_M.gguf
       - --host
       - 0.0.0.0
       - --port
       - "8080"
       - -c
-      - "${X1_DEEP_CONTEXT_TOKENS:-16384}"
+      - "${X1_DEEP_CONTEXT_TOKENS:-8192}"
       - -np
       - "1"
+      - -t
+      - "${X1_LLAMA_THREADS:-8}"
+      - -tb
+      - "${X1_LLAMA_THREADS_BATCH:-8}"
       - --cache-type-k
       - q8_0
       - --cache-type-v
       - q8_0
     expose:
       - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 8s
+      retries: 15
+      start_period: 90s
 
 volumes:
   x1_pgdata:
-  x1_data:
+  x1_searx_cache:
