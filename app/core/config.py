@@ -114,7 +114,6 @@ class Settings(BaseSettings):
     release_gate_max_age_hours: float = 24.0
     restore_drill_max_age_hours: float = 168.0
 
-    # Sprint 36 target-node calibration / closed-beta guardrails.
     capacity_report_path: str = "./backups/capacity-latest.json"
     capacity_report_max_age_hours: float = 168.0
     capacity_compute_headroom_ratio: float = 1.25
@@ -127,7 +126,6 @@ class Settings(BaseSettings):
     beta_max_frustration_per_request: float = 0.05
     beta_max_p95_queue_ms: int = 5000
 
-    # Sprint 37 adaptive beta-wave controller.
     beta_wave_default_size: int = 10
     beta_wave_min_observation_requests: int = 50
     beta_wave_max_queue_regression_ratio: float = 1.50
@@ -144,6 +142,7 @@ class Settings(BaseSettings):
 
     # Sprint 38 progressive public launch / measured plan policy.
     public_launch_breaker_min_requests: int = 50
+    public_launch_canary_min_requests: int = 30
     public_launch_max_failure_rate: float = 0.03
     public_launch_max_requests_per_user_hour: int = 120
     public_launch_global_budget_microunits: int = 0
