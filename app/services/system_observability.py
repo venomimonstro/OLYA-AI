@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,10 @@ def _aware(value):
     if value is None:
         return None
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _production(settings) -> bool:
+    return str(getattr(settings, "env", "development")).lower() in {"production", "prod", "stable"}
 
 
 def _check(
@@ -56,7 +61,7 @@ def _migration_check(db: Session, settings) -> dict[str, Any]:
     try:
         tables = set(inspect(db.get_bind()).get_table_names())
         if "alembic_version" not in tables:
-            prod = str(getattr(settings, "env", "development")).lower() in {"production", "prod", "stable"}
+            prod = _production(settings)
             return _check(
                 "core.migrations",
                 "core",
@@ -94,7 +99,7 @@ def _migration_check(db: Session, settings) -> dict[str, Any]:
             details={"current": current},
         )
     except Exception as exc:
-        prod = str(getattr(settings, "env", "development")).lower() in {"production", "prod", "stable"}
+        prod = _production(settings)
         return _check(
             "core.migrations",
             "core",
@@ -108,12 +113,7 @@ def _migration_check(db: Session, settings) -> dict[str, Any]:
 
 
 def _route_contract(app) -> dict[str, Any]:
-    """Verify representative public surfaces using their real router prefixes.
-
-    This deliberately checks the registered FastAPI application rather than the
-    existence of source files. A module that fails to import through the optional
-    router loader is therefore detected before a Stable release.
-    """
+    """Verify representative public surfaces using their real router prefixes."""
     paths = {str(getattr(route, "path", "")) for route in app.routes}
     prefixes = {
         "auth": "/v1/auth",
@@ -174,7 +174,7 @@ def _verify_manifest(folder: Path) -> list[str]:
 
 def _backup_check(settings, *, deep: bool) -> dict[str, Any]:
     root = Path(getattr(settings, "backup_storage_path", "./backups")).expanduser().resolve()
-    prod = str(getattr(settings, "env", "development")).lower() in {"production", "prod", "stable"}
+    prod = _production(settings)
     if not root.exists():
         return _check(
             "ops.backup",
@@ -184,7 +184,11 @@ def _backup_check(settings, *, deep: bool) -> dict[str, Any]:
             details={"path": str(root)},
             action="Create and verify a backup." if prod else "",
         )
-    dirs = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.stat().st_mtime, reverse=True)
+    dirs = sorted(
+        (p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".") and ".partial." not in p.name),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     if not dirs:
         return _check(
             "ops.backup",
@@ -216,6 +220,114 @@ def _backup_check(settings, *, deep: bool) -> dict[str, Any]:
         "Latest backup is stale" if stale else "Latest backup is recent",
         details={"path": str(latest), "age_hours": round(age_hours, 2), "checksum_verified": deep},
         action="Create a fresh backup and verify restore." if stale else "",
+    )
+
+
+def _read_report(path: Path) -> tuple[dict[str, Any] | None, str]:
+    try:
+        data = json.loads(path.read_text("utf-8"))
+    except FileNotFoundError:
+        return None, "missing"
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
+        return None, "invalid"
+    return (data, "") if isinstance(data, dict) else (None, "invalid")
+
+
+def _report_age_hours(path: Path, payload: dict[str, Any]) -> float:
+    raw = str(payload.get("finished_at") or "").strip()
+    if raw:
+        try:
+            value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            value = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            return max(0.0, (_now() - value).total_seconds() / 3600.0)
+        except ValueError:
+            pass
+    return max(0.0, (_now().timestamp() - path.stat().st_mtime) / 3600.0)
+
+
+def _release_gate_check(settings, *, app_version: str) -> dict[str, Any]:
+    path = Path(getattr(settings, "release_gate_report_path", "./backups/release-gate-latest.json")).expanduser().resolve()
+    payload, error = _read_report(path)
+    prod = _production(settings)
+    if payload is None:
+        return _check(
+            "ops.release_gate",
+            "release",
+            DEGRADED if prod else STABLE,
+            "Production release gate has not been recorded" if error == "missing" else "Release gate report is invalid",
+            details={"path": str(path), "report_error": error},
+            action="Run python scripts/release_gate.py --runtime --live-inference on the target node." if prod else "",
+        )
+    age = _report_age_hours(path, payload)
+    max_age = float(getattr(settings, "release_gate_max_age_hours", 24.0))
+    reasons: list[str] = []
+    if payload.get("status") != "passed":
+        reasons.append("gate_failed")
+    if str(payload.get("version") or "") != str(app_version):
+        reasons.append("version_mismatch")
+    if prod and payload.get("mode") != "runtime":
+        reasons.append("runtime_gate_not_run")
+    if prod and not bool(payload.get("live_inference_requested")):
+        reasons.append("live_inference_not_run")
+    if age > max_age:
+        reasons.append("stale")
+    stable = not reasons
+    return _check(
+        "ops.release_gate",
+        "release",
+        STABLE if stable else DEGRADED,
+        "Production release gate passed" if stable else "Production release gate is not current",
+        details={
+            "path": str(path),
+            "age_hours": round(age, 2),
+            "max_age_hours": max_age,
+            "version": payload.get("version"),
+            "app_version": app_version,
+            "mode": payload.get("mode"),
+            "live_inference_requested": bool(payload.get("live_inference_requested")),
+            "failed_required_checks": payload.get("failed_required_checks") or [],
+            "reasons": reasons,
+        },
+        action="Re-run the full release gate on the deployed revision." if reasons else "",
+    )
+
+
+def _restore_drill_check(settings) -> dict[str, Any]:
+    path = Path(getattr(settings, "restore_drill_report_path", "./backups/restore-drill-latest.json")).expanduser().resolve()
+    payload, error = _read_report(path)
+    prod = _production(settings)
+    if payload is None:
+        return _check(
+            "ops.restore_drill",
+            "release",
+            DEGRADED if prod else STABLE,
+            "Restore drill has not been recorded" if error == "missing" else "Restore drill report is invalid",
+            details={"path": str(path), "report_error": error},
+            action="Run bash scripts/restore_drill.sh against a fresh backup." if prod else "",
+        )
+    age = _report_age_hours(path, payload)
+    max_age = float(getattr(settings, "restore_drill_max_age_hours", 168.0))
+    reasons: list[str] = []
+    if payload.get("status") != "passed":
+        reasons.append("drill_failed")
+    if age > max_age:
+        reasons.append("stale")
+    stable = not reasons
+    return _check(
+        "ops.restore_drill",
+        "release",
+        STABLE if stable else DEGRADED,
+        "Verified restore drill is current" if stable else "Restore drill is not current",
+        details={
+            "path": str(path),
+            "age_hours": round(age, 2),
+            "max_age_hours": max_age,
+            "backup": payload.get("backup"),
+            "alembic_version": payload.get("alembic_version"),
+            "restored_table_count": payload.get("restored_table_count"),
+            "reasons": reasons,
+        },
+        action="Run a fresh non-destructive restore drill." if reasons else "",
     )
 
 
@@ -256,10 +368,7 @@ def _persist_checkpoint(db: Session, item: dict[str, Any]) -> None:
     row.critical = bool(item.get("critical"))
     row.latency_ms = int(item.get("latency_ms", 0))
     row.message = str(item.get("message", ""))[:500]
-    row.details = {
-        **(item.get("details") or {}),
-        "root_cause": item.get("root_cause", ""),
-    }
+    row.details = {**(item.get("details") or {}), "root_cause": item.get("root_cause", "")}
     row.last_checked_at = now
     if item["status"] == STABLE:
         row.consecutive_failures = 0
@@ -269,9 +378,6 @@ def _persist_checkpoint(db: Session, item: dict[str, Any]) -> None:
 
 
 async def collect_system_health(app, db: Session, *, persist: bool = True, deep: bool = False) -> dict[str, Any]:
-    # Run expensive probes exactly once. The old implementation re-ran the full
-    # inference/storage suite when persistence was requested, doubling latency and
-    # occasionally producing two different snapshots for one admin refresh.
     base = await _base_collect(app, db, persist=False, deep=deep)
     checks = list(base.get("checks") or [])
     checks.extend(
@@ -279,6 +385,8 @@ async def collect_system_health(app, db: Session, *, persist: bool = True, deep:
             _migration_check(db, app.state.settings),
             _route_contract(app),
             _backup_check(app.state.settings, deep=deep),
+            _release_gate_check(app.state.settings, app_version=str(getattr(app, "version", "unknown"))),
+            _restore_drill_check(app.state.settings),
         ]
     )
     roots = _root_causes(checks)
