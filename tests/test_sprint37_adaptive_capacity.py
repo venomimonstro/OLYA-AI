@@ -7,7 +7,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from app.main import app
-from app.services.adaptive_capacity import apply_live_safe, approve_plan, compare_plans, compare_wave_signals, evaluate_wave
+from app.services.adaptive_capacity import apply_live_safe, approve_plan, compare_plans, compare_wave_signals, evaluate_wave, signal_snapshot
 from app.services.beta_trends import compare_snapshots
 
 
@@ -28,14 +28,23 @@ def settings(**overrides):
     return SimpleNamespace(**data)
 
 
-def snapshot(*, requests: int, successes: int, frustration: int, queue: int = 1000, duration: int = 20000, efficiency: float = 1.0):
+def snapshot(
+    *,
+    requests: int,
+    successes: int,
+    frustration: int,
+    queue: int = 1000,
+    duration: int = 20000,
+    efficiency: float = 1.0,
+    compute_minutes: float = 10.0,
+):
     return {
         "request_count": requests,
         "success_count": successes,
         "frustration_count": frustration,
         "task_count": 0,
         "completed_task_count": 0,
-        "compute_minutes_total": 10.0,
+        "compute_minutes_total": compute_minutes,
         "p95_queue_ms": queue,
         "p95_duration_ms": duration,
         "metrics": {
@@ -51,16 +60,37 @@ def snapshot(*, requests: int, successes: int, frustration: int, queue: int = 10
     }
 
 
+def wave(baseline: dict, *, compute_budget_seconds: int = 0):
+    return SimpleNamespace(
+        state="open",
+        admission_paused=False,
+        admitted_count=3,
+        target_participants=10,
+        compute_budget_seconds=compute_budget_seconds,
+        baseline_metrics=signal_snapshot(baseline),
+        latest_metrics=signal_snapshot(baseline),
+        decision={},
+        pause_reason="",
+        observing_at=None,
+    )
+
+
 def test_wave_guardrail_allows_stable_increment():
     baseline = snapshot(requests=100, successes=98, frustration=2)
     current = snapshot(requests=150, successes=147, frustration=3, queue=1200, duration=22000, efficiency=0.95)
-    result = compare_wave_signals(current, baseline, settings())
+    result = compare_wave_signals(current, signal_snapshot(baseline), settings())
     assert result["enough_observation"] is True
     assert result["regressions"] == []
-    wave = SimpleNamespace(state="open", admission_paused=False, admitted_count=3, target_participants=10, baseline_metrics=baseline)
-    decision = evaluate_wave(wave, current=current, capacity_report={"status": "passed"}, settings=settings())
+    decision = evaluate_wave(wave(baseline), current=current, capacity_report={"status": "passed"}, settings=settings())
     assert decision["status"] == "admit"
     assert decision["admission_allowed"] is True
+
+
+def test_compact_wave_baseline_preserves_cpu_efficiency_guardrail():
+    baseline = snapshot(requests=100, successes=99, frustration=1, efficiency=1.0)
+    current = snapshot(requests=150, successes=149, frustration=1, efficiency=0.5)
+    result = compare_wave_signals(current, signal_snapshot(baseline), settings())
+    assert "verified_cpu_efficiency_regressed" in result["regressions"]
 
 
 def test_wave_guardrail_pauses_on_new_request_failures():
@@ -76,6 +106,18 @@ def test_wave_guardrail_detects_queue_regression():
     result = compare_wave_signals(current, baseline, settings())
     assert "p95_queue_above_guardrail" in result["regressions"]
     assert "p95_queue_regressed" in result["regressions"]
+
+
+def test_wave_compute_budget_stops_new_admissions():
+    baseline = snapshot(requests=100, successes=99, frustration=1, compute_minutes=10.0)
+    current = snapshot(requests=120, successes=119, frustration=1, compute_minutes=12.0)
+    target = wave(baseline, compute_budget_seconds=60)
+    decision = evaluate_wave(target, current=current, capacity_report={"status": "passed"}, settings=settings(), persist=True)
+    assert decision["status"] == "paused_for_budget"
+    assert "wave_compute_budget_exhausted" in decision["reasons"]
+    assert decision["comparison"]["compute_spent_seconds"] == 120
+    assert target.state == "paused"
+    assert target.admission_paused is True
 
 
 def test_capacity_plan_approval_is_fail_closed():
@@ -186,6 +228,7 @@ def test_sprint37_routes_and_version_are_registered():
     paths = {getattr(route, "path", "") for route in app.routes}
     assert app.version == "0.37.0"
     for path in (
+        "/admin/beta",
         "/v1/admin/beta/control",
         "/v1/admin/beta/waves",
         "/v1/admin/beta/trends",
