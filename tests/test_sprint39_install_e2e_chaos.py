@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import tomllib
 from pathlib import Path
 
@@ -16,16 +15,17 @@ from scripts.download_model import DEFAULT_FILE, DEFAULT_REPO, DEFAULT_SHA256
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_application_and_package_are_sprint39():
+def test_application_and_package_remain_at_or_beyond_sprint39():
     package = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))
-    assert app.version == package["project"]["version"] == "0.39.0"
+    assert app.version == package["project"]["version"]
+    assert tuple(map(int, app.version.split(".")[:2])) >= (0, 39)
 
 
 def test_installer_downloads_real_verified_qwen_and_runs_all_gates():
     script = (ROOT / "scripts" / "install.sh").read_text("utf-8")
     downloader = (ROOT / "scripts" / "download_model.py").read_text("utf-8")
     assert "python3 scripts/download_model.py" in script
-    assert "scripts.migrate_legacy_data" not in script  # shell migration is explicit below
+    assert "scripts.migrate_legacy_data" not in script
     assert "bash scripts/migrate_legacy_data.sh" in script
     assert "x1-sandbox:0.39" in script
     assert "scripts.sandbox_probe" in script
@@ -100,17 +100,9 @@ def test_virtual_100k_model_is_bounded_by_safe_queue():
 def test_user_journey_covers_chat_search_and_closed_development():
     script = (ROOT / "scripts" / "e2e_user_journey.py").read_text("utf-8")
     for marker in (
-        '"/v1/auth/register"',
-        '"/v1/chat"',
-        '"/v1/research/runs"',
-        '"/discover"',
-        '"/collect"',
-        '"/v1/projects"',
-        '"/v1/code/workspaces"',
-        '"/v1/project-runtimes"',
-        '"/v1/development-plans/architect-draft"',
-        '"/v1/development-chat"',
-        '"closed_shop_development"',
+        '"/v1/auth/register"', '"/v1/chat"', '"/v1/research/runs"', '"/discover"', '"/collect"',
+        '"/v1/projects"', '"/v1/code/workspaces"', '"/v1/project-runtimes"',
+        '"/v1/development-plans/architect-draft"', '"/v1/development-chat"', '"closed_shop_development"',
     ):
         assert marker in script
 
@@ -118,15 +110,9 @@ def test_user_journey_covers_chat_search_and_closed_development():
 def test_chaos_suite_covers_security_overload_and_wrong_answer_cases():
     script = (ROOT / "scripts" / "chaos_simulation.py").read_text("utf-8")
     for marker in (
-        "protected_route_requires_auth",
-        "client_system_prompt_rejected",
-        "research_ssrf_loopback_rejected",
-        "workspace_path_traversal_rejected",
-        "oversized_body_rejected",
-        "auth_bruteforce_throttled",
-        "bounded_inference_queue",
-        "virtual_100k_overload_model",
-        "stale_fact_not_marked_supported",
+        "protected_route_requires_auth", "client_system_prompt_rejected", "research_ssrf_loopback_rejected",
+        "workspace_path_traversal_rejected", "oversized_body_rejected", "auth_bruteforce_throttled",
+        "bounded_inference_queue", "virtual_100k_overload_model", "stale_fact_not_marked_supported",
         "sandbox_boundary_available",
     ):
         assert marker in script
