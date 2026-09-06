@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     file_context_chunks: int = 6
     max_pdf_pages: int = 500
     max_docx_unpacked_bytes: int = 100 * 1024 * 1024
+    file_parse_timeout_seconds: int = 45
+    file_parse_memory_mb: int = 768
+    file_max_extracted_chars: int = 2_000_000
 
     document_storage_path: str = "./data/documents"
     document_render_timeout_seconds: int = 60
@@ -51,6 +54,8 @@ class Settings(BaseSettings):
     research_max_bytes: int = 2_000_000
     research_max_chars: int = 500_000
     research_max_redirects: int = 3
+    research_freshness_max_age_seconds: int = 15 * 60
+    research_freshness_min_independent_hosts: int = 2
     search_provider: str = "searxng"
     search_providers: str = "searxng"
     searxng_base_url: str = "http://searxng:8080"
@@ -132,8 +137,6 @@ class Settings(BaseSettings):
     release_gate_max_age_hours: float = 24.0
     restore_drill_max_age_hours: float = 168.0
 
-    # Ephemeral database state has bounded retention so a long-running public
-    # node cannot slowly degrade from cache/rate-window/session table growth.
     maintenance_enabled: bool = True
     maintenance_interval_seconds: float = 3600.0
     api_rate_window_retention_hours: int = 2
