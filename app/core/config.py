@@ -132,6 +132,17 @@ class Settings(BaseSettings):
     release_gate_max_age_hours: float = 24.0
     restore_drill_max_age_hours: float = 168.0
 
+    # Ephemeral database state has bounded retention so a long-running public
+    # node cannot slowly degrade from cache/rate-window/session table growth.
+    maintenance_enabled: bool = True
+    maintenance_interval_seconds: float = 3600.0
+    api_rate_window_retention_hours: int = 2
+    search_cache_retention_hours: int = 24
+    expired_session_retention_days: int = 7
+    system_health_snapshot_retention_days: int = 30
+    background_job_success_retention_days: int = 30
+    background_job_failure_retention_days: int = 90
+
     capacity_report_path: str = "./backups/capacity-latest.json"
     capacity_report_max_age_hours: float = 168.0
     capacity_compute_headroom_ratio: float = 1.25
