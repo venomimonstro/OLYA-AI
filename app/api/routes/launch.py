@@ -25,6 +25,7 @@ from app.services.progressive_launch import (
     evaluate_public_launch,
     freeze_rollout,
     resolve_breaker,
+    rollback_catalog,
     rollback_rollout,
     rollout_allows_user,
     rollout_dict,
@@ -68,12 +69,7 @@ def launch_status(request: Request, admin: User = Depends(require_admin), db: Se
     rollout = active_rollout(db)
     catalog = active_measured_catalog(db)
     db.commit()
-    return {
-        "evaluation": evaluation,
-        "rollout": rollout_dict(rollout) if rollout else None,
-        "measured_catalog": catalog_dict(catalog) if catalog else None,
-        "stages": list(ROLLOUT_STAGES),
-    }
+    return {"evaluation": evaluation, "rollout": rollout_dict(rollout) if rollout else None, "measured_catalog": catalog_dict(catalog) if catalog else None, "stages": list(ROLLOUT_STAGES)}
 
 
 @router.post("/v1/admin/launch/evaluate")
@@ -132,6 +128,19 @@ def activate_catalog_route(catalog_id: str, admin: User = Depends(require_admin)
         raise HTTPException(409, str(exc)) from exc
     audit(db, admin, "launch.catalog.activate", "measured_plan_catalog", row.id, {"version": row.version})
     db.commit(); return catalog_dict(row)
+
+
+@router.post("/v1/admin/launch/catalogs/{catalog_id}/rollback")
+def rollback_catalog_route(catalog_id: str, admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    row = db.get(MeasuredPlanCatalog, catalog_id)
+    if row is None:
+        raise HTTPException(404, "Measured plan catalog not found")
+    try:
+        replacement = rollback_catalog(db, row, actor_id=admin.id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    audit(db, admin, "launch.catalog.rollback", "measured_plan_catalog", replacement.id, {"from_version": row.version, "to_version": replacement.version})
+    db.commit(); return catalog_dict(replacement)
 
 
 @router.post("/v1/admin/launch/rollouts")
