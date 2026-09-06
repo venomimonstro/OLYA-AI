@@ -131,14 +131,21 @@ def main() -> int:
     docker = docker_available(); containerized_gate = bool(docker and (ROOT / ".env").exists())
 
     if containerized_gate:
-        checks.append(run("gate_image_build", ["docker", "compose", "--profile", "gate", "build", "gate"], timeout=max(args.command_timeout, 900)))
+        checks.append(run("gate_image_build", ["docker", "compose", "--profile", "gate", "build", "gate"], timeout=max(args.command_timeout, 1200)))
         gate_prefix = ["docker", "compose", "--profile", "gate", "run", "--rm", "--no-deps", "gate"]
         checks.append(run("compileall", [*gate_prefix, "python", "-m", "compileall", "-q", "app", "scripts", "tests"], timeout=args.command_timeout))
+        checks.append(run("stability_probe", [*gate_prefix, "python", "-m", "scripts.stability_probe"], timeout=args.command_timeout))
+        checks.append(run("document_render_probe", [*gate_prefix, "python", "-m", "scripts.document_render_probe"], timeout=max(args.command_timeout, 180)))
         checks.append(parse_alembic_heads(run("alembic_heads", [*gate_prefix, "python", "-m", "alembic", "heads"], timeout=args.command_timeout)))
         checks.append(run("long_context_offline", [*gate_prefix, "python", "-m", "scripts.long_context_probe"], timeout=args.command_timeout))
         checks.append(run("pytest_full", [*gate_prefix, "python", "-m", "scripts.run_full_regression"], timeout=max(60, args.pytest_timeout)))
     else:
         checks.append(run("compileall", [sys.executable, "-m", "compileall", "-q", "app", "scripts", "tests"], timeout=args.command_timeout, env=python_env))
+        checks.append(run("stability_probe", [sys.executable, "-m", "scripts.stability_probe"], timeout=args.command_timeout, env=python_env))
+        if shutil.which("libreoffice") or shutil.which("soffice"):
+            checks.append(run("document_render_probe", [sys.executable, "-m", "scripts.document_render_probe"], timeout=max(args.command_timeout, 180), env=python_env))
+        else:
+            checks.append({"name": "document_render_probe", "status": "not_run", "required": False, "detail": "Host LibreOffice unavailable; production Docker gate executes this probe"})
         checks.append(parse_alembic_heads(run("alembic_heads", [sys.executable, "-m", "alembic", "heads"], timeout=args.command_timeout, env=python_env)))
         checks.append(run("long_context_offline", [sys.executable, "-m", "scripts.long_context_probe"], timeout=args.command_timeout, env=python_env))
         checks.append(run("pytest_full", [sys.executable, "-m", "scripts.run_full_regression"], timeout=max(60, args.pytest_timeout), env=python_env))
@@ -197,8 +204,6 @@ def main() -> int:
         report_path = ROOT / report_path
     write_report(report_path, payload)
     if args.runtime and status == "passed":
-        # Persist the passing report first because /ready itself verifies the
-        # freshness/status of this release evidence.
         ready = final_ready_probe(); checks.append(ready)
         if ready["status"] != "passed":
             failed_required.append("final_ready"); payload["status"] = "failed"
