@@ -90,10 +90,13 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      # Search and sandbox are feature dependencies, not core-process
+      # dependencies. The API must remain available while either sidecar
+      # restarts; their own endpoints fail/degrade explicitly until recovery.
       searxng:
-        condition: service_healthy
+        condition: service_started
       sandbox-worker:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
       interval: 15s
