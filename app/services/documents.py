@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,19 @@ class DocumentBuildError(RuntimeError):
 
 class DocumentQAError(RuntimeError):
     pass
+
+
+# Rendering is deliberately independent from the inference governor. LibreOffice
+# and pdftoppm can consume hundreds of MiB each, so a burst of document QA must
+# not create a process storm on the low-cost production node.
+_RENDER_GATE = threading.BoundedSemaphore(1)
+_RENDER_WAIT_SECONDS = 5.0
+
+
+def configure_render_gate(max_concurrent: int = 1, wait_timeout_seconds: float = 5.0) -> None:
+    global _RENDER_GATE, _RENDER_WAIT_SECONDS
+    _RENDER_GATE = threading.BoundedSemaphore(max(1, int(max_concurrent)))
+    _RENDER_WAIT_SECONDS = max(0.1, float(wait_timeout_seconds))
 
 
 def sha256_file(path: Path) -> str:
@@ -125,19 +139,29 @@ def _office_binary() -> str:
 
 
 def render_docx_to_pdf(docx_path: Path, output_dir: Path, *, timeout_seconds: int = 60) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="x1-lo-") as profile:
-        cmd = [_office_binary(), "--headless", "--nologo", "--nodefault", "--nofirststartwizard", f"-env:UserInstallation=file://{profile}", "--convert-to", "pdf", "--outdir", str(output_dir), str(docx_path)]
-        env = {**os.environ, "HOME": profile}
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds, env=env, check=False)
-        except subprocess.TimeoutExpired as exc:
-            raise DocumentQAError("Document rendering timed out") from exc
-    pdf = output_dir / f"{docx_path.stem}.pdf"
-    if result.returncode != 0 or not pdf.is_file() or pdf.stat().st_size < 500:
-        message = (result.stderr or result.stdout or "LibreOffice conversion failed")[-1000:]
-        raise DocumentQAError(message)
-    return pdf
+    acquired = _RENDER_GATE.acquire(timeout=_RENDER_WAIT_SECONDS)
+    if not acquired:
+        raise DocumentQAError("Document renderer is busy; retry shortly")
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="x1-lo-") as profile:
+            cmd = [
+                _office_binary(), "--headless", "--nologo", "--nodefault", "--nofirststartwizard",
+                f"-env:UserInstallation=file://{profile}", "--convert-to", "pdf", "--outdir",
+                str(output_dir), str(docx_path),
+            ]
+            env = {**os.environ, "HOME": profile}
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds, env=env, check=False)
+            except subprocess.TimeoutExpired as exc:
+                raise DocumentQAError("Document rendering timed out") from exc
+        pdf = output_dir / f"{docx_path.stem}.pdf"
+        if result.returncode != 0 or not pdf.is_file() or pdf.stat().st_size < 500:
+            message = (result.stderr or result.stdout or "LibreOffice conversion failed")[-1000:]
+            raise DocumentQAError(message)
+        return pdf
+    finally:
+        _RENDER_GATE.release()
 
 
 def render_qa(pdf_path: Path, raster_dir: Path | None = None, *, max_pages: int = 300) -> dict[str, Any]:
@@ -201,4 +225,11 @@ def render_qa(pdf_path: Path, raster_dir: Path | None = None, *, max_pages: int 
                         if edge_distance <= 1:
                             pages[idx]["warning"] = "content_touches_page_edge"
 
-    return {"status": "passed" if not issues else "failed", "page_count": page_count, "issues": issues, "pages": pages, "raster_status": raster_status, "visual_model_status": "not_configured"}
+    return {
+        "status": "passed" if not issues else "failed",
+        "page_count": page_count,
+        "issues": issues,
+        "pages": pages,
+        "raster_status": raster_status,
+        "visual_model_status": "not_configured",
+    }
