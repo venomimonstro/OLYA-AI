@@ -29,7 +29,6 @@ services:
       - "${X1_BIND_ADDRESS:-127.0.0.1}:${X1_PORT:-8000}:8000"
     volumes:
       - x1_data:/app/data
-      # Host-visible backups are also visible to deep health checks inside X1.
       - ./backups:/app/backups
     depends_on:
       db:
@@ -44,6 +43,26 @@ services:
       resources:
         limits:
           memory: 1024M
+
+  image-worker:
+    profiles: ["images"]
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      X1_DATABASE_AUTO_CREATE_SCHEMA: "false"
+      X1_DATABASE_URL: postgresql+psycopg://x1:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/x1
+    command: ["python", "-m", "scripts.image_worker", "--persistent"]
+    volumes:
+      - x1_data:/app/data
+      - ./models:/models:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 4096M
 
   llama:
     profiles: ["inference"]
