@@ -17,7 +17,7 @@ from app.services.access import require_project_role
 from app.services.auth import get_current_user
 from app.services.project_context import ProjectContextBuilder
 from app.services.quality import AnswerQualityEngine
-from app.services.source_context import SourceContextBuilder
+from app.services.source_context import FRESHNESS_SENTINEL, SourceContextBuilder
 from app.services.quota import QuotaExceededError, ensure_compute_available
 from app.services.safety import require_capability
 from app.services.resource_governor import ResourceBusyError
@@ -26,7 +26,6 @@ from app.services.user_resource_governor import UserConcurrencyBusyError
 from app.services.diagnostics import detect_repeat_query, observe_usage
 
 router = APIRouter(prefix="/v1", tags=["chat"])
-_context_builder = ProjectContextBuilder()
 _quality = AnswerQualityEngine()
 _source_context = SourceContextBuilder()
 
@@ -86,9 +85,6 @@ def _publish_request_usage(
     success: bool,
     quality_status: str = "unchecked",
 ) -> None:
-    # External API telemetry and commerce accounting reuse the ordinary chat
-    # pipeline. Publishing measured values here prevents a second accounting
-    # implementation from drifting away from the actual inference path.
     request.state.x1_usage = {
         "request_id": request_id,
         "cpu_ms": max(0, int(inference_ms)),
@@ -153,7 +149,6 @@ async def chat(
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
     project, conversation, task = _resolve_scope(db, user, payload)
-    # Persistent API contexts need the actual server-created conversation ID.
     request.state.x1_conversation_id = conversation.id
 
     if task is not None:
@@ -163,7 +158,8 @@ async def chat(
             db.rollback()
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    trusted = _context_builder.build(
+    context_builder = ProjectContextBuilder(max_history_messages=settings.chat_history_messages)
+    trusted = context_builder.build(
         db,
         project=project,
         conversation=conversation if payload.conversation_id else None,
@@ -187,11 +183,17 @@ async def chat(
         trusted.insert(max(len(trusted) - 1, 0), requirement_message)
 
     raw_chars = sum(len(message.content) for message in trusted)
-    # Route-specific budget is essential: Deep mode must actually retain its
-    # larger context instead of silently compiling at the normal Work limit.
-    compiled = request.app.state.context.compile(trusted, max_chars=route.max_context_tokens * 6)
-    compiled_chars = sum(len(message.content) for message in compiled)
     max_tokens = min(payload.max_output_tokens or route.max_output_tokens, route.max_output_tokens)
+    # Total llama.cpp context = prompt + generated output. Keep a safety margin and
+    # use a conservative char/token ratio for Russian/multilingual text rather
+    # than the previous optimistic 6 chars/token approximation.
+    prompt_tokens = max(512, route.max_context_tokens - max_tokens - 384)
+    prompt_char_budget = prompt_tokens * 3
+    compiled = request.app.state.context.compile(trusted, max_chars=prompt_char_budget)
+    compiled_chars = sum(len(message.content) for message in compiled)
+
+    freshness_required = FRESHNESS_SENTINEL in verified_urls
+    quality_urls = {url for url in verified_urls if url != FRESHNESS_SENTINEL}
 
     request_id = str(uuid4())
     total_started = perf_counter()
@@ -211,7 +213,12 @@ async def chat(
                 try:
                     text_out = await request.app.state.llama.chat(compiled, max_tokens=max_tokens, reasoning=route.reasoning)
                     if payload.verification != "off":
-                        deterministic = _quality.deterministic(text_out, payload.requirements, verified_urls)
+                        deterministic = _quality.deterministic(
+                            text_out,
+                            payload.requirements,
+                            quality_urls,
+                            freshness_required=freshness_required,
+                        )
                         if deterministic.failed and (payload.requirements or payload.verification == "strict"):
                             try:
                                 text_out = await request.app.state.llama.chat(
@@ -219,7 +226,12 @@ async def chat(
                                     max_tokens=max_tokens,
                                     reasoning=False,
                                 )
-                                deterministic = _quality.deterministic(text_out, payload.requirements, verified_urls)
+                                deterministic = _quality.deterministic(
+                                    text_out,
+                                    payload.requirements,
+                                    quality_urls,
+                                    freshness_required=freshness_required,
+                                )
                             except LlamaUnavailable:
                                 deterministic.warnings.append(
                                     "Автоматическая коррекция недоступна; сохранён первичный ответ с найденными дефектами."
