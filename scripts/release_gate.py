@@ -157,6 +157,11 @@ def main() -> int:
 
     if args.runtime:
         checks.append(run("sandbox_probe", ["docker", "compose", "exec", "-T", "app", "python", "-m", "scripts.sandbox_probe"], timeout=max(args.command_timeout, 180)))
+        # Component acceptance is intentionally independent from the expensive
+        # Qwen user journey. It proves auth/session lifecycle, projects, memory,
+        # files, real LibreOffice document QA/release, API keys/contexts, usage,
+        # export and sandbox boundaries before long-running AI tests begin.
+        checks.append(run("component_acceptance", ["docker", "compose", "exec", "-T", "app", "python", "-m", "scripts.component_acceptance"], timeout=max(args.command_timeout, 900)))
         backup = run("backup", ["bash", "scripts/backup.sh"], timeout=max(args.command_timeout, 600)); checks.append(backup)
         backup_path = latest_backup_from_output(backup.get("stdout", "")) if backup["status"] == "passed" else ""
         if backup_path:
@@ -188,6 +193,7 @@ def main() -> int:
         "version": project_version(),
         "git_head": git_head(),
         "mode": "runtime" if args.runtime else "static",
+        "component_acceptance_requested": bool(args.runtime),
         "live_inference_requested": bool(args.live_inference),
         "user_journey_requested": bool(args.user_journey),
         "chaos_requested": bool(args.chaos),
