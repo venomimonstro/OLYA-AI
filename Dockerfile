@@ -8,6 +8,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Project-runtime creation initializes a real local Git repository. Keep the
+# runtime dependency explicit in the image instead of silently assuming the host
+# Git binary is visible inside the container.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml ./
 RUN if [ -n "$X1_EXTRAS" ]; then \
         pip install --no-cache-dir ".[${X1_EXTRAS}]"; \
