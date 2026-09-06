@@ -9,13 +9,16 @@ class ResourceBusyError(RuntimeError):
 class ResourceGovernor:
     """Fair bounded admission control for expensive local inference."""
 
-    def __init__(self, max_concurrent: int = 1, max_queue: int = 64) -> None:
+    def __init__(self, max_concurrent: int = 1, max_queue: int = 64, wait_timeout_seconds: float = 120.0) -> None:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be >= 1")
         if max_queue < 0:
             raise ValueError("max_queue must be >= 0")
+        if wait_timeout_seconds <= 0:
+            raise ValueError("wait_timeout_seconds must be > 0")
         self._sem = asyncio.Semaphore(max_concurrent)
         self.max_queue = max_queue
+        self.wait_timeout_seconds = float(wait_timeout_seconds)
         self._waiting = 0
         self._lock = asyncio.Lock()
 
@@ -30,8 +33,13 @@ class ResourceGovernor:
                 raise ResourceBusyError("local inference queue is full")
             self._waiting += 1
 
+        acquired = False
         try:
-            await self._sem.acquire()
+            try:
+                await asyncio.wait_for(self._sem.acquire(), timeout=self.wait_timeout_seconds)
+                acquired = True
+            except TimeoutError as exc:
+                raise ResourceBusyError("local inference queue wait timed out") from exc
         finally:
             async with self._lock:
                 self._waiting -= 1
@@ -39,4 +47,5 @@ class ResourceGovernor:
         try:
             yield
         finally:
-            self._sem.release()
+            if acquired:
+                self._sem.release()
