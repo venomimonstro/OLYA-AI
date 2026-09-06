@@ -122,7 +122,7 @@ def compare_wave_signals(current_payload: dict[str, Any], baseline_payload: dict
 def active_wave(db: Session, cohort: str) -> BetaWave | None:
     return db.scalar(
         select(BetaWave)
-        .where(BetaWave.cohort == cohort, BetaWave.state.in_(["open", "observing", "paused"]))
+        .where(BetaWave.cohort == cohort, BetaWave.state.in_(["planned", "open", "observing", "paused"]))
         .order_by(BetaWave.wave_number.desc())
         .limit(1)
     )
@@ -136,6 +136,7 @@ def wave_dict(wave: BetaWave) -> dict[str, Any]:
         "state": wave.state,
         "target_participants": wave.target_participants,
         "admitted_count": wave.admitted_count,
+        "compute_budget_seconds": wave.compute_budget_seconds,
         "admission_paused": wave.admission_paused,
         "pause_reason": wave.pause_reason,
         "baseline_metrics": wave.baseline_metrics,
@@ -149,7 +150,15 @@ def wave_dict(wave: BetaWave) -> dict[str, Any]:
     }
 
 
-def create_wave(db: Session, *, cohort: str, target_participants: int, baseline: dict[str, Any], actor_id: str | None) -> BetaWave:
+def create_wave(
+    db: Session,
+    *,
+    cohort: str,
+    target_participants: int,
+    baseline: dict[str, Any],
+    actor_id: str | None,
+    compute_budget_seconds: int = 0,
+) -> BetaWave:
     existing = active_wave(db, cohort)
     if existing is not None:
         raise ValueError(f"Wave {existing.wave_number} is still {existing.state}")
@@ -159,6 +168,7 @@ def create_wave(db: Session, *, cohort: str, target_participants: int, baseline:
         wave_number=number,
         state="planned",
         target_participants=max(1, min(100, int(target_participants))),
+        compute_budget_seconds=max(0, int(compute_budget_seconds)),
         baseline_metrics=signal_snapshot(baseline),
         latest_metrics=signal_snapshot(baseline),
         decision={"status": "planned", "admission_allowed": False, "reasons": ["wave_not_open"]},
@@ -180,6 +190,12 @@ def evaluate_wave(
     reasons: list[str] = []
     warnings: list[str] = []
     comparison = compare_wave_signals(current, wave.baseline_metrics if wave else current, settings)
+    compute_spent_seconds = max(
+        0,
+        int(round((comparison["current"]["compute_minutes_total"] - comparison["baseline"]["compute_minutes_total"]) * 60)),
+    )
+    comparison["compute_spent_seconds"] = compute_spent_seconds
+    comparison["compute_budget_seconds"] = int(wave.compute_budget_seconds or 0) if wave is not None else 0
 
     if wave is None:
         reasons.append("no_active_wave")
@@ -196,6 +212,8 @@ def evaluate_wave(
             reasons.append("admission_paused")
         if wave.admitted_count >= wave.target_participants:
             reasons.append("wave_target_reached")
+        if wave.compute_budget_seconds > 0 and compute_spent_seconds >= wave.compute_budget_seconds:
+            reasons.append("wave_compute_budget_exhausted")
 
     if capacity_report.get("status") != "passed":
         reasons.append("target_node_capacity_not_current")
@@ -207,6 +225,8 @@ def evaluate_wave(
         status = "ready_to_close"
     elif admission_allowed:
         status = "admit"
+    elif "wave_compute_budget_exhausted" in reasons:
+        status = "paused_for_budget"
     elif comparison["regressions"]:
         status = "paused_for_regression"
     elif wave is not None and wave.state == "observing":
@@ -226,13 +246,14 @@ def evaluate_wave(
     if wave is not None and persist:
         wave.latest_metrics = signal_snapshot(current)
         wave.decision = decision
-        regression_reasons = comparison["regressions"]
-        if wave.state == "open" and regression_reasons:
+        pause_reasons = list(comparison["regressions"])
+        if "wave_compute_budget_exhausted" in reasons:
+            pause_reasons.append("wave_compute_budget_exhausted")
+        if wave.state == "open" and pause_reasons:
             wave.state = "paused"
             wave.admission_paused = True
-            wave.pause_reason = ",".join(regression_reasons)[:500]
-        db_state = wave.state
-        if db_state == "open" and wave.admitted_count >= wave.target_participants:
+            wave.pause_reason = ",".join(sorted(set(pause_reasons)))[:500]
+        if wave.state == "open" and wave.admitted_count >= wave.target_participants:
             wave.state = "observing"
             wave.admission_paused = True
             wave.pause_reason = "wave_target_reached"
@@ -247,6 +268,13 @@ def record_wave_admission(wave: BetaWave) -> None:
         wave.admission_paused = True
         wave.pause_reason = "wave_target_reached"
         wave.observing_at = wave.observing_at or utcnow()
+        wave.decision = {
+            **dict(wave.decision or {}),
+            "status": "observing",
+            "admission_allowed": False,
+            "reasons": ["wave_target_reached_observing"],
+            "evaluated_at": utcnow().isoformat(),
+        }
 
 
 def plan_dict(plan: CapacityPlan) -> dict[str, Any]:
@@ -421,6 +449,8 @@ def rollback_plan(db: Session, app, *, actor_id: str | None, target_plan_id: str
     target_id = target_plan_id or current.previous_plan_id
     if not target_id:
         raise ValueError("Active capacity plan has no previous plan")
+    if target_id == current.id:
+        raise ValueError("Rollback target must differ from the active capacity plan")
     target = db.get(CapacityPlan, target_id)
     if target is None or target.status not in {"active", "superseded", "rolled_back"}:
         raise ValueError("Rollback target is not a previously activated capacity plan")
