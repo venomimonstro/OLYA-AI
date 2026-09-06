@@ -26,6 +26,15 @@ fi
 OLD_HEAD="$(git rev-parse HEAD)"
 RUNNING_SERVICES="$(docker compose ps --services --filter status=running 2>/dev/null || true)"
 
+quiesce_sandbox_containers() {
+  local ids
+  ids="$({
+    docker ps -aq --filter 'label=x1.sandbox.preview=true' 2>/dev/null || true
+    docker ps -aq --filter 'label=x1.sandbox.execution=true' 2>/dev/null || true
+  } | awk 'NF' | sort -u)"
+  [ -z "$ids" ] || docker rm -f $ids >/dev/null
+}
+
 info "Fetching main without changing the working tree"
 git fetch origin main
 TARGET_HEAD="$(git rev-parse origin/main)"
@@ -60,6 +69,7 @@ rollback() {
   set +e
   printf '[X1 update] ROLLBACK: %s\n' "$reason" >&2
   docker compose stop app image-worker sandbox-worker >/dev/null 2>&1 || true
+  quiesce_sandbox_containers >/dev/null 2>&1 || true
   git reset --hard "$OLD_HEAD" >/dev/null 2>&1 || true
   if [ -n "$BACKUP_PATH" ] && [ -d "$BACKUP_PATH" ]; then
     X1_INSTALL_DIR="$ROOT" bash "$RESTORE_COPY" "$BACKUP_PATH" >/dev/null 2>&1 || printf '[X1 update] WARNING: automatic data restore failed; backup remains at %s\n' "$BACKUP_PATH" >&2
@@ -78,9 +88,10 @@ trap 'rollback "update interrupted"' INT TERM
 
 info "Quiescing write-producing services"
 docker compose stop app image-worker sandbox-worker >/dev/null 2>&1 || true
+quiesce_sandbox_containers
 
 # A pre-Sprint39 installation may still keep all project/user files in a named
-# *_x1_data volume. Copy it to the new host bind before the first v3 backup.
+# *_x1_data volume. Copy it to the new host bind before the first v3+ backup.
 # The migration is copy-only and deliberately preserves the source volume, so a
 # rollback to the old code still sees its original filesystem unchanged.
 info "Checking for legacy named-volume user data"
