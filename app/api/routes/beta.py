@@ -34,6 +34,14 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _window(wave: BetaWave | None, fallback: int = 30) -> int:
+    return max(1, min(180, int(getattr(wave, "window_days", fallback) or fallback)))
+
+
+def _wave_metrics(db: Session, wave: BetaWave) -> dict:
+    return calculate_beta_metrics(db, cohort=wave.cohort, window_days=_window(wave))
+
+
 class Enroll(BaseModel):
     cohort: str = Field(default="closed-beta-1", min_length=1, max_length=64)
     source: str = Field(default="manual", max_length=64)
@@ -48,6 +56,7 @@ class WaveCreate(BaseModel):
     cohort: str = Field(default="closed-beta-1", min_length=1, max_length=64)
     target_participants: int = Field(default=10, ge=1, le=100)
     window_days: int = Field(default=30, ge=1, le=180)
+    compute_budget_seconds: int | None = Field(default=None, ge=60, le=10_000_000)
 
 
 class WavePause(BaseModel):
@@ -74,17 +83,30 @@ def enroll(
 ):
     if db.get(User, user_id) is None:
         raise HTTPException(404, "User not found")
-
-    row = db.scalar(select(BetaParticipant).where(BetaParticipant.user_id == user_id, BetaParticipant.cohort == payload.cohort))
+    row = db.scalar(
+        select(BetaParticipant).where(
+            BetaParticipant.user_id == user_id,
+            BetaParticipant.cohort == payload.cohort,
+        )
+    )
     already_active = bool(row is not None and row.state == "active")
     wave = None
     decision = None
-
     if not already_active:
         wave = active_wave(db, payload.cohort)
-        metrics = calculate_beta_metrics(db, cohort=payload.cohort, window_days=30)
+        metrics = (
+            _wave_metrics(db, wave)
+            if wave is not None
+            else calculate_beta_metrics(db, cohort=payload.cohort, window_days=30)
+        )
         capacity = read_capacity_report(request.app.state.settings)
-        decision = evaluate_wave(wave, current=metrics, capacity_report=capacity, settings=request.app.state.settings, persist=True)
+        decision = evaluate_wave(
+            wave,
+            current=metrics,
+            capacity_report=capacity,
+            settings=request.app.state.settings,
+            persist=True,
+        )
         if not decision["admission_allowed"] and not force:
             audit(
                 db,
@@ -99,11 +121,9 @@ def enroll(
 
     metadata = dict(payload.metadata)
     if wave is not None:
-        metadata["wave_id"] = wave.id
-        metadata["wave_number"] = wave.wave_number
+        metadata.update({"wave_id": wave.id, "wave_number": wave.wave_number})
     if force and not already_active:
         metadata["forced_admission"] = True
-
     if row is None:
         row = BetaParticipant(
             user_id=user_id,
@@ -117,10 +137,8 @@ def enroll(
         row.state = "active"
         row.source = payload.source
         row.metadata_json = metadata
-
     if not already_active and wave is not None:
         record_wave_admission(wave)
-
     audit(
         db,
         admin,
@@ -165,7 +183,10 @@ def participants(
 ):
     _ = admin
     rows = db.scalars(
-        select(BetaParticipant).where(BetaParticipant.cohort == cohort).order_by(BetaParticipant.enrolled_at.desc()).limit(limit)
+        select(BetaParticipant)
+        .where(BetaParticipant.cohort == cohort)
+        .order_by(BetaParticipant.enrolled_at.desc())
+        .limit(limit)
     ).all()
     return [
         {
@@ -216,7 +237,10 @@ def snapshots(
     return [
         snapshot_dict(row)
         for row in db.scalars(
-            select(BetaSnapshot).where(BetaSnapshot.cohort == cohort).order_by(BetaSnapshot.created_at.desc()).limit(limit)
+            select(BetaSnapshot)
+            .where(BetaSnapshot.cohort == cohort)
+            .order_by(BetaSnapshot.created_at.desc())
+            .limit(limit)
         ).all()
     ]
 
@@ -232,25 +256,25 @@ def launch_calibration(
     _ = admin
     metrics = calculate_beta_metrics(db, cohort=cohort, window_days=window_days)
     capacity = read_capacity_report(request.app.state.settings)
-    calibration = build_launch_calibration(metrics, capacity, request.app.state.settings)
-    return {"beta": metrics, "capacity": capacity, "calibration": calibration}
+    return {
+        "beta": metrics,
+        "capacity": capacity,
+        "calibration": build_launch_calibration(metrics, capacity, request.app.state.settings),
+    }
 
 
 @router.post("/waves")
 def create_beta_wave(
     payload: WaveCreate,
+    request: Request,
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    existing = db.scalar(
-        select(BetaWave)
-        .where(BetaWave.cohort == payload.cohort, BetaWave.state.in_(["planned", "open", "observing", "paused"]))
-        .order_by(BetaWave.wave_number.desc())
-        .limit(1)
-    )
-    if existing is not None:
+    if active_wave(db, payload.cohort) is not None:
+        existing = active_wave(db, payload.cohort)
         raise HTTPException(409, f"Wave {existing.wave_number} is still {existing.state}")
     baseline = calculate_beta_metrics(db, cohort=payload.cohort, window_days=payload.window_days)
+    default_budget = payload.target_participants * int(request.app.state.settings.default_monthly_compute_seconds)
     try:
         wave = create_wave(
             db,
@@ -258,10 +282,24 @@ def create_beta_wave(
             target_participants=payload.target_participants,
             baseline=baseline,
             actor_id=admin.id,
+            compute_budget_seconds=payload.compute_budget_seconds or default_budget,
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    audit(db, admin, "beta.wave.create", "beta_wave", wave.id, {"cohort": wave.cohort, "target": wave.target_participants})
+    wave.window_days = payload.window_days
+    audit(
+        db,
+        admin,
+        "beta.wave.create",
+        "beta_wave",
+        wave.id,
+        {
+            "cohort": wave.cohort,
+            "target": wave.target_participants,
+            "window_days": wave.window_days,
+            "compute_budget_seconds": wave.compute_budget_seconds,
+        },
+    )
     db.commit()
     db.refresh(wave)
     return wave_dict(wave)
@@ -296,7 +334,7 @@ def open_beta_wave(
     capacity = read_capacity_report(request.app.state.settings)
     if capacity.get("status") != "passed":
         raise HTTPException(409, {"message": "Target-node capacity report is not current", "capacity": capacity})
-    current = calculate_beta_metrics(db, cohort=wave.cohort, window_days=30)
+    current = _wave_metrics(db, wave)
     comparison = compare_wave_signals(current, wave.baseline_metrics, request.app.state.settings)
     if comparison["regressions"]:
         raise HTTPException(409, {"message": "Beta wave cannot be opened while guardrails are failing", "comparison": comparison})
@@ -329,9 +367,13 @@ def evaluate_beta_wave(
     wave = db.get(BetaWave, wave_id)
     if wave is None:
         raise HTTPException(404, "Beta wave not found")
-    current = calculate_beta_metrics(db, cohort=wave.cohort, window_days=30)
-    capacity = read_capacity_report(request.app.state.settings)
-    decision = evaluate_wave(wave, current=current, capacity_report=capacity, settings=request.app.state.settings, persist=True)
+    decision = evaluate_wave(
+        wave,
+        current=_wave_metrics(db, wave),
+        capacity_report=read_capacity_report(request.app.state.settings),
+        settings=request.app.state.settings,
+        persist=True,
+    )
     audit(db, admin, "beta.wave.evaluate", "beta_wave", wave.id, {"decision": decision["status"]})
     db.commit()
     return {"wave": wave_dict(wave), "decision": decision}
@@ -370,12 +412,18 @@ def resume_beta_wave(
     if wave.state != "paused":
         raise HTTPException(409, "Only a paused wave can be resumed")
     if wave.admitted_count >= wave.target_participants:
-        raise HTTPException(409, "Wave target has already been reached; close the observation window instead")
-    current = calculate_beta_metrics(db, cohort=wave.cohort, window_days=30)
+        raise HTTPException(409, "Wave target has already been reached")
+    current = _wave_metrics(db, wave)
     capacity = read_capacity_report(request.app.state.settings)
     comparison = compare_wave_signals(current, wave.baseline_metrics, request.app.state.settings)
-    if capacity.get("status") != "passed" or comparison["regressions"]:
-        raise HTTPException(409, {"message": "Wave guardrails have not recovered", "capacity": capacity, "comparison": comparison})
+    spent = max(0, int(round((comparison["current"]["compute_minutes_total"] - comparison["baseline"]["compute_minutes_total"]) * 60)))
+    blockers = list(comparison["regressions"])
+    if capacity.get("status") != "passed":
+        blockers.append("target_node_capacity_not_current")
+    if wave.compute_budget_seconds > 0 and spent >= wave.compute_budget_seconds:
+        blockers.append("wave_compute_budget_exhausted")
+    if blockers:
+        raise HTTPException(409, {"message": "Wave guardrails have not recovered", "blockers": sorted(set(blockers)), "comparison": comparison})
     wave.state = "open"
     wave.admission_paused = False
     wave.pause_reason = ""
@@ -397,9 +445,13 @@ def close_beta_wave(
         raise HTTPException(404, "Beta wave not found")
     if wave.state == "closed":
         return wave_dict(wave)
-    current = calculate_beta_metrics(db, cohort=wave.cohort, window_days=30)
-    capacity = read_capacity_report(request.app.state.settings)
-    decision = evaluate_wave(wave, current=current, capacity_report=capacity, settings=request.app.state.settings, persist=True)
+    decision = evaluate_wave(
+        wave,
+        current=_wave_metrics(db, wave),
+        capacity_report=read_capacity_report(request.app.state.settings),
+        settings=request.app.state.settings,
+        persist=True,
+    )
     wave.state = "closed"
     wave.admission_paused = True
     wave.closed_at = _now()
@@ -418,15 +470,20 @@ def beta_control(
     db: Session = Depends(get_db),
 ):
     _ = admin
-    wave = db.scalar(
-        select(BetaWave)
-        .where(BetaWave.cohort == cohort, BetaWave.state.in_(["planned", "open", "observing", "paused"]))
-        .order_by(BetaWave.wave_number.desc())
-        .limit(1)
+    wave = active_wave(db, cohort)
+    current = (
+        _wave_metrics(db, wave)
+        if wave is not None
+        else calculate_beta_metrics(db, cohort=cohort, window_days=30)
     )
-    current = calculate_beta_metrics(db, cohort=cohort, window_days=30)
     capacity = read_capacity_report(request.app.state.settings)
-    decision = evaluate_wave(wave, current=current, capacity_report=capacity, settings=request.app.state.settings, persist=False)
+    decision = evaluate_wave(
+        wave,
+        current=current,
+        capacity_report=capacity,
+        settings=request.app.state.settings,
+        persist=False,
+    )
     current_plan = active_plan(db)
     return {
         "wave": wave_dict(wave) if wave else None,
@@ -464,8 +521,7 @@ def capacity_plans(
     db: Session = Depends(get_db),
 ):
     _ = admin
-    rows = db.scalars(select(CapacityPlan).order_by(CapacityPlan.version.desc()).limit(limit)).all()
-    return [plan_dict(row) for row in rows]
+    return [plan_dict(row) for row in db.scalars(select(CapacityPlan).order_by(CapacityPlan.version.desc()).limit(limit)).all()]
 
 
 @router.get("/capacity-plans/active")
@@ -476,11 +532,7 @@ def active_capacity_plan(admin: User = Depends(require_admin), db: Session = Dep
 
 
 @router.post("/capacity-plans/{plan_id}/approve")
-def approve_capacity_plan(
-    plan_id: str,
-    admin: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
+def approve_capacity_plan(plan_id: str, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     plan = db.get(CapacityPlan, plan_id)
     if plan is None:
         raise HTTPException(404, "Capacity plan not found")
