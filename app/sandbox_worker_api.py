@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import subprocess
 import threading
 import time
@@ -24,8 +25,10 @@ MAX_PIDS = max(16, int(os.environ.get("X1_SANDBOX_MAX_PIDS", "128")))
 PREVIEW_TTL_SECONDS = max(60, int(os.environ.get("X1_SANDBOX_PREVIEW_TTL_SECONDS", "900")))
 _CONTAINER_RE = re.compile(r"^x1-preview-[a-f0-9]{8,40}$")
 _EXECUTION_GATE = threading.BoundedSemaphore(MAX_CONCURRENT_EXECUTIONS)
+_PREVIEW_LOCK = threading.Lock()
 _PREVIEW_LABEL = "x1.sandbox.preview=true"
 _EXPIRY_LABEL = "x1.sandbox.expires_at"
+_EXECUTION_LABEL = "x1.sandbox.execution=true"
 
 
 class ExecRequest(BaseModel):
@@ -70,6 +73,11 @@ def _run(argv: list[str], *, timeout: int = 10) -> subprocess.CompletedProcess[s
         timeout=timeout,
         shell=False,
     )
+
+
+def _validate_argv(argv: list[str]) -> None:
+    if not argv or len(argv) > 64 or any("\x00" in item or len(item) > 4000 for item in argv):
+        raise HTTPException(status_code=422, detail="Invalid sandbox argv")
 
 
 def _safe_relative(value: str) -> Path:
@@ -143,8 +151,7 @@ def _base_command(payload: ExecRequest, *, read_only_workspace: bool = False) ->
         raise HTTPException(status_code=422, detail="Only the configured sandbox image is allowed")
     if payload.network_policy not in {"deny", "restricted"}:
         raise HTTPException(status_code=422, detail="Unsupported sandbox network policy")
-    if any("\x00" in item or len(item) > 4000 for item in payload.argv):
-        raise HTTPException(status_code=422, detail="Invalid sandbox argv")
+    _validate_argv(payload.argv)
     if len(payload.env) > 32:
         raise HTTPException(status_code=422, detail="Too many sandbox environment variables")
     for key, value in payload.env.items():
@@ -179,14 +186,54 @@ def _preview_ids() -> list[str]:
     if not _docker_ready():
         return []
     try:
-        result = _run([
-            "docker", "ps", "-q", "--filter", "label=x1.sandbox.preview=true",
-        ], timeout=8)
+        result = _run(["docker", "ps", "-q", "--filter", "label=x1.sandbox.preview=true"], timeout=8)
         if result.returncode != 0:
             return []
         return [item.strip() for item in result.stdout.splitlines() if item.strip()]
     except Exception:
         return []
+
+
+def _preview_metadata(container_ref: str) -> tuple[bool, int]:
+    """Return X1 ownership and expiry for a running/known preview container."""
+    try:
+        result = _run(
+            [
+                "docker", "inspect", "-f",
+                '{{ index .Config.Labels "x1.sandbox.preview" }}|{{ index .Config.Labels "x1.sandbox.expires_at" }}|{{ .Config.Image }}',
+                container_ref,
+            ],
+            timeout=5,
+        )
+    except Exception:
+        return False, 0
+    if result.returncode != 0:
+        return False, 0
+    parts = result.stdout.strip().split("|", 2)
+    if len(parts) != 3:
+        return False, 0
+    label, raw_expiry, image = parts
+    try:
+        expiry = int(raw_expiry or 0)
+    except ValueError:
+        expiry = 0
+    return label == "true" and image == RUNTIME_IMAGE, expiry
+
+
+def _require_owned_preview(container_ref: str, *, stop_if_expired: bool = True) -> int:
+    if not _CONTAINER_RE.fullmatch(container_ref):
+        raise HTTPException(status_code=422, detail="Invalid preview container reference")
+    owned, expiry = _preview_metadata(container_ref)
+    if not owned:
+        raise HTTPException(status_code=404, detail="X1 preview container not found")
+    if expiry and expiry <= int(time.time()):
+        if stop_if_expired:
+            try:
+                _run(["docker", "rm", "-f", container_ref], timeout=8)
+            except Exception:
+                pass
+        raise HTTPException(status_code=410, detail="X1 preview container expired")
+    return expiry
 
 
 def _container_expiry(container_id: str) -> int:
@@ -206,7 +253,7 @@ def reap_expired_previews() -> int:
         expiry = _container_expiry(container_id)
         if expiry and expiry <= now:
             try:
-                _run(["docker", "stop", "--time", "2", container_id], timeout=8)
+                _run(["docker", "rm", "-f", container_id], timeout=8)
                 reaped += 1
             except Exception:
                 pass
@@ -278,7 +325,10 @@ def capabilities(x_x1_sandbox_token: str = Header(default="", alias="X-X1-Sandbo
 @app.post("/execute")
 def execute(payload: ExecRequest, x_x1_sandbox_token: str = Header(default="", alias="X-X1-Sandbox-Token")) -> dict[str, Any]:
     _auth(x_x1_sandbox_token)
-    command = _base_command(payload) + payload.argv
+    command = _base_command(payload)
+    execution_name = "x1-exec-" + secrets.token_hex(10)
+    command[3:3] = ["--name", execution_name, "--label", _EXECUTION_LABEL]
+    command += payload.argv
     if not _EXECUTION_GATE.acquire(timeout=2.0):
         raise HTTPException(status_code=429, detail="Sandbox execution capacity is busy")
     try:
@@ -303,6 +353,12 @@ def execute(payload: ExecRequest, x_x1_sandbox_token: str = Header(default="", a
                 "effective_network_policy": "deny",
             }
         except subprocess.TimeoutExpired as exc:
+            # Killing only the Docker CLI is insufficient: the container may
+            # continue running in the daemon. Force-remove the named execution.
+            try:
+                _run(["docker", "rm", "-f", execution_name], timeout=8)
+            except Exception:
+                pass
             return {
                 "argv": payload.argv,
                 "exit_code": None,
@@ -313,6 +369,12 @@ def execute(payload: ExecRequest, x_x1_sandbox_token: str = Header(default="", a
                 "network_policy": payload.network_policy,
                 "effective_network_policy": "deny",
             }
+        except (OSError, ValueError) as exc:
+            try:
+                _run(["docker", "rm", "-f", execution_name], timeout=8)
+            except Exception:
+                pass
+            raise HTTPException(status_code=503, detail="Sandbox execution failed to start") from exc
     finally:
         _EXECUTION_GATE.release()
 
@@ -322,28 +384,36 @@ def preview_start(payload: PreviewStartRequest, x_x1_sandbox_token: str = Header
     _auth(x_x1_sandbox_token)
     if not _CONTAINER_RE.fullmatch(payload.name):
         raise HTTPException(status_code=422, detail="Invalid preview container name")
-    reap_expired_previews()
-    if len(_preview_ids()) >= MAX_ACTIVE_PREVIEWS:
-        raise HTTPException(status_code=429, detail="Sandbox preview capacity is busy")
     command = _base_command(payload)
-    expiry = int(time.time()) + PREVIEW_TTL_SECONDS
-    command[2:2] = [
-        "-d", "--name", payload.name,
-        "--label", _PREVIEW_LABEL,
-        "--label", f"{_EXPIRY_LABEL}={expiry}",
-    ]
-    command += payload.argv
-    completed = subprocess.run(
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=20,
-        shell=False,
-    )
-    if completed.returncode != 0:
-        raise HTTPException(status_code=503, detail=(completed.stderr or "Failed to start preview")[-4000:])
+    with _PREVIEW_LOCK:
+        reap_expired_previews()
+        if len(_preview_ids()) >= MAX_ACTIVE_PREVIEWS:
+            raise HTTPException(status_code=429, detail="Sandbox preview capacity is busy")
+        expiry = int(time.time()) + PREVIEW_TTL_SECONDS
+        command[2:2] = [
+            "-d", "--name", payload.name,
+            "--label", _PREVIEW_LABEL,
+            "--label", f"{_EXPIRY_LABEL}={expiry}",
+        ]
+        command += payload.argv
+        try:
+            completed = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=20,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+            try:
+                _run(["docker", "rm", "-f", payload.name], timeout=8)
+            except Exception:
+                pass
+            raise HTTPException(status_code=503, detail="Failed to start preview container") from exc
+        if completed.returncode != 0:
+            raise HTTPException(status_code=503, detail=(completed.stderr or "Failed to start preview")[-4000:])
     return {
         "container_ref": payload.name,
         "backend": "remote-docker",
@@ -355,36 +425,47 @@ def preview_start(payload: PreviewStartRequest, x_x1_sandbox_token: str = Header
 @app.post("/preview/exec")
 def preview_exec(payload: PreviewExecRequest, x_x1_sandbox_token: str = Header(default="", alias="X-X1-Sandbox-Token")) -> dict[str, Any]:
     _auth(x_x1_sandbox_token)
-    if not _CONTAINER_RE.fullmatch(payload.container_ref):
-        raise HTTPException(status_code=422, detail="Invalid preview container reference")
-    completed = subprocess.run(
-        ["docker", "exec", payload.container_ref, *payload.argv],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=payload.timeout_seconds,
-        shell=False,
-    )
+    _validate_argv(payload.argv)
+    expiry = _require_owned_preview(payload.container_ref)
+    try:
+        completed = subprocess.run(
+            ["docker", "exec", payload.container_ref, *payload.argv],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=payload.timeout_seconds,
+            shell=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "argv": payload.argv,
+            "exit_code": None,
+            "stdout": (exc.stdout or "")[-10_000:] if isinstance(exc.stdout, str) else "",
+            "stderr": (exc.stderr or "")[-10_000:] if isinstance(exc.stderr, str) else "",
+            "timed_out": True,
+            "expires_at_epoch": expiry,
+        }
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="Preview command execution failed") from exc
     return {
         "argv": payload.argv,
         "exit_code": completed.returncode,
         "stdout": completed.stdout[-10_000:],
         "stderr": completed.stderr[-10_000:],
+        "timed_out": False,
+        "expires_at_epoch": expiry,
     }
 
 
 @app.post("/preview/stop")
 def preview_stop(payload: PreviewStopRequest, x_x1_sandbox_token: str = Header(default="", alias="X-X1-Sandbox-Token")) -> dict[str, Any]:
     _auth(x_x1_sandbox_token)
-    if not _CONTAINER_RE.fullmatch(payload.container_ref):
-        raise HTTPException(status_code=422, detail="Invalid preview container reference")
-    subprocess.run(
-        ["docker", "stop", "--time", "2", payload.container_ref],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=8,
-        shell=False,
-    )
+    _require_owned_preview(payload.container_ref, stop_if_expired=False)
+    try:
+        result = _run(["docker", "rm", "-f", payload.container_ref], timeout=8)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Failed to stop preview container") from exc
+    if result.returncode != 0:
+        raise HTTPException(status_code=503, detail="Failed to stop preview container")
     return {"status": "stopped"}
