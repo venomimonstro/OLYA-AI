@@ -195,6 +195,15 @@ async def chat(
     freshness_required = FRESHNESS_SENTINEL in verified_urls
     quality_urls = {url for url in verified_urls if url != FRESHNESS_SENTINEL}
 
+    # Never hold a PostgreSQL connection while waiting for the CPU inference
+    # queue or while Qwen is generating. This transaction contains only bounded
+    # reads plus durable conversation/quota state. Committing here releases the
+    # DB connection back to the small production pool; answer/telemetry writes
+    # below use a new short transaction. It also keeps a new conversation valid
+    # when inference fails, so the failure UsageEvent cannot reference a row that
+    # was erased by rollback.
+    db.commit()
+
     request_id = str(uuid4())
     total_started = perf_counter()
     queue_started = perf_counter()
