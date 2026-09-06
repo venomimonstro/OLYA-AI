@@ -157,10 +157,6 @@ def main() -> int:
 
     if args.runtime:
         checks.append(run("sandbox_probe", ["docker", "compose", "exec", "-T", "app", "python", "-m", "scripts.sandbox_probe"], timeout=max(args.command_timeout, 180)))
-        # Component acceptance is intentionally independent from the expensive
-        # Qwen user journey. It proves auth/session lifecycle, projects, memory,
-        # files, real LibreOffice document QA/release, API keys/contexts, usage,
-        # export and sandbox boundaries before long-running AI tests begin.
         checks.append(run("component_acceptance", ["docker", "compose", "exec", "-T", "app", "python", "-m", "scripts.component_acceptance"], timeout=max(args.command_timeout, 900)))
         backup = run("backup", ["bash", "scripts/backup.sh"], timeout=max(args.command_timeout, 600)); checks.append(backup)
         backup_path = latest_backup_from_output(backup.get("stdout", "")) if backup["status"] == "passed" else ""
@@ -169,6 +165,11 @@ def main() -> int:
         else:
             checks.append({"name": "restore_drill", "status": "failed", "required": True, "detail": "No verified backup produced"})
         checks.append(run("http_load_smoke", ["docker", "compose", "exec", "-T", "app", "python", "scripts/load_smoke.py", "--url", "http://127.0.0.1:8000", "--requests", "120", "--concurrency", "16"], timeout=max(args.command_timeout, 240)))
+        checks.append(run(
+            "multi_user_load",
+            ["docker", "compose", "exec", "-T", "app", "python", "-m", "scripts.load_users", "--url", "http://127.0.0.1:8000", "--requests", "1000", "--http-concurrency", "64", "--live-users", "40", "--user-concurrency", "8", "--virtual-users", "100000", "--max-queue", env_file_value("X1_MAX_QUEUE_SIZE", "64")],
+            timeout=max(args.command_timeout, 900),
+        ))
         if args.live_inference:
             context_tokens = env_file_value("X1_DEEP_CONTEXT_TOKENS", "8192")
             checks.append(run("long_context_live", ["docker", "compose", "exec", "-T", "app", "python", "-m", "scripts.long_context_probe", "--context-tokens", context_tokens, "--live-url", "http://llama:8080"], timeout=max(args.command_timeout, 900)))
@@ -188,12 +189,13 @@ def main() -> int:
     failed_required = [item["name"] for item in checks if item.get("required", True) and item.get("status") != "passed"]
     status = "passed" if not failed_required else "failed"
     payload = {
-        "format": "x1-release-gate-v3",
+        "format": "x1-release-gate-v4",
         "status": status,
         "version": project_version(),
         "git_head": git_head(),
         "mode": "runtime" if args.runtime else "static",
         "component_acceptance_requested": bool(args.runtime),
+        "multi_user_load_requested": bool(args.runtime),
         "live_inference_requested": bool(args.live_inference),
         "user_journey_requested": bool(args.user_journey),
         "chaos_requested": bool(args.chaos),
