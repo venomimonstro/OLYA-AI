@@ -47,6 +47,25 @@ services:
         limits:
           memory: 1024M
 
+  gate:
+    profiles: ["gate"]
+    build:
+      context: .
+      args:
+        X1_EXTRAS: "dev"
+    env_file: .env
+    environment:
+      X1_ENV: test
+      X1_DATABASE_AUTO_CREATE_SCHEMA: "true"
+      X1_DATABASE_URL: sqlite+pysqlite:///./data/release_gate.db
+    command: ["python", "-m", "pytest", "-q"]
+    volumes:
+      - x1_data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+
   image-worker:
     profiles: ["images"]
     build:
