@@ -64,13 +64,20 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-python3 - "$BACKUP/files.tar" "$TMP_ROOT" <<'PY'
+python3 - "$BACKUP/files.tar" "$TMP_ROOT" "${X1_RESTORE_MAX_DATA_BYTES:-0}" <<'PY'
 from __future__ import annotations
-import sys, tarfile
+import shutil, sys, tarfile
 from pathlib import Path, PurePosixPath
 
 archive = Path(sys.argv[1])
 destination = Path(sys.argv[2])
+operator_limit = max(0, int(sys.argv[3] or 0))
+destination.mkdir(parents=True, exist_ok=True)
+# Extraction temporarily coexists with current production data on the same
+# filesystem. Keep 10% headroom and optionally respect a stricter operator cap.
+free_bytes = shutil.disk_usage(destination).free
+disk_budget = int(free_bytes * 0.90)
+max_bytes = min(disk_budget, operator_limit) if operator_limit else disk_budget
 with tarfile.open(archive, "r:*") as tf:
     total = 0
     for member in tf.getmembers():
@@ -81,8 +88,10 @@ with tarfile.open(archive, "r:*") as tf:
             raise SystemExit(f"unsafe archive member: {member.name}")
         if member.isfile():
             total += max(0, int(member.size))
-            if total > 20 * 1024 * 1024 * 1024:
-                raise SystemExit("backup application data exceeds restore safety limit")
+            if total > max_bytes:
+                raise SystemExit(
+                    f"backup application data ({total} bytes) exceeds safe restore capacity ({max_bytes} bytes)"
+                )
     tf.extractall(destination, filter="data")
 restored = destination / "data"
 if not restored.is_dir():
@@ -112,8 +121,6 @@ quiesce_sandbox_containers
 
 docker compose exec -T db psql -U x1 -d postgres -v ON_ERROR_STOP=1 -c \
   "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname IN ('x1','$TEMP_DB') AND pid <> pg_backend_pid();" >/dev/null
-# The two renames are handled explicitly. If the second rename fails after the
-# original x1 was moved aside, restore the original name immediately.
 docker compose exec -T db psql -U x1 -d postgres -v ON_ERROR_STOP=1 -c "ALTER DATABASE x1 RENAME TO $OLD_DB;" >/dev/null
 if ! docker compose exec -T db psql -U x1 -d postgres -v ON_ERROR_STOP=1 -c "ALTER DATABASE $TEMP_DB RENAME TO x1;" >/dev/null; then
   docker compose exec -T db psql -U x1 -d postgres -v ON_ERROR_STOP=1 -c "ALTER DATABASE $OLD_DB RENAME TO x1;" >/dev/null 2>&1 || true
