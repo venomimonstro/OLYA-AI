@@ -134,6 +134,9 @@ class Settings(BaseSettings):
     beta_wave_max_queue_regression_ratio: float = 1.50
     beta_wave_max_duration_regression_ratio: float = 1.50
     beta_wave_min_cpu_efficiency_ratio: float = 0.70
+    beta_trend_max_success_drop: float = 0.02
+    beta_trend_max_frustration_increase: float = 0.02
+    beta_trend_max_quality_drop: float = 0.05
 
 
 @lru_cache
