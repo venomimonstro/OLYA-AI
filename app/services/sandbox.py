@@ -1,3 +1,299 @@
-# Restored losslessly from the canonical cumulative source.
-import base64 as _b64, zlib as _zlib
-exec(compile(_zlib.decompress(_b64.b85decode('c-rk*-E-r%5r5ZTfgmsBRgz_2l1bF+rXRV?+~g+p^pd`~9u7o87HSgU0H7?L>;JvG0Qe<Qvg|g^OZ{LGz+xBJ{p}aI(yAayvZ`#Qd6E!OluBE|q*Rt!p`;m&!rVWNlJ&DP^^;jwR^-j7T9#U++?de{IcLnWG-t+eQ?qWSJVnXuIv2}&^%{nw(Z~^yPfTV@wSBL(($U{4X+^=^AfAs1{FTUMH2P!1G6I&Lxm^6LD<1cm{F$ZqTxK8SO8L!8KQSl9YB#~RJgqES=G@JZf03V*<Zg*=n8^LgQmNd{Y0f|)o^(Mdg@a^#MKW%AYLiq+%Y@`Q338%R^A*>cXU!H?Sw&+qd3W@Tk`<u11-WT9-x9GR&4>s|9%-gvo2FwzOO+K&(kH@m!^zFz%B^F&QrfY`?M{T37L)+;yiunQYmu%aq=*{=5D(Bmx^@%(;e~~)cr$7BZjYiw&J94Ox{}ci@PX59xHf<_dOHT)WI`@FWZ%F4`%k}o{ODFxWrvn}Vut=;E9h&GD`E=Segy*7JkJ+DFwkAxV+nUo%c<tzBQjMPXlOxZ^8=}#V8ED8g=6CG>Y>@HJLRP%(O*9~T#vi@`P4jiF+Zs9<C1A58}I@S5Yc1et_W)X-ofMI+F^re?_fk2XW@2R9H5<ug5B|iZ-ucY5{S|Pkz?Y>9LgQI(PRAC19oudv|&#WjP-2mgUz&KHrms%yFty<?F?>)rm11y?qd3GgKo4Z161JHqk{-(N^o2nj_(}>-RMPJyl(nTdX6yU1jzSS0R9=E|Mm#zgO(3LKYBfAdzSNnG9Elh%1X8rxv+wpy*PP*rc9(Zpb5+X%6vZH`g_69aA{%3A&!HTxIt5kP8UgAxP@ChHrJv-9G&-Y*qVm6j^wjPv?l?SP#-StYzyv~bhr0+c8EOy=l&Y|^GV<i>*1+GA-R1}`aTgx<u2jB?362!bF(v+7q8{u^C;}0bU^)`P2Lm{4I#(hwT@QczLw=Vq{LjM@UWxDZ0Y8_&~S{WI=(HL;R)zH0gpTt;NEmmIVPw-Q?eAsSiXQiq?*}u9fm_rnwC|Pi$d5rS>=k^F)4VV^e!ouXk{1&FRH2BTy3jT<s#jA=|kM%c3GlizDqhsLz4jby{Drm<pBR1U~&8M;N0<QCP1gXLXG~VcE#GkyQ!s{kK(T2<6il!w3WE4uo^PwA;XJpR0B$Bo&gwu;th}D-`7^ec<rCs#Xf^+ai0ktl}rOljVnGe*~2{&b?<A@hT9pmj(MR#Wl7=UF8GLYa2~L$$28RsbaXmJfeA1{O(weVzhwn+U-FHw4<{332}i@hMZ=!<@rB#r3==$q-vyz2l4(^g{`B#qpD`d*3%i@B60<3lY9jf=q|{;qvEq)KL!PC`%)|kmVz$#!!M4%mH)BM7)N_P5j-3$iEkM1ZkB<22TTk7%Q5-)NhmyeWOh?9SdO7wE7&RV=BKEgAYdC3kSMtSDK!7(oT|735dKzcOE?UKnA6pAP(eoJwm;`p)%SmvZF<AJ3i!I8PaR!5@xqcW+g*JyDQ;7_IGQJrb@tH5KzW$~N#Xq`RFOK+<iOb!7!Sp)-5=aTu-j<Tnx->du^aVndgK{B9^NgPM+h3%qO6>W-GXo#u`2+|3lKjYdN!H4M6T|r|fQncJg{cx5NdbsZ0N)X<l%1#t32a<4!luTqIYFIzH=5S>UNgfim|hvU%N=BLkwO23DQ17=4p)ZNQ5okk06b-;o=Frx&BN%<je?GF+mw|hRwF)?b!!M*4VedXj*x8)6TKO?O<vONRR815<4-kjqkmHkCg8bBW+o(?XH(QL_jB_W;Sx@P)!dC6;!#4&4FL>)_RBq=CY&iCD>1o?=s&iz8AXF{T~E8kM<jSAWqgnumWwuDq^f`hD68|)xpied<F}<nhPCBk4G~PX@U>ZMvqc*$YP&7MZ%6x!=IKPW-&khRJndBwi{5D8B#ZtqZr&2y^WB($vMTqkz&LM>A}}4A;PEM*3aI={6n7LJ>;yX@UzRysFQN$s4+_+V<+3WGxUMUZ3ZeiYKE^Nv!+w{0j`iR)LMvHdiMU}}xVi;9ZrV09Xq@1`K<?caggq@D-Q{YB4P?$U&uZOZ!^=9i>krrO#{;dIn?KpkS-!QQUZ~qQm-&3&+w);elczenM~ZiZqTBbL*ta6oGwdOHT_3FZOZWx<d^34FgTMLh;fblgT0;%bEj6KdOekR-yZS9e-38`Qi{wY!sDp+j<cj$ol%KjSYDd98dj-AUmI6yfW{_t761}*0CxaLE_lbaEP!Pf!@ZQ|q^&-Yqq7wX}B^>*{))#T~lsfB8FglMr5I)PjYYq>s)7Cgc`%PyL-TY^stU1f=I>C1<5&rWbKLq-{2#@O+cwxfPh8PoG^;%bnLypEJOtlfkN$O$=z3_tiEd{QFDwwwBLD+RfFKX%wmo*$y80TC@_#BgW1ax{{^6&zQKSKZ=zCq%c2GAwjbJhz9oW()`>JD)=n>B}RcK(4}&StpU%)BFCfA`&aCu;VDqt()SFD|^&=I-1M;Qgb`8!nA0QGW?!Lzb?A4zk}y@P}WuLOD{WU`!8eUs;^Is6;tlf1EbQwbxKxRbU^=i_-4?UtaXei!TXu?$CWgu#|ja)}ULs7g|G+8f{?x6;F35B=m<h6!-pBkltY3kDaWm-Jz$4`dveZfYYm--I-~vvMEGG5D{Hr*H{;LFn{xQ{`QuH{sv10kFMb=;5SVC14;jCHjvs6zEFJ8`$91Q)2PYME+YQG1im5x-8+9LWdq`XPs}%8xpcD^Pg(>6aJyB)6dS=Z)Ozj%$dPxYb)>=G_3SpNCpOHT)!DrEEpp!-f3vq`gJ01OU-#gE?rCXE-k^p~ePkP*_?Yk#KzD$99NVv}V*g7O>}6Av4pppSwatO5d@U>;-mu#FpW&^Z?w@6^)b$nDvpB+=`}cZi8+^Ljht*5*bo_JHYd%^18#f_%Qv')), __file__, "exec"), globals())
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+
+class SandboxError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class SandboxBackendInfo:
+    backend: str
+    executable: str | None
+    available: bool
+    reason: str = ""
+
+
+def detect_container_backend(preferred: str = "auto") -> SandboxBackendInfo:
+    names = [preferred] if preferred in {"docker", "podman"} else ["docker", "podman"]
+    for name in names:
+        executable = shutil.which(name)
+        if not executable:
+            continue
+        try:
+            completed = subprocess.run(
+                [executable, "version"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=4,
+                shell=False,
+            )
+            if completed.returncode == 0:
+                return SandboxBackendInfo(name, executable, True)
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return SandboxBackendInfo("unavailable", None, False, "Docker/Podman runtime is not available")
+
+
+def _image_exists(info: SandboxBackendInfo, image: str) -> bool:
+    if not info.available or not info.executable or not image:
+        return False
+    argv = [info.executable, "image", "inspect", image] if info.backend == "docker" else [info.executable, "image", "exists", image]
+    try:
+        completed = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+            shell=False,
+        )
+        return completed.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def sandbox_capabilities(preferred: str, image: str) -> dict:
+    info = detect_container_backend(preferred)
+    present = _image_exists(info, image) if info.available else False
+    available = bool(info.available and present)
+    return {
+        "backend": info.backend,
+        "available": available,
+        "runtime_available": info.available,
+        "image": image,
+        "image_present": present,
+        "network_isolation": available,
+        "restricted_network_mode": "deny_until_egress_allowlist_is_configured",
+        "filesystem_isolation": available,
+        "reason": "" if available else ("Sandbox image is not installed locally" if info.available else info.reason),
+    }
+
+
+def _base_run_args(
+    info: SandboxBackendInfo,
+    *,
+    image: str,
+    workspace: Path,
+    scratch: Path,
+    cpu_limit: float,
+    memory_mb: int,
+    process_limit: int,
+    network_policy: str,
+    read_only_workspace: bool = False,
+) -> list[str]:
+    if not info.available or not info.executable:
+        raise SandboxError("Container sandbox runtime is unavailable")
+    if not _image_exists(info, image):
+        raise SandboxError("Configured sandbox image is not installed locally")
+    if network_policy not in {"deny", "restricted"}:
+        raise SandboxError("Unsupported network policy")
+
+    workspace = workspace.resolve()
+    scratch = scratch.resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    scratch.mkdir(parents=True, exist_ok=True)
+    mount_mode = "ro" if read_only_workspace else "rw"
+    argv = [
+        info.executable,
+        "run",
+        "--rm",
+        "--pull=never",
+        "--workdir",
+        "/workspace",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        str(max(16, int(process_limit))),
+        "--memory",
+        f"{max(128, int(memory_mb))}m",
+        "--cpus",
+        str(max(0.1, float(cpu_limit))),
+        "--mount",
+        f"type=bind,src={workspace},dst=/workspace,{mount_mode}",
+        "--mount",
+        f"type=bind,src={scratch},dst=/x1-runtime,rw",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,nodev,size=256m",
+    ]
+
+    # A true restricted-egress allowlist is not implemented yet. Treating
+    # "restricted" as Docker's default network would silently grant arbitrary
+    # outbound Internet access to generated code, so both supported policies are
+    # fail-closed until an explicit egress proxy/allowlist exists.
+    argv += ["--network", "none"]
+
+    # Keep host identity to avoid creating root-owned files in the bind mount.
+    if hasattr(os, "getuid") and hasattr(os, "getgid"):
+        argv += ["--user", f"{os.getuid()}:{os.getgid()}"]
+    argv.append(image)
+    return argv
+
+
+def run_in_container(
+    *,
+    preferred_backend: str,
+    image: str,
+    workspace: Path,
+    scratch: Path,
+    argv: list[str],
+    timeout_seconds: int,
+    cpu_limit: float,
+    memory_mb: int,
+    process_limit: int,
+    network_policy: str,
+    env: dict[str, str] | None = None,
+) -> dict:
+    if not argv or any("\x00" in value for value in argv):
+        raise SandboxError("Invalid sandbox command")
+    info = detect_container_backend(preferred_backend)
+    command = _base_run_args(
+        info,
+        image=image,
+        workspace=workspace,
+        scratch=scratch,
+        cpu_limit=cpu_limit,
+        memory_mb=memory_mb,
+        process_limit=process_limit,
+        network_policy=network_policy,
+    )
+    for key, value in sorted((env or {}).items()):
+        if not key.replace("_", "").isalnum() or key.upper() != key:
+            raise SandboxError("Invalid sandbox environment variable name")
+        command += ["--env", f"{key}={value}"]
+    command += argv
+    effective_network_policy = "deny" if network_policy in {"deny", "restricted"} else network_policy
+    try:
+        completed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=max(1, int(timeout_seconds)),
+            shell=False,
+        )
+        return {
+            "argv": argv,
+            "exit_code": completed.returncode,
+            "stdout": completed.stdout[-30_000:],
+            "stderr": completed.stderr[-30_000:],
+            "timed_out": False,
+            "sandbox_level": info.backend,
+            "network_policy": network_policy,
+            "effective_network_policy": effective_network_policy,
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "argv": argv,
+            "exit_code": None,
+            "stdout": (exc.stdout or "")[-30_000:] if isinstance(exc.stdout, str) else "",
+            "stderr": (exc.stderr or "")[-30_000:] if isinstance(exc.stderr, str) else "",
+            "timed_out": True,
+            "sandbox_level": info.backend,
+            "network_policy": network_policy,
+            "effective_network_policy": effective_network_policy,
+        }
+
+
+def sanitize_health_spec(spec: dict | None) -> dict:
+    spec = dict(spec or {})
+    path = str(spec.get("path") or "/health")
+    if not path.startswith("/") or "//" in path or len(path) > 300:
+        raise SandboxError("Invalid health path")
+    expected = int(spec.get("expected_status") or 200)
+    if expected < 100 or expected > 599:
+        raise SandboxError("Invalid expected health status")
+    return {"path": path, "expected_status": expected}
+
+
+def start_detached_preview(
+    *,
+    preferred_backend: str,
+    image: str,
+    workspace: Path,
+    scratch: Path,
+    argv: list[str],
+    name: str,
+    cpu_limit: float,
+    memory_mb: int,
+    process_limit: int,
+    network_policy: str,
+) -> dict:
+    if not argv:
+        raise SandboxError("Preview command is empty")
+    info = detect_container_backend(preferred_backend)
+    command = _base_run_args(
+        info,
+        image=image,
+        workspace=workspace,
+        scratch=scratch,
+        cpu_limit=cpu_limit,
+        memory_mb=memory_mb,
+        process_limit=process_limit,
+        network_policy=network_policy,
+    )
+    # Convert one-shot run into detached lifecycle while preserving --rm and all
+    # hardening flags.
+    command.insert(2, "-d")
+    command[3:3] = ["--name", name]
+    command += argv
+    completed = subprocess.run(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=20,
+        shell=False,
+    )
+    if completed.returncode != 0:
+        raise SandboxError((completed.stderr or "Failed to start preview container")[-4000:])
+    return {
+        "container_ref": completed.stdout.strip() or name,
+        "backend": info.backend,
+        "effective_network_policy": "deny",
+    }
+
+
+def exec_in_container(*, preferred_backend: str, container_ref: str, argv: list[str], timeout_seconds: int) -> dict:
+    info = detect_container_backend(preferred_backend)
+    if not info.available or not info.executable:
+        raise SandboxError("Container sandbox runtime is unavailable")
+    completed = subprocess.run(
+        [info.executable, "exec", container_ref, *argv],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=max(1, int(timeout_seconds)),
+        shell=False,
+    )
+    return {
+        "argv": argv,
+        "exit_code": completed.returncode,
+        "stdout": completed.stdout[-10_000:],
+        "stderr": completed.stderr[-10_000:],
+    }
+
+
+def stop_container(*, preferred_backend: str, container_ref: str) -> None:
+    info = detect_container_backend(preferred_backend)
+    if not info.available or not info.executable or not container_ref:
+        return
+    subprocess.run(
+        [info.executable, "stop", "--time", "2", container_ref],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=8,
+        shell=False,
+    )
