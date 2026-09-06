@@ -22,12 +22,7 @@ def _aware(value):
 
 
 def run_beta_operations_tick(settings) -> dict:
-    """Idempotent closed-beta maintenance tick.
-
-    The tick is intentionally database-only: it never runs inference. It creates
-    at most one snapshot per configured interval and re-evaluates the active
-    admission wave against the newest persisted telemetry/capacity report.
-    """
+    """Idempotent closed-beta maintenance tick without any inference work."""
     cohort = str(getattr(settings, "beta_operations_cohort", "closed-beta-1"))
     window_days = max(1, min(180, int(getattr(settings, "beta_operations_window_days", 30))))
     snapshot_hours = max(1.0, float(getattr(settings, "beta_snapshot_interval_hours", 24.0)))
@@ -69,14 +64,13 @@ def run_beta_operations_tick(settings) -> dict:
 
 async def beta_operations_loop(settings) -> None:
     interval = max(300.0, float(getattr(settings, "beta_operations_check_interval_seconds", 3600.0)))
-    # Run once shortly after startup so a stale wave is not left open for an
-    # entire interval following a deploy/restart.
     await asyncio.sleep(min(30.0, interval))
     while True:
         try:
             result = await asyncio.to_thread(run_beta_operations_tick, settings)
-            if result.get("wave_decision", {}).get("status") in {"paused_for_regression", "paused_for_budget"}:
-                logger.warning("X1 beta admission automatically paused: %s", result["wave_decision"])
+            decision = result.get("wave_decision") or {}
+            if decision.get("status") in {"paused_for_regression", "paused_for_budget"}:
+                logger.warning("X1 beta admission automatically paused: %s", decision)
         except asyncio.CancelledError:
             raise
         except Exception:
