@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import DocumentArtifact, DocumentQAEvent, DocumentRevision, User
 from app.schemas.documents import DocumentArtifactRead, DocumentRevisionRead, DocumentSpec
-from app.services.access import ROLE_RANK, project_role, require_project_role
+from app.services.access import ROLE_RANK, require_project_role
 from app.services.auth import get_current_user
 from app.services.documents import (
     DocumentBuildError,
@@ -39,17 +39,30 @@ def _artifact_access(db: Session, user: User, artifact_id: str, minimum: str = "
 
 
 def _artifact_write_access(db: Session, user: User, artifact: DocumentArtifact, *, release: bool = False) -> DocumentArtifact:
+    """Authorize and serialize writes to one logical document.
+
+    Revision number, QA state and release state are all derived from the same
+    artifact. Locking that row prevents concurrent requests from creating the
+    same revision number/directory or releasing a revision while another request
+    advances the document.
+    """
     if artifact.project_id:
-        project, role = require_project_role(db, user, artifact.project_id, "member")
-        _ = project
+        _project, role = require_project_role(db, user, artifact.project_id, "member")
         if release and ROLE_RANK.get(role, 0) < ROLE_RANK["manager"]:
             raise HTTPException(status_code=403, detail="Project document release requires manager role")
         if not release and artifact.user_id != user.id and ROLE_RANK.get(role, 0) < ROLE_RANK["manager"]:
             raise HTTPException(status_code=403, detail="Only the document creator or project manager can modify it")
-        return artifact
-    if artifact.user_id != user.id:
+    elif artifact.user_id != user.id:
         raise HTTPException(status_code=404, detail="Document not found")
-    return artifact
+
+    locked = db.scalar(
+        select(DocumentArtifact)
+        .where(DocumentArtifact.id == artifact.id)
+        .with_for_update()
+    )
+    if locked is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return locked
 
 
 def _revision(db: Session, artifact: DocumentArtifact, revision: int | None = None) -> DocumentRevision:
@@ -151,7 +164,7 @@ def revise_document(
     db: Session = Depends(get_db),
 ) -> DocumentRevision:
     artifact = _artifact_access(db, user, artifact_id, "viewer")
-    _artifact_write_access(db, user, artifact)
+    artifact = _artifact_write_access(db, user, artifact)
     if payload.project_id and payload.project_id != artifact.project_id:
         raise HTTPException(status_code=400, detail="Document project cannot be changed by revision")
     next_revision = artifact.current_revision + 1
@@ -185,7 +198,7 @@ def run_document_qa(
     db: Session = Depends(get_db),
 ) -> DocumentRevision:
     artifact = _artifact_access(db, user, artifact_id, "viewer")
-    _artifact_write_access(db, user, artifact)
+    artifact = _artifact_write_access(db, user, artifact)
     revision = _revision(db, artifact)
     docx = Path(revision.docx_path)
     if not docx.is_file() or sha256_file(docx) != revision.docx_sha256:
@@ -212,8 +225,6 @@ def run_document_qa(
         pdf = render_docx_to_pdf(docx, rev_dir, timeout_seconds=request.app.state.settings.document_render_timeout_seconds)
         rendered = render_qa(pdf, rev_dir / "pages", max_pages=request.app.state.settings.document_max_pages)
     except DocumentBusyError as exc:
-        # Capacity pressure is transient. Do not poison a valid revision with a
-        # persistent qa_failed state merely because another render owns the slot.
         db.rollback()
         raise HTTPException(
             status_code=503,
@@ -244,7 +255,7 @@ def run_document_qa(
 @router.post("/{artifact_id}/release", response_model=DocumentArtifactRead)
 def release_document(artifact_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> DocumentArtifact:
     artifact = _artifact_access(db, user, artifact_id, "viewer")
-    _artifact_write_access(db, user, artifact, release=True)
+    artifact = _artifact_write_access(db, user, artifact, release=True)
     revision = _revision(db, artifact)
     if revision.qa_status != "passed" or not revision.pdf_sha256:
         raise HTTPException(status_code=409, detail="Document cannot be released before successful final QA")
