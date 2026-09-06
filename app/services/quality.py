@@ -15,24 +15,10 @@ _PLACEHOLDER_PATTERNS = (
 )
 _URL_RE = re.compile(r"https?://[^\s<>()\]\[\]{}\"']+", re.IGNORECASE)
 _FRESHNESS_MARKERS = (
-    "сегодня",
-    "сейчас",
-    "на данный момент",
-    "актуальн",
-    "последние новости",
-    "последние данные",
-    "последняя версия",
-    "текущая цена",
-    "текущая стоимость",
-    "текущий курс",
-    "latest",
-    "today",
-    "right now",
-    "currently",
-    "current price",
-    "current rate",
-    "latest version",
-    "latest news",
+    "сегодня", "сейчас", "на данный момент", "актуальн", "последние новости",
+    "последние данные", "последняя версия", "текущая цена", "текущая стоимость",
+    "текущий курс", "latest", "today", "right now", "currently", "current price",
+    "current rate", "latest version", "latest news",
 )
 
 
@@ -53,6 +39,10 @@ class DeterministicAudit:
     @property
     def unverifiable(self) -> bool:
         return any(item["status"] == "unverified" for item in self.checks)
+
+    @property
+    def grounded(self) -> bool:
+        return any(item.get("key") == "source_grounding" and item.get("status") == "passed" for item in self.checks)
 
 
 class AnswerQualityEngine:
@@ -88,6 +78,16 @@ class AnswerQualityEngine:
 
         urls = sorted(set(item.rstrip(".,;:!?)]}") for item in _URL_RE.findall(text)))
         allowed = {item.rstrip("/") for item in (verified_urls or set())}
+        if allowed:
+            checks.append(
+                self._check(
+                    "source_grounding",
+                    "К ответу передан проверенный source context",
+                    "passed",
+                    f"Проверенных source URL: {len(allowed)}",
+                )
+            )
+
         if urls:
             unverified = [item for item in urls if item.rstrip("/") not in allowed]
             if unverified:
@@ -136,9 +136,7 @@ class AnswerQualityEngine:
         return DeterministicAudit(checks=checks, warnings=warnings)
 
     def critic_messages(self, user_request: str, answer: str, requirements: list[AnswerRequirement]) -> list[ChatMessage]:
-        requirement_lines = "\n".join(
-            f"- {item.label or self._default_label(item)}" for item in requirements
-        ) or "- Явных формальных требований нет"
+        requirement_lines = "\n".join(f"- {item.label or self._default_label(item)}" for item in requirements) or "- Явных формальных требований нет"
         return [
             ChatMessage(
                 role="system",
@@ -150,46 +148,16 @@ class AnswerQualityEngine:
                     "Если явных проблем нет, issues должен быть пустым массивом."
                 ),
             ),
-            ChatMessage(
-                role="user",
-                content=(
-                    f"ЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n{user_request}\n\n"
-                    f"ФОРМАЛЬНЫЕ ТРЕБОВАНИЯ:\n{requirement_lines}\n\n"
-                    f"ОТВЕТ X1:\n{answer}"
-                ),
-            ),
+            ChatMessage(role="user", content=f"ЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n{user_request}\n\nФОРМАЛЬНЫЕ ТРЕБОВАНИЯ:\n{requirement_lines}\n\nОТВЕТ X1:\n{answer}"),
         ]
 
-    def repair_messages(
-        self,
-        user_request: str,
-        answer: str,
-        deterministic: DeterministicAudit,
-        requirements: list[AnswerRequirement],
-    ) -> list[ChatMessage]:
+    def repair_messages(self, user_request: str, answer: str, deterministic: DeterministicAudit, requirements: list[AnswerRequirement]) -> list[ChatMessage]:
         failures = [item for item in deterministic.checks if item["status"] == "failed"]
         failure_lines = "\n".join(f"- {item['label']}: {item.get('detail', '')}" for item in failures)
-        requirement_lines = "\n".join(
-            f"- {item.label or self._default_label(item)}" for item in requirements
-        ) or "- Нет дополнительных формальных требований"
+        requirement_lines = "\n".join(f"- {item.label or self._default_label(item)}" for item in requirements) or "- Нет дополнительных формальных требований"
         return [
-            ChatMessage(
-                role="system",
-                content=(
-                    "Ты редактор X1. Исправь только перечисленные дефекты ответа. "
-                    "Не добавляй новые факты без необходимости, не меняй уже правильные части и не обсуждай проверку. "
-                    "Верни только исправленный финальный ответ."
-                ),
-            ),
-            ChatMessage(
-                role="user",
-                content=(
-                    f"ИСХОДНЫЙ ЗАПРОС:\n{user_request}\n\n"
-                    f"ТРЕБОВАНИЯ:\n{requirement_lines}\n\n"
-                    f"НАЙДЕННЫЕ ДЕФЕКТЫ:\n{failure_lines}\n\n"
-                    f"ТЕКУЩИЙ ОТВЕТ:\n{answer}"
-                ),
-            ),
+            ChatMessage(role="system", content="Ты редактор X1. Исправь только перечисленные дефекты ответа. Не добавляй новые факты без необходимости, не меняй уже правильные части и не обсуждай проверку. Верни только исправленный финальный ответ."),
+            ChatMessage(role="user", content=f"ИСХОДНЫЙ ЗАПРОС:\n{user_request}\n\nТРЕБОВАНИЯ:\n{requirement_lines}\n\nНАЙДЕННЫЕ ДЕФЕКТЫ:\n{failure_lines}\n\nТЕКУЩИЙ ОТВЕТ:\n{answer}"),
         ]
 
     def parse_critic(self, raw: str) -> dict[str, Any]:
@@ -230,7 +198,10 @@ class AnswerQualityEngine:
             return "failed"
         if issues:
             return "checked"
-        return "supported"
+        # A second model pass can check consistency, but it is not independent
+        # factual evidence. Reserve 'supported' for an answer whose prompt really
+        # contained a verified source snapshot.
+        return "supported" if deterministic.grounded else "checked"
 
     @staticmethod
     def _check(key: str, label: str, status: str, detail: str = "") -> dict[str, str]:
