@@ -59,8 +59,6 @@ services:
       X1_DATABASE_AUTO_CREATE_SCHEMA: "true"
       X1_DATABASE_URL: sqlite+pysqlite:///./data/release_gate.db
     command: ["python", "-m", "pytest", "-q"]
-    volumes:
-      - x1_data:/app/data
     deploy:
       resources:
         limits:
