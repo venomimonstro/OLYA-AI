@@ -13,7 +13,6 @@ class WorkspaceError(RuntimeError):
 
 
 ALLOWED_COMMANDS = {"python", "python3", "pytest", "ruff", "mypy", "npm", "node", "php", "composer"}
-SAFE_WITHOUT_NETWORK_SANDBOX = {"ruff", "mypy"}
 IGNORED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", "dist", "build"}
 TEXT_EXTS = {
     ".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".md", ".txt", ".toml", ".yaml", ".yml",
@@ -26,11 +25,11 @@ def sha256_bytes(data: bytes) -> str:
 
 
 def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for block in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(block)
-    return h.hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def workspace_root(storage_root: str, workspace_id: str) -> Path:
@@ -43,16 +42,12 @@ def workspace_root(storage_root: str, workspace_id: str) -> Path:
 
 def safe_relative_path(value: str) -> PurePosixPath:
     raw = value.replace("\\", "/").strip()
-    p = PurePosixPath(raw)
-    if not raw or p.is_absolute() or any(part in {"", ".", ".."} for part in p.parts):
+    path = PurePosixPath(raw)
+    if not raw or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise WorkspaceError("Unsafe workspace path")
-    if p.parts[0].startswith(".") and p.parts[0] not in {".env.example"}:
-        # Hidden files are allowed below, but never hidden top-level control dirs such as .git.
-        if p.parts[0] in {".git", ".ssh", ".gnupg"}:
-            raise WorkspaceError("Protected workspace path")
-    if p.parts[0] in {".git", ".ssh", ".gnupg"}:
+    if path.parts[0] in {".git", ".ssh", ".gnupg"}:
         raise WorkspaceError("Protected workspace path")
-    return p
+    return path
 
 
 def resolve_inside(root: Path, relative: str) -> Path:
@@ -74,9 +69,9 @@ def write_text(root: Path, relative: str, content: str, expected_sha256: str | N
         raise WorkspaceError("Target is not a regular file")
     data = content.encode("utf-8")
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(target.name + ".x1tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, target)
+    temporary = target.with_name(target.name + ".x1tmp")
+    temporary.write_bytes(data)
+    os.replace(temporary, target)
     return {"path": relative, "before_sha256": old_sha, "after_sha256": sha256_bytes(data), "bytes": len(data)}
 
 
@@ -90,8 +85,8 @@ def import_zip(root: Path, data: bytes, *, max_files: int, max_unpacked_bytes: i
     count = 0
     total = 0
     try:
-        with zipfile.ZipFile(tmp_zip) as zf:
-            infos = zf.infolist()
+        with zipfile.ZipFile(tmp_zip) as archive:
+            infos = archive.infolist()
             if len(infos) > max_files:
                 raise WorkspaceError("Archive contains too many entries")
             for info in infos:
@@ -107,8 +102,8 @@ def import_zip(root: Path, data: bytes, *, max_files: int, max_unpacked_bytes: i
                 rel = safe_relative_path(info.filename)
                 target = resolve_inside(tmp_dir, str(rel))
                 target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(info) as src, target.open("wb") as dst:
-                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+                with archive.open(info) as source, target.open("wb") as destination:
+                    shutil.copyfileobj(source, destination, length=1024 * 1024)
         shutil.rmtree(root, ignore_errors=True)
         os.replace(tmp_dir, root)
     except Exception:
@@ -128,9 +123,7 @@ def repo_map(root: Path, *, max_files: int = 1500) -> dict:
         rel_parts = path.relative_to(root).parts
         if any(part in IGNORED_DIRS for part in rel_parts):
             continue
-        if path.is_symlink():
-            continue
-        if not path.is_file():
+        if path.is_symlink() or not path.is_file():
             continue
         size = path.stat().st_size
         total += size
@@ -148,10 +141,29 @@ def path_allowed(path: str, allowed_paths: list[str]) -> bool:
     if not allowed_paths:
         return True
     for allowed in allowed_paths:
-        a = safe_relative_path(allowed).as_posix().rstrip("/")
-        if rel == a or rel.startswith(a + "/"):
+        base = safe_relative_path(allowed).as_posix().rstrip("/")
+        if rel == base or rel.startswith(base + "/"):
             return True
     return False
+
+
+def _validated_static_command(root: Path, argv: list[str]) -> bool:
+    """Allow only py_compile with workspace-contained source paths on the host.
+
+    Tools such as mypy are not host-safe because project configuration can load
+    plugins and execute Python. Ruff/mypy/npm/etc. therefore require the real
+    isolated sandbox unless an operator deliberately enables unsafe commands.
+    """
+    exe = Path(argv[0]).name
+    if exe not in {"python", "python3"} or len(argv) < 4 or argv[1:3] != ["-m", "py_compile"]:
+        return False
+    for value in argv[3:]:
+        if value.startswith("-"):
+            return False
+        target = resolve_inside(root, value)
+        if not target.is_file() or target.suffix.lower() != ".py":
+            return False
+    return True
 
 
 def run_command(root: Path, argv: list[str], timeout_seconds: int, *, allow_unsafe: bool = False) -> dict:
@@ -160,22 +172,25 @@ def run_command(root: Path, argv: list[str], timeout_seconds: int, *, allow_unsa
     exe = Path(argv[0]).name
     if exe not in ALLOWED_COMMANDS:
         raise WorkspaceError("Command is not allowed")
-    safe_static = exe in SAFE_WITHOUT_NETWORK_SANDBOX or (exe in {"python", "python3"} and len(argv) >= 3 and argv[1:3] == ["-m", "py_compile"])
-    if not safe_static and not allow_unsafe:
-        raise WorkspaceError("Command requires an isolated sandbox backend")
-    if any("\x00" in x for x in argv):
+    if any("\x00" in value for value in argv):
         raise WorkspaceError("Invalid command argument")
+
+    static_safe = _validated_static_command(root, argv)
+    if not static_safe and not allow_unsafe:
+        raise WorkspaceError("Command requires an isolated sandbox backend")
+
     env = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "HOME": str(root / ".x1home"),
         "PYTHONNOUSERSITE": "1",
         "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-        "NO_PROXY": "*",
         "HTTP_PROXY": "",
         "HTTPS_PROXY": "",
         "ALL_PROXY": "",
+        "NO_PROXY": "",
     }
     Path(env["HOME"]).mkdir(exist_ok=True)
+    sandbox_level = "static_py_compile" if static_safe else "operator_opt_in_host"
     try:
         completed = subprocess.run(
             argv,
@@ -194,7 +209,8 @@ def run_command(root: Path, argv: list[str], timeout_seconds: int, *, allow_unsa
             "stdout": completed.stdout[-20_000:],
             "stderr": completed.stderr[-20_000:],
             "timed_out": False,
-            "sandbox_level": "static_safe" if safe_static else "operator_opt_in",
+            "sandbox_level": sandbox_level,
+            "network_isolation": False,
         }
     except subprocess.TimeoutExpired as exc:
         return {
@@ -203,5 +219,6 @@ def run_command(root: Path, argv: list[str], timeout_seconds: int, *, allow_unsa
             "stdout": (exc.stdout or "")[-20_000:] if isinstance(exc.stdout, str) else "",
             "stderr": (exc.stderr or "")[-20_000:] if isinstance(exc.stderr, str) else "",
             "timed_out": True,
-            "sandbox_level": "static_safe" if safe_static else "operator_opt_in",
+            "sandbox_level": sandbox_level,
+            "network_isolation": False,
         }
