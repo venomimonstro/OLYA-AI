@@ -127,6 +127,14 @@ class Settings(BaseSettings):
     beta_max_frustration_per_request: float = 0.05
     beta_max_p95_queue_ms: int = 5000
 
+    # Sprint 37 adaptive beta-wave controller. These are operator-tunable
+    # engineering guardrails and must be recalibrated from real beta telemetry.
+    beta_wave_default_size: int = 10
+    beta_wave_min_observation_requests: int = 50
+    beta_wave_max_queue_regression_ratio: float = 1.50
+    beta_wave_max_duration_regression_ratio: float = 1.50
+    beta_wave_min_cpu_efficiency_ratio: float = 0.70
+
 
 @lru_cache
 def get_settings() -> Settings:
