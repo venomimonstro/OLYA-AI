@@ -1,21 +1,21 @@
 [project]
 name = "x1-ai"
-version = "0.39.0"
+version = "0.40.0"
 description = "Local-first CPU/RAM AI platform"
 requires-python = ">=3.12"
 dependencies = [
-  "fastapi>=0.115,<1",
-  "uvicorn[standard]>=0.32,<1",
-  "pydantic>=2.10,<3",
-  "pydantic-settings>=2.6,<3",
-  "httpx>=0.28,<1",
-  "sqlalchemy>=2.0,<3",
-  "psycopg[binary]>=3.2,<4",
-  "alembic>=1.14,<2",
-  "pypdf>=5.1,<6",
-  "python-docx>=1.1,<2",
-  "Pillow>=11,<13",
-  "cryptography>=44,<47"
+  "fastapi==0.141.1",
+  "uvicorn[standard]==0.52.4",
+  "pydantic==2.13.5",
+  "pydantic-settings==2.15.0",
+  "httpx==0.28.1",
+  "sqlalchemy==2.0.52",
+  "psycopg[binary]==3.3.5",
+  "alembic==1.19.2",
+  "pypdf==5.9.0",
+  "python-docx==1.2.0",
+  "Pillow==12.3.0",
+  "cryptography==46.0.7"
 ]
 
 [project.optional-dependencies]
