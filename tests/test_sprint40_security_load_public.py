@@ -8,6 +8,7 @@ from starlette.requests import Request
 
 from app.main import app
 from app.services.auth_rate_limit import _AttemptLimiter, _client_ip
+from app.services.file_parse_isolation import parse_file_isolated
 from app.services.secret_redaction import redact_secrets
 from app.services.source_trust import assess_source, sanitize_excerpt, source_host
 from scripts.load_users import virtual_inference_arrivals
@@ -73,6 +74,23 @@ def test_file_context_secret_redaction_covers_credentials_and_private_keys():
     assert "BEGIN PRIVATE KEY" not in redacted
 
 
+def test_untrusted_file_parsing_runs_in_child_process(tmp_path: Path):
+    source = tmp_path / "probe.txt"
+    source.write_text("alpha beta gamma", "utf-8")
+    rows = parse_file_isolated(
+        source,
+        "probe.txt",
+        max_pdf_pages=5,
+        max_docx_unpacked_bytes=2_000_000,
+        max_extracted_chars=100_000,
+        timeout_seconds=10,
+        memory_mb=512,
+    )
+    assert rows and rows[0].text == "alpha beta gamma"
+    worker = (ROOT / "scripts" / "file_parse_worker.py").read_text("utf-8")
+    assert "RLIMIT_AS" in worker and "RLIMIT_CPU" in worker and "RLIMIT_NOFILE" in worker
+
+
 def test_auth_rate_limiter_has_hard_memory_bound():
     limiter = _AttemptLimiter(max_buckets=1000)
     for index in range(5000):
@@ -92,10 +110,7 @@ def _request(peer: str, forwarded: str = "") -> Request:
 
 
 def test_forwarded_ip_is_trusted_only_from_loopback_and_uses_proxy_appended_last_hop():
-    # An attacker can pre-seed the first XFF value; the supported local proxy
-    # appends the real address. X1 must therefore use the last valid hop.
     assert _client_ip(_request("127.0.0.1", "203.0.113.77, 198.51.100.8")) == "198.51.100.8"
-    # A direct public peer cannot choose its own XFF identity.
     assert _client_ip(_request("198.51.100.25", "203.0.113.77")) == "198.51.100.25"
 
 
@@ -122,6 +137,13 @@ def test_release_gate_runs_live_multi_user_load_and_security_chaos():
         assert marker in chaos
 
 
+def test_production_install_keeps_expensive_ai_behind_rollout_gate():
+    env = (ROOT / ".env.example").read_text("utf-8")
+    installer = (ROOT / "scripts" / "install.sh").read_text("utf-8")
+    assert "X1_PUBLIC_LAUNCH_ENFORCE_EXPOSURE=true" in env
+    assert "setv('X1_PUBLIC_LAUNCH_ENFORCE_EXPOSURE','true')" in installer
+
+
 def test_web_app_never_receives_docker_socket_and_runtime_images_are_pinned():
     compose = (ROOT / "docker-compose.yml").read_text("utf-8")
     app_section = compose.split("\n  app:\n", 1)[1].split("\n  gate:\n", 1)[0]
@@ -131,10 +153,13 @@ def test_web_app_never_receives_docker_socket_and_runtime_images_are_pinned():
     assert "ghcr.io/ggml-org/llama.cpp:server-b10380@sha256:" in compose
 
 
-def test_database_and_document_pressure_are_bounded():
+def test_database_document_and_file_parse_pressure_are_bounded():
     config = (ROOT / "app" / "core" / "config.py").read_text("utf-8")
     documents = (ROOT / "app" / "services" / "documents.py").read_text("utf-8")
+    files_route = (ROOT / "app" / "api" / "routes" / "files.py").read_text("utf-8")
     assert "database_pool_timeout_seconds" in config
     assert "document_max_concurrent_renders" in config
+    assert "file_parse_timeout_seconds" in config
     assert "BoundedSemaphore" in documents
     assert "DocumentBusyError" in documents
+    assert "parse_file_isolated" in files_route and "asyncio.to_thread" in files_route
