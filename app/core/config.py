@@ -109,6 +109,10 @@ class Settings(BaseSettings):
     backup_storage_path: str = "./backups"
     health_checkpoint_stale_seconds: int = 300
     health_backup_max_age_hours: float = 36.0
+    release_gate_report_path: str = "./backups/release-gate-latest.json"
+    restore_drill_report_path: str = "./backups/restore-drill-latest.json"
+    release_gate_max_age_hours: float = 24.0
+    restore_drill_max_age_hours: float = 168.0
 
 
 @lru_cache
