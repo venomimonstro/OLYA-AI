@@ -9,7 +9,9 @@ RUN apt-get update \
        ca-certificates git nodejs npm \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir \
-       fastapi uvicorn sqlalchemy jinja2 python-multipart httpx pytest
+       fastapi==0.141.1 uvicorn==0.52.4 sqlalchemy==2.0.52 \
+       jinja2==3.1.6 python-multipart==0.0.32 httpx==0.28.1 \
+       'pytest>=8.3,<10'
 
 RUN groupadd --gid 10001 x1 \
     && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/x1 x1 \
