@@ -53,27 +53,30 @@ def ensure_compute_available(
     settings: Settings,
     *,
     reserve_seconds: int = 0,
+    channel: str | None = None,
 ) -> UserQuota:
     quota = get_or_create_quota(db, user, settings)
     reserve_seconds = max(0, int(reserve_seconds))
     used = compute_seconds_used(db, user.id)
-    # Equality is valid: a request may consume the exact remaining budget. The
-    # previous >= check made the final allowed slice permanently unusable.
     if used + reserve_seconds > quota.monthly_compute_seconds_limit:
         raise QuotaExceededError("Monthly local compute budget exhausted")
 
-    # A second admission gate prices all measured resources, not just model CPU.
     try:
-        from app.services.commerce import PLAN_POLICIES, measured_user_resources, plan_resource_budget, price_resource_ms
+        from app.services.commerce import measured_user_resources, price_resource_ms
+        from app.services.measured_plans import ensure_channel_budget, plan_policy
 
-        policy = PLAN_POLICIES.get(quota.plan)
+        policy = plan_policy(db, settings, quota.plan)
         if policy is not None:
             measured = measured_user_resources(db, user.id, settings)
             reserve_cost = price_resource_ms(settings, "cpu", reserve_seconds * 1000)
-            if measured["total_cost_microunits"] + reserve_cost > plan_resource_budget(settings, policy):
+            total_budget = max(0, int(policy.get("resource_budget_microunits") or 0))
+            if total_budget and measured["total_cost_microunits"] + reserve_cost > total_budget:
                 raise QuotaExceededError("Monthly measured resource budget exhausted")
+            if channel:
+                try:
+                    ensure_channel_budget(db, user, settings, channel, reserve_cost)
+                except RuntimeError as exc:
+                    raise QuotaExceededError(str(exc)) from exc
     except ImportError:
-        # The structural route contract will flag a missing commerce subsystem;
-        # ordinary chat still has the CPU hard limit as a defensive fallback.
         pass
     return quota
