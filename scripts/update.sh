@@ -36,12 +36,12 @@ fi
 
 git merge-base --is-ancestor "$OLD_HEAD" "$TARGET_HEAD" || fail "origin/main is not a fast-forward from the installed revision"
 
+# Backup/restore format is a pair. Always cache restore.sh from the target
+# revision before touching the working tree; this guarantees that a v3 backup
+# created by the target-compatible helper is never handed to an old v1/v2
+# restore implementation during rollback.
 RESTORE_COPY="$(mktemp -t x1-restore.XXXXXX.sh)"
-if [ -f scripts/restore.sh ]; then
-  cp scripts/restore.sh "$RESTORE_COPY"
-else
-  git show origin/main:scripts/restore.sh > "$RESTORE_COPY"
-fi
+git show origin/main:scripts/restore.sh > "$RESTORE_COPY"
 chmod 700 "$RESTORE_COPY"
 BACKUP_PATH=""
 
