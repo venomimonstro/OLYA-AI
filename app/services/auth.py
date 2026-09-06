@@ -63,6 +63,48 @@ def create_session(db: Session, user: User) -> tuple[str, AuthSession]:
     return token, record
 
 
+def _expensive_public_path(path: str) -> bool:
+    return path.startswith((
+        "/v1/chat",
+        "/v1/images",
+        "/v1/documents",
+        "/v1/research",
+        "/v1/project-sandboxes",
+        "/v1/development",
+        "/v1/engineering",
+        "/v1/execution",
+    ))
+
+
+def _enforce_public_exposure(request: Request, db: Session, user: User) -> None:
+    settings = getattr(request.app.state, "settings", get_settings())
+    if not bool(getattr(settings, "public_launch_enforce_exposure", False)) or not _expensive_public_path(request.url.path):
+        return
+    if bool(getattr(user, "is_admin", False)):
+        return
+    from app.models import BetaParticipant
+    from app.services.progressive_launch import active_rollout, rollout_allows_user
+
+    beta = db.scalar(
+        select(BetaParticipant.id)
+        .where(BetaParticipant.user_id == user.id, BetaParticipant.state != "removed")
+        .limit(1)
+    )
+    if beta:
+        return
+    rollout = active_rollout(db)
+    if rollout_allows_user(rollout, user.id):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "code": "public_rollout_not_exposed",
+            "message": "AI access for this account has not been enabled by the current rollout stage yet.",
+            "exposure_percent": rollout.exposure_percent if rollout else 0,
+        },
+    )
+
+
 def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
@@ -86,7 +128,8 @@ def get_current_user(
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account unavailable")
 
-    # Avoid a database write on every request: update only after a small interval.
+    _enforce_public_exposure(request, db, user)
+
     last_seen = session.last_seen_at
     if last_seen.tzinfo is None:
         last_seen = last_seen.replace(tzinfo=timezone.utc)
