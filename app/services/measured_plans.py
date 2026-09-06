@@ -89,9 +89,10 @@ def _channel_spend(db: Session, user_id: str, settings, channel: str, since) -> 
         return price_resource_ms(settings, "cpu", cpu_ms)
     if channel == "api":
         return int(db.scalar(select(func.coalesce(func.sum(ResourceExpenseEvent.cost_microunits), 0)).where(ResourceExpenseEvent.user_id == user_id, ResourceExpenseEvent.created_at >= since, ResourceExpenseEvent.source_kind == "api_request")) or 0)
-    resource_kind = "image_worker" if channel == "image_worker" else "sandbox" if channel == "sandbox" else None
-    if resource_kind:
-        return int(db.scalar(select(func.coalesce(func.sum(ResourceExpenseEvent.cost_microunits), 0)).where(ResourceExpenseEvent.user_id == user_id, ResourceExpenseEvent.created_at >= since, ResourceExpenseEvent.resource_kind == resource_kind)) or 0)
+    if channel in {"image_worker", "sandbox"}:
+        from app.services.commerce import measured_user_resources
+        measured = measured_user_resources(db, user_id, settings)
+        return int((measured.get("cost_microunits") or {}).get(channel, 0))
     return 0
 
 
