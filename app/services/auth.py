@@ -85,24 +85,37 @@ def _enforce_public_exposure(request: Request, db: Session, user: User) -> None:
     from app.models import BetaParticipant
     from app.services.progressive_launch import active_rollout, rollout_allows_user
 
-    beta = db.scalar(
-        select(BetaParticipant.id)
-        .where(BetaParticipant.user_id == user.id, BetaParticipant.state != "removed")
-        .limit(1)
-    )
-    if beta:
-        return
-    rollout = active_rollout(db)
-    if rollout_allows_user(rollout, user.id):
+    beta = db.scalar(select(BetaParticipant.id).where(BetaParticipant.user_id == user.id, BetaParticipant.state != "removed").limit(1))
+    if beta or rollout_allows_user(active_rollout(db), user.id):
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail={
             "code": "public_rollout_not_exposed",
             "message": "AI access for this account has not been enabled by the current rollout stage yet.",
-            "exposure_percent": rollout.exposure_percent if rollout else 0,
+            "exposure_percent": (active_rollout(db).exposure_percent if active_rollout(db) else 0),
         },
     )
+
+
+def _enforce_resource_lane(request: Request, db: Session, user: User) -> None:
+    if request.method.upper() != "POST":
+        return
+    path = request.url.path
+    channel = None
+    if path == "/v1/images/generations":
+        channel = "image_worker"
+    elif path.startswith("/v1/project-sandboxes/") and path.endswith("/execute"):
+        channel = "sandbox"
+    elif path == "/v1/project-sandboxes/previews":
+        channel = "sandbox"
+    if not channel:
+        return
+    from app.services.measured_plans import ensure_channel_budget
+    try:
+        ensure_channel_budget(db, user, request.app.state.settings, channel, 0)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
 def get_current_user(
@@ -129,6 +142,7 @@ def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account unavailable")
 
     _enforce_public_exposure(request, db, user)
+    _enforce_resource_lane(request, db, user)
 
     last_seen = session.last_seen_at
     if last_seen.tzinfo is None:
