@@ -197,5 +197,6 @@ for module in (
     "app.api.routes.beta_ops",
     "app.api.routes.launch",
     "app.beta_admin_ui",
+    "app.launch_admin_ui",
 ):
     _include_optional_router(module)
