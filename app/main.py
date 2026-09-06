@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
-from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
+from sqlalchemy.exc import OperationalError, TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.routes.account import router as account_router
@@ -197,6 +197,22 @@ async def database_pool_timeout_handler(request: Request, exc: SQLAlchemyTimeout
     return JSONResponse(
         status_code=503,
         content={"detail": "Database capacity is temporarily busy; retry shortly"},
+        headers={"Retry-After": "2"},
+    )
+
+
+@app.exception_handler(OperationalError)
+async def database_operational_error_handler(request: Request, exc: OperationalError):
+    """Treat transient database disconnect/restart as service unavailability.
+
+    Never leak driver/SQL details to the client. pool_pre_ping/recycle will heal
+    future connections; callers receive a retryable response instead of a random
+    internal-server-error page.
+    """
+    _ = request, exc
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database is temporarily unavailable; retry shortly"},
         headers={"Retry-After": "2"},
     )
 
