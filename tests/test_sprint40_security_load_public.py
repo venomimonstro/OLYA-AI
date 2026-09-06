@@ -4,9 +4,10 @@ import tomllib
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from app.main import app
-from app.services.auth_rate_limit import _AttemptLimiter
+from app.services.auth_rate_limit import _AttemptLimiter, _client_ip
 from app.services.secret_redaction import redact_secrets
 from app.services.source_trust import assess_source, sanitize_excerpt, source_host
 from scripts.load_users import virtual_inference_arrivals
@@ -47,12 +48,15 @@ def test_prompt_poisoning_source_is_quarantined_and_neutralized():
     assert "quarantined" in safe.casefold()
 
 
-def test_normal_research_source_is_not_falsely_quarantined():
+def test_normal_research_source_is_not_falsely_quarantined_and_subdomains_do_not_fake_independence():
     content = "Python asyncio.create_task schedules a coroutine to run concurrently in the event loop. " * 4
     trust = assess_source("https://docs.example.org/asyncio", content)
     assert trust.quarantined is False
     assert trust.score >= 70
     assert source_host("https://www.Example.org/a") == "example.org"
+    assert source_host("https://a.attacker.example.com/a") == "example.com"
+    assert source_host("https://b.attacker.example.com/b") == "example.com"
+    assert source_host("https://news.example.co.uk/a") == "example.co.uk"
 
 
 def test_file_context_secret_redaction_covers_credentials_and_private_keys():
@@ -74,6 +78,25 @@ def test_auth_rate_limiter_has_hard_memory_bound():
     for index in range(5000):
         limiter.consume(f"attacker-{index}", limit=8, window_seconds=60)
     assert len(limiter._events) <= 1000
+
+
+def _request(peer: str, forwarded: str = "") -> Request:
+    headers = []
+    if forwarded:
+        headers.append((b"x-forwarded-for", forwarded.encode("ascii")))
+    return Request({
+        "type": "http", "method": "GET", "scheme": "http", "path": "/", "raw_path": b"/",
+        "query_string": b"", "headers": headers, "client": (peer, 12345), "server": ("x1", 80),
+        "http_version": "1.1",
+    })
+
+
+def test_forwarded_ip_is_trusted_only_from_loopback_and_uses_proxy_appended_last_hop():
+    # An attacker can pre-seed the first XFF value; the supported local proxy
+    # appends the real address. X1 must therefore use the last valid hop.
+    assert _client_ip(_request("127.0.0.1", "203.0.113.77, 198.51.100.8")) == "198.51.100.8"
+    # A direct public peer cannot choose its own XFF identity.
+    assert _client_ip(_request("198.51.100.25", "203.0.113.77")) == "198.51.100.25"
 
 
 def test_100k_inference_arrivals_never_become_100k_resident_requests():
@@ -109,11 +132,9 @@ def test_web_app_never_receives_docker_socket_and_runtime_images_are_pinned():
 
 
 def test_database_and_document_pressure_are_bounded():
-    settings = app.state.settings if hasattr(app.state, "settings") else None
     config = (ROOT / "app" / "core" / "config.py").read_text("utf-8")
     documents = (ROOT / "app" / "services" / "documents.py").read_text("utf-8")
     assert "database_pool_timeout_seconds" in config
     assert "document_max_concurrent_renders" in config
     assert "BoundedSemaphore" in documents
     assert "DocumentBusyError" in documents
-    _ = settings
