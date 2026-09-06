@@ -19,7 +19,10 @@ services:
           memory: 1536M
 
   app:
-    build: .
+    build:
+      context: .
+      args:
+        X1_EXTRAS: ""
     restart: unless-stopped
     env_file: .env
     environment:
@@ -46,7 +49,10 @@ services:
 
   image-worker:
     profiles: ["images"]
-    build: .
+    build:
+      context: .
+      args:
+        X1_EXTRAS: "image"
     restart: unless-stopped
     env_file: .env
     environment:
