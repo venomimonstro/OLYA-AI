@@ -71,12 +71,17 @@ class SourceContextBuilder:
 
             fetched_at = _aware(source.fetched_at)
             fresh_enough = now - fetched_at <= max_age
+            source_excerpts = lexical_excerpts(source.content, query, limit=3)
+            if not source_excerpts:
+                continue
+            # A URL is verified evidence only when at least one excerpt from that
+            # exact stored snapshot is actually supplied to the model context.
             if not freshness_required or fresh_enough:
                 verified_urls.add(source.final_url)
                 verified_urls.add(source.url)
                 if freshness_required and fresh_enough:
                     fresh_source_count += 1
-            for excerpt, score in lexical_excerpts(source.content, query, limit=3):
+            for excerpt, score in source_excerpts:
                 excerpts.append((score, source, excerpt, fresh_enough))
 
         excerpts.sort(key=lambda item: item[0], reverse=True)
@@ -86,9 +91,9 @@ class SourceContextBuilder:
                 ChatMessage(
                     role="system",
                     content=(
-                        "X1 FRESHNESS POLICY: attached research snapshots are missing or too old to verify a current fact. "
+                        "X1 FRESHNESS POLICY: attached research snapshots are missing, irrelevant or too old to verify a current fact. "
                         "They may be used only as historical/background context. Do not present changing facts as current, "
-                        "exact or verified until a fresh research snapshot is collected."
+                        "exact or verified until a fresh relevant research snapshot is collected."
                     ),
                 )
             )
