@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import SystemHealthSnapshot, User
+from app.services.adaptive_capacity import active_plan, plan_dict
 from app.services.admin import audit, require_admin
 from app.services.capacity import read_capacity_report
 from app.services.system_observability import STABLE, collect_system_health, latest_checkpoints
@@ -36,6 +37,31 @@ async def run_deep_reliability_check(request: Request, admin: User = Depends(req
     return result
 
 
+def _runtime_capacity_match(request: Request, plan) -> tuple[bool, dict]:
+    settings = request.app.state.settings
+    desired = dict(plan.plan or {})
+    actual = {
+        "max_context_tokens": int(settings.max_context_tokens),
+        "deep_context_tokens": int(settings.deep_context_tokens),
+        "max_concurrent_generations": int(settings.max_concurrent_generations),
+        "max_queue_size": int(settings.max_queue_size),
+        "inference_queue_timeout_seconds": float(settings.inference_queue_timeout_seconds),
+        "default_monthly_compute_seconds": int(settings.default_monthly_compute_seconds),
+    }
+    mismatches = {}
+    for key, expected in desired.items():
+        if key not in actual:
+            continue
+        observed = actual[key]
+        if isinstance(observed, float):
+            equal = abs(float(expected) - observed) < 0.001
+        else:
+            equal = int(expected) == observed
+        if not equal:
+            mismatches[key] = {"expected": expected, "actual": observed}
+    return not mismatches, {"actual": actual, "mismatches": mismatches}
+
+
 @router.get("/release-readiness")
 async def release_readiness(request: Request, refresh: bool = Query(default=True), admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     """Strict decision for a new public production release."""
@@ -62,7 +88,36 @@ async def release_readiness(request: Request, refresh: bool = Query(default=True
     if capacity.get("status") != "passed":
         blockers.append({"key": "ops.capacity_calibration", "status": capacity.get("status", "missing"), "message": "Target-node capacity calibration is not current", "recommended_action": "Run python3 scripts/capacity_calibrate.py on the deployed CPU/RAM node.", "reasons": capacity.get("reasons") or []})
 
-    return {"ready_for_public_release": not blockers, "app_version": str(getattr(request.app, "version", "unknown")), "required_checkpoints": [*required, "ops.capacity_calibration"], "capacity": capacity, "blockers": blockers, "checked_at": result.get("checked_at") if refresh else None}
+    capacity_plan = active_plan(db)
+    runtime_match = None
+    if capacity_plan is None:
+        blockers.append({
+            "key": "ops.capacity_plan",
+            "status": "missing",
+            "message": "No approved active capacity plan exists",
+            "recommended_action": "Build, approve and activate a capacity plan from measured beta + target-node calibration data.",
+        })
+    else:
+        matches, runtime_match = _runtime_capacity_match(request, capacity_plan)
+        if not matches:
+            blockers.append({
+                "key": "ops.capacity_plan",
+                "status": "degraded",
+                "message": "Active capacity plan does not match the running configuration",
+                "recommended_action": "Apply the generated capacity-plan env artifact and restart the affected runtime before release.",
+                "mismatches": runtime_match["mismatches"],
+            })
+
+    return {
+        "ready_for_public_release": not blockers,
+        "app_version": str(getattr(request.app, "version", "unknown")),
+        "required_checkpoints": [*required, "ops.capacity_calibration", "ops.capacity_plan"],
+        "capacity": capacity,
+        "capacity_plan": plan_dict(capacity_plan) if capacity_plan else None,
+        "capacity_runtime_match": runtime_match,
+        "blockers": blockers,
+        "checked_at": result.get("checked_at") if refresh else None,
+    }
 
 
 @router.get("/history")
