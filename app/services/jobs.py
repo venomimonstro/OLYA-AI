@@ -17,6 +17,12 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _aware(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
 def enqueue_job(
     db: Session,
     *,
@@ -97,7 +103,19 @@ def heartbeat_job(db: Session, job_id: str, *, worker_id: str, lease_token: str,
 
 def complete_job(db: Session, job_id: str, *, worker_id: str, lease_token: str, result_payload: dict | None = None) -> None:
     now = utcnow()
-    result = db.execute(update(BackgroundJob).execution_options(synchronize_session=False).where(BackgroundJob.id == job_id, BackgroundJob.status.in_(["leased", "running"]), BackgroundJob.lease_owner == worker_id, BackgroundJob.lease_token == lease_token).values(status="succeeded", result=result_payload or {}, finished_at=now, heartbeat_at=now, lease_owner=None, lease_token=None, lease_expires_at=None))
+    result = db.execute(
+        update(BackgroundJob)
+        .execution_options(synchronize_session=False)
+        .where(
+            BackgroundJob.id == job_id,
+            BackgroundJob.status.in_(["leased", "running"]),
+            BackgroundJob.lease_owner == worker_id,
+            BackgroundJob.lease_token == lease_token,
+            BackgroundJob.lease_expires_at.is_not(None),
+            BackgroundJob.lease_expires_at > now,
+        )
+        .values(status="succeeded", result=result_payload or {}, finished_at=now, heartbeat_at=now, lease_owner=None, lease_token=None, lease_expires_at=None)
+    )
     if result.rowcount != 1:
         raise JobLeaseLostError("Job lease is no longer valid")
     db.flush()
@@ -105,7 +123,14 @@ def complete_job(db: Session, job_id: str, *, worker_id: str, lease_token: str, 
 
 def fail_job(db: Session, job_id: str, *, worker_id: str, lease_token: str, error_message: str, retry_delay_seconds: int = 5) -> None:
     now = utcnow(); job = db.get(BackgroundJob, job_id)
-    if job is None or job.lease_owner != worker_id or job.lease_token != lease_token:
+    expires_at = _aware(job.lease_expires_at) if job is not None else None
+    if (
+        job is None
+        or job.lease_owner != worker_id
+        or job.lease_token != lease_token
+        or expires_at is None
+        or expires_at <= now
+    ):
         raise JobLeaseLostError("Job lease is no longer valid")
     retry = job.attempt_count < job.max_attempts
     job.status = "queued" if retry else "failed"; job.available_at = now + timedelta(seconds=retry_delay_seconds) if retry else now
