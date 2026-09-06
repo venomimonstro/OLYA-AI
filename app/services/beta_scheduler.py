@@ -24,7 +24,7 @@ def _aware(value):
 def run_beta_operations_tick(settings) -> dict:
     """Idempotent closed-beta maintenance tick without any inference work."""
     cohort = str(getattr(settings, "beta_operations_cohort", "closed-beta-1"))
-    window_days = max(1, min(180, int(getattr(settings, "beta_operations_window_days", 30))))
+    snapshot_window_days = max(1, min(180, int(getattr(settings, "beta_operations_window_days", 30))))
     snapshot_hours = max(1.0, float(getattr(settings, "beta_snapshot_interval_hours", 24.0)))
     now = datetime.now(timezone.utc)
 
@@ -38,12 +38,13 @@ def run_beta_operations_tick(settings) -> dict:
         latest_at = _aware(latest.created_at) if latest is not None else None
         created_snapshot = None
         if latest_at is None or now - latest_at >= timedelta(hours=snapshot_hours):
-            created_snapshot = build_beta_snapshot(db, cohort=cohort, window_days=window_days, now=now)
+            created_snapshot = build_beta_snapshot(db, cohort=cohort, window_days=snapshot_window_days, now=now)
 
         wave = active_wave(db, cohort)
         decision = None
         if wave is not None:
-            metrics = calculate_beta_metrics(db, cohort=cohort, window_days=window_days, now=now)
+            wave_window_days = max(1, min(180, int(getattr(wave, "window_days", 30) or 30)))
+            metrics = calculate_beta_metrics(db, cohort=cohort, window_days=wave_window_days, now=now)
             decision = evaluate_wave(
                 wave,
                 current=metrics,
