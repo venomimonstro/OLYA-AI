@@ -50,6 +50,7 @@ rollback() {
   trap - ERR INT TERM
   set +e
   printf '[X1 update] ROLLBACK: %s\n' "$reason" >&2
+  rm -f "$ROOT/scripts/.x1-target-backup."*.sh >/dev/null 2>&1 || true
   docker compose stop app image-worker sandbox-worker >/dev/null 2>&1 || true
   git reset --hard "$OLD_HEAD" >/dev/null 2>&1 || true
   if [ -n "$BACKUP_PATH" ] && [ -d "$BACKUP_PATH" ]; then
@@ -71,11 +72,8 @@ info "Quiescing write-producing services"
 docker compose stop app image-worker sandbox-worker >/dev/null 2>&1 || true
 
 info "Creating consistent pre-update backup"
-# Sprint39 backup streamed /app/data through the app container and therefore
-# cannot run after quiescing it. When that legacy implementation is installed,
-# execute the target Sprint40 host-bind backup helper directly from origin/main.
 if grep -q 'docker compose exec -T app python' scripts/backup.sh 2>/dev/null; then
-  BACKUP_HELPER="$(mktemp -t x1-backup.XXXXXX.sh)"
+  BACKUP_HELPER="$ROOT/scripts/.x1-target-backup.$$.sh"
   git show origin/main:scripts/backup.sh > "$BACKUP_HELPER"
   chmod 700 "$BACKUP_HELPER"
   BACKUP_PATH="$(X1_HOST_DATA_ROOT="${X1_HOST_DATA_ROOT:-$ROOT/data}" bash "$BACKUP_HELPER")"
