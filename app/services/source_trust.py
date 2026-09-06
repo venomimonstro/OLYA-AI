@@ -17,6 +17,17 @@ _STRONG_INJECTION_PATTERNS = (
 )
 _LINE_NORMALIZER = re.compile(r"\s+")
 _TOKEN_RE = re.compile(r"[\w-]{2,}", re.UNICODE)
+# Deliberately small deterministic suffix set for common multi-label public
+# suffixes. It is not a substitute for the Public Suffix List, but prevents the
+# important poisoning bypass where a.evil.com and b.evil.com are counted as two
+# independent sources without adding a large/updatable runtime dependency.
+_COMMON_TWO_LABEL_SUFFIXES = {
+    "co.uk", "org.uk", "ac.uk", "gov.uk",
+    "com.au", "net.au", "org.au",
+    "co.jp", "ne.jp", "or.jp",
+    "com.br", "com.tr", "com.ua", "com.cn", "com.hk", "co.kr",
+    "co.nz", "com.sg", "com.mx", "com.ar", "co.in",
+}
 
 
 @dataclass(frozen=True)
@@ -28,10 +39,28 @@ class SourceTrust:
 
 
 def source_host(url: str) -> str:
+    """Return a conservative registrable-domain approximation for diversity.
+
+    Search-result diversity must not treat attacker-controlled sibling subdomains
+    as independent confirmation. Literal IPs are preserved so the trust scorer can
+    flag them. For unknown public-suffix structures we intentionally collapse to
+    the last two labels; this can under-count independence, which is safer than
+    manufacturing false consensus.
+    """
     host = (urlsplit(str(url)).hostname or "").rstrip(".").lower()
-    if host.startswith("www."):
-        host = host[4:]
-    return host
+    if not host:
+        return ""
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    labels = [part for part in host.split(".") if part]
+    if len(labels) <= 2:
+        return host
+    suffix2 = ".".join(labels[-2:])
+    if suffix2 in _COMMON_TWO_LABEL_SUFFIXES and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    return suffix2
 
 
 def _is_ip_literal(host: str) -> bool:
