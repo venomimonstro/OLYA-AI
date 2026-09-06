@@ -145,6 +145,7 @@ class Settings(BaseSettings):
     # Sprint 38 progressive public launch / measured plan policy.
     public_launch_breaker_min_requests: int = 50
     public_launch_max_failure_rate: float = 0.03
+    public_launch_max_requests_per_user_hour: int = 120
     public_launch_global_budget_microunits: int = 0
     public_launch_enforce_exposure: bool = False
     public_launch_watchdog_enabled: bool = True
