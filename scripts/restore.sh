@@ -19,6 +19,31 @@ docker compose version >/dev/null 2>&1 || { echo "docker compose required" >&2; 
   sha256sum -c SHA256SUMS >/dev/null
 )
 
+# Preserve the operator-visible service state. update.sh intentionally invokes
+# restore after quiescing writers, in which case this set is empty and the
+# updater remains responsible for restart/rebuild. A direct manual restore,
+# however, must not leave a healthy system silently stopped.
+RUNNING_SERVICES="$(docker compose ps --services --filter status=running 2>/dev/null || true)"
+was_running() { printf '%s\n' "$RUNNING_SERVICES" | grep -qx "$1"; }
+WRITERS_STOPPED=0
+SERVICES_RESUMED=0
+
+resume_services() {
+  [ "$SERVICES_RESUMED" -eq 0 ] || return 0
+  SERVICES_RESUMED=1
+  set +e
+  if was_running sandbox-worker; then
+    docker compose up -d sandbox-worker >/dev/null 2>&1
+  fi
+  if was_running app; then
+    docker compose up -d app >/dev/null 2>&1
+  fi
+  if was_running image-worker; then
+    docker compose --profile images up -d image-worker >/dev/null 2>&1
+  fi
+  set -e
+}
+
 TMP_ROOT="$(mktemp -d "$ROOT/.x1-restore.XXXXXX")"
 TEMP_DB="x1_restore_$$"
 OLD_DB="x1_rollback_$$"
@@ -29,8 +54,11 @@ cleanup() {
   if [ "$DB_SWAPPED" -eq 0 ]; then
     docker compose exec -T db dropdb -U x1 --if-exists --force "$TEMP_DB" >/dev/null 2>&1 || true
   fi
+  if [ "$WRITERS_STOPPED" -eq 1 ]; then
+    resume_services
+  fi
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 python3 - "$BACKUP/files.tar" "$TMP_ROOT" <<'PY'
 from __future__ import annotations
@@ -74,6 +102,9 @@ docker compose exec -T db psql -U x1 -d "$TEMP_DB" -Atqc \
   "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='alembic_version'" \
   | grep -qx '1' || { echo "candidate database has no alembic_version table" >&2; exit 4; }
 
+if was_running app || was_running image-worker || was_running sandbox-worker; then
+  WRITERS_STOPPED=1
+fi
 docker compose stop app image-worker sandbox-worker >/dev/null 2>&1 || true
 
 docker compose exec -T db psql -U x1 -d postgres -v ON_ERROR_STOP=1 -c \
@@ -115,6 +146,9 @@ fi
 
 docker compose exec -T db dropdb -U x1 --if-exists --force "$OLD_DB" >/dev/null
 DB_SWAPPED=0
-trap - EXIT
 rm -rf "$TMP_ROOT"
+if [ "$WRITERS_STOPPED" -eq 1 ]; then
+  resume_services
+fi
+trap - EXIT INT TERM
 printf '%s\n' "$BACKUP"
