@@ -12,10 +12,12 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 DEFAULT_REPO = "Qwen/Qwen3-30B-A3B-GGUF"
+# Immutable upstream revision whose Q4_K_M file has the verified SHA below.
+DEFAULT_REVISION = "dae61f032d7880e6effe712505db4de5d06d6549"
 DEFAULT_FILE = "Qwen3-30B-A3B-Q4_K_M.gguf"
 DEFAULT_SHA256 = "0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5"
-DEFAULT_SIZE = 18_600_000_000
-DEFAULT_URL = f"https://huggingface.co/{DEFAULT_REPO}/resolve/main/{DEFAULT_FILE}?download=true"
+DEFAULT_SIZE = 18_556_685_824
+DEFAULT_URL = f"https://huggingface.co/{DEFAULT_REPO}/resolve/{DEFAULT_REVISION}/{DEFAULT_FILE}?download=true"
 
 
 def sha256_file(path: Path, chunk: int = 16 * 1024 * 1024) -> str:
@@ -74,7 +76,7 @@ def main() -> int:
     parser.add_argument("--url", default=DEFAULT_URL)
     parser.add_argument("--output", default=f"models/{DEFAULT_FILE}")
     parser.add_argument("--sha256", default=DEFAULT_SHA256)
-    parser.add_argument("--min-bytes", type=int, default=17_000_000_000)
+    parser.add_argument("--min-bytes", type=int, default=DEFAULT_SIZE)
     parser.add_argument("--retries", type=int, default=5)
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--verify-only", action="store_true")
@@ -85,7 +87,7 @@ def main() -> int:
     if target.is_file() and target.stat().st_size >= args.min_bytes:
         actual = sha256_file(target)
         if actual == expected:
-            print(json.dumps({"status": "ready", "path": str(target), "bytes": target.stat().st_size, "sha256": actual}))
+            print(json.dumps({"status": "ready", "path": str(target), "bytes": target.stat().st_size, "sha256": actual, "revision": DEFAULT_REVISION}))
             return 0
         if args.verify_only:
             print(json.dumps({"status": "invalid", "path": str(target), "sha256": actual, "expected": expected}), file=sys.stderr)
@@ -105,7 +107,7 @@ def main() -> int:
     if actual != expected:
         raise RuntimeError(f"Downloaded model checksum mismatch: got {actual}, expected {expected}")
     os.replace(partial, target)
-    print(json.dumps({"status": "downloaded", "path": str(target), "bytes": target.stat().st_size, "sha256": actual}))
+    print(json.dumps({"status": "downloaded", "path": str(target), "bytes": target.stat().st_size, "sha256": actual, "revision": DEFAULT_REVISION}))
     return 0
 
 
