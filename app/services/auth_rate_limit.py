@@ -58,10 +58,6 @@ def _valid_ip(value: str) -> str | None:
 def _client_ip(request: Request) -> str:
     peer_raw = request.client.host if request.client else "unknown"
     peer = _valid_ip(peer_raw) or peer_raw[:128]
-    # X1's supported public topology has exactly one trusted local reverse proxy.
-    # A proxy normally appends the real client address to any attacker-supplied
-    # X-Forwarded-For chain, so use the LAST valid hop, not the first spoofable
-    # value. If the direct peer is not loopback, ignore forwarding headers entirely.
     if peer in {"127.0.0.1", "::1"}:
         forwarded = request.headers.get("x-forwarded-for", "")
         if forwarded:
@@ -72,14 +68,31 @@ def _client_ip(request: Request) -> str:
     return peer
 
 
+def _reject_auth_load() -> None:
+    raise HTTPException(
+        status_code=429,
+        detail="Authentication capacity is temporarily busy; retry shortly",
+        headers={"Retry-After": "60"},
+    )
+
+
 def enforce_auth_rate_limit(request: Request, *, email: str, action: str, environment: str) -> None:
     if environment.lower() not in {"production", "prod", "stable"}:
         return
+    # The global circuit breaker is checked before IP/email buckets and before
+    # scrypt. A botnet therefore cannot bypass CPU protection merely by rotating
+    # addresses. Limits are intentionally far above normal traffic for a single
+    # low-cost node; overload is shed instead of exhausting CPU/DB connections.
+    global_limit = 120 if action == "register" else 300
+    if not _limiter.consume(f"auth:{action}:global", limit=global_limit):
+        _reject_auth_load()
+
     ip = _client_ip(request)
     ip_limit = 12 if action == "register" else 30
     if not _limiter.consume(f"auth:{action}:ip:{ip}", limit=ip_limit):
-        raise HTTPException(status_code=429, detail="Too many authentication attempts", headers={"Retry-After": "60"})
+        _reject_auth_load()
+
     import hashlib
     email_key = hashlib.sha256(email.casefold().encode("utf-8", errors="ignore")).hexdigest()[:24]
     if not _limiter.consume(f"auth:{action}:email:{email_key}", limit=8):
-        raise HTTPException(status_code=429, detail="Too many authentication attempts", headers={"Retry-After": "60"})
+        _reject_auth_load()
