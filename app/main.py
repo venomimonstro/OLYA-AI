@@ -177,5 +177,6 @@ for module in (
     "app.api.routes.commerce",
     "app.api.routes.api_client",
     "app.api.routes.beta",
+    "app.api.routes.beta_ops",
 ):
     _include_optional_router(module)
