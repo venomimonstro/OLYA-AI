@@ -114,6 +114,19 @@ class Settings(BaseSettings):
     release_gate_max_age_hours: float = 24.0
     restore_drill_max_age_hours: float = 168.0
 
+    # Sprint 36 target-node calibration / closed-beta guardrails.
+    capacity_report_path: str = "./backups/capacity-latest.json"
+    capacity_report_max_age_hours: float = 168.0
+    capacity_compute_headroom_ratio: float = 1.25
+    capacity_min_monthly_compute_seconds: int = 300
+    capacity_max_monthly_compute_seconds: int = 14400
+    beta_min_participants: int = 50
+    beta_max_participants: int = 100
+    beta_min_tasks: int = 500
+    beta_min_request_success_rate: float = 0.97
+    beta_max_frustration_per_request: float = 0.05
+    beta_max_p95_queue_ms: int = 5000
+
 
 @lru_cache
 def get_settings() -> Settings:
