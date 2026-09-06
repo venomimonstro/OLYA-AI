@@ -8,11 +8,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Project-runtime creation initializes a real local Git repository. Keep the
-# runtime dependency explicit in the image instead of silently assuming the host
-# Git binary is visible inside the container.
+# Git is required by the closed development runtime. LibreOffice + poppler are
+# required by the document QA/release path; without them a generated DOCX can
+# never pass the production render gate. Keep a basic font set installed so PDF
+# layout is reproducible instead of depending on accidental host fonts.
 RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       git ca-certificates libreoffice-writer poppler-utils fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./
@@ -35,8 +37,7 @@ COPY --chown=x1:x1 tests ./tests
 
 USER x1
 
-# One worker is intentional: in-memory inference admission/governor state must be
-# authoritative on a single low-cost node. Uvicorn bounds HTTP tasks before the
-# much more expensive inference queue, so a connection storm cannot allocate an
-# unbounded number of Python request tasks.
+# One worker is intentional: in-memory admission/governor state is authoritative
+# on a single low-cost node. Uvicorn bounds HTTP tasks before the expensive
+# inference queue, so a connection storm cannot create unbounded request tasks.
 CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --limit-concurrency ${X1_HTTP_LIMIT_CONCURRENCY:-128} --backlog ${X1_HTTP_BACKLOG:-2048} --timeout-keep-alive ${X1_HTTP_KEEPALIVE_SECONDS:-5}"]
