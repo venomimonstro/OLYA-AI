@@ -31,7 +31,6 @@ def _parse_time(value: Any) -> datetime | None:
 
 
 def read_capacity_report(settings, *, now: datetime | None = None) -> dict[str, Any]:
-    """Read and validate the last target-node calibration report."""
     now = _aware(now) or _now()
     path = Path(getattr(settings, "capacity_report_path", "./backups/capacity-latest.json")).expanduser().resolve()
     try:
@@ -50,11 +49,9 @@ def read_capacity_report(settings, *, now: datetime | None = None) -> dict[str, 
     context = int(recommendation.get("deep_context_tokens") or 0)
     if context not in CONTEXT_TIERS:
         reasons.append("invalid_context_recommendation")
-    concurrency = int(recommendation.get("max_concurrent_generations") or 0)
-    if concurrency < 1:
+    if int(recommendation.get("max_concurrent_generations") or 0) < 1:
         reasons.append("invalid_concurrency_recommendation")
-    queue_size = int(recommendation.get("max_queue_size") or 0)
-    if queue_size < 1:
+    if int(recommendation.get("max_queue_size") or 0) < 1:
         reasons.append("invalid_queue_recommendation")
 
     finished = _parse_time(payload.get("finished_at"))
@@ -67,12 +64,7 @@ def read_capacity_report(settings, *, now: datetime | None = None) -> dict[str, 
             reasons.append("stale")
 
     result = dict(payload)
-    result.update({
-        "path": str(path),
-        "status": "passed" if not reasons else "degraded",
-        "reasons": reasons,
-        "age_hours": None if age_hours is None else round(age_hours, 2),
-    })
+    result.update({"path": str(path), "status": "passed" if not reasons else "degraded", "reasons": reasons, "age_hours": None if age_hours is None else round(age_hours, 2)})
     return result
 
 
@@ -81,18 +73,14 @@ def _clamp(value: int, minimum: int, maximum: int) -> int:
 
 
 def build_launch_calibration(beta_snapshot: dict[str, Any], capacity_report: dict[str, Any], settings) -> dict[str, Any]:
-    """Combine real beta telemetry with target-node measurements.
-
-    Retention is deliberately reported as a product signal, not an invented
-    pass/fail threshold. Hard launch gates use data sufficiency and measurable
-    runtime reliability/capacity only.
-    """
     readiness = dict(beta_snapshot.get("readiness") or {})
     metrics = dict(beta_snapshot.get("metrics") or {})
     blockers: list[str] = []
     warnings: list[str] = []
 
-    participants = int(beta_snapshot.get("enrolled_count") or 0)
+    active = int(beta_snapshot.get("active_participant_count") or 0)
+    paused = int(beta_snapshot.get("paused_participant_count") or 0)
+    participants = active + paused if (active or paused or "active_participant_count" in beta_snapshot) else int(beta_snapshot.get("enrolled_count") or 0)
     tasks = int(beta_snapshot.get("task_count") or 0)
     requests = int(beta_snapshot.get("request_count") or 0)
     if participants < int(getattr(settings, "beta_min_participants", 50)):
@@ -138,9 +126,16 @@ def build_launch_calibration(beta_snapshot: dict[str, Any], capacity_report: dic
         "inference_queue_timeout_seconds": float(recommendation.get("inference_queue_timeout_seconds") or getattr(settings, "inference_queue_timeout_seconds", 120.0)),
         "default_monthly_compute_seconds": recommended_compute_seconds,
     }
+    beta_only_blockers = {"beta_participants_below_minimum", "beta_tasks_below_minimum"}
+    if not blockers:
+        status = "ready"
+    elif set(blockers).issubset(beta_only_blockers):
+        status = "collecting_data"
+    else:
+        status = "blocked"
 
     return {
-        "status": "ready" if not blockers else "collecting_data" if any(x.startswith("beta_") for x in blockers) else "blocked",
+        "status": status,
         "blockers": blockers,
         "warnings": warnings,
         "plan": plan,
