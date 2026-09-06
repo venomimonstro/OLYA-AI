@@ -13,6 +13,7 @@ from app.services.access import ROLE_RANK, project_role, require_project_role
 from app.services.auth import get_current_user
 from app.services.documents import (
     DocumentBuildError,
+    DocumentBusyError,
     DocumentQAError,
     build_docx,
     render_docx_to_pdf,
@@ -37,7 +38,6 @@ def _artifact_access(db: Session, user: User, artifact_id: str, minimum: str = "
     return artifact
 
 
-
 def _artifact_write_access(db: Session, user: User, artifact: DocumentArtifact, *, release: bool = False) -> DocumentArtifact:
     if artifact.project_id:
         project, role = require_project_role(db, user, artifact.project_id, "member")
@@ -50,6 +50,7 @@ def _artifact_write_access(db: Session, user: User, artifact: DocumentArtifact, 
     if artifact.user_id != user.id:
         raise HTTPException(status_code=404, detail="Document not found")
     return artifact
+
 
 def _revision(db: Session, artifact: DocumentArtifact, revision: int | None = None) -> DocumentRevision:
     rev_number = revision or artifact.current_revision
@@ -119,7 +120,6 @@ def create_document(
 
 @router.get("", response_model=list[DocumentArtifactRead])
 def list_documents(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[DocumentArtifact]:
-    # Personal documents plus project documents are deliberately fetched conservatively.
     personal = list(db.scalars(select(DocumentArtifact).where(DocumentArtifact.user_id == user.id)).all())
     seen = {item.id for item in personal}
     from app.services.access import list_accessible_projects
@@ -211,6 +211,15 @@ def run_document_qa(
         rev_dir = root / artifact.id / f"r{revision.revision}"
         pdf = render_docx_to_pdf(docx, rev_dir, timeout_seconds=request.app.state.settings.document_render_timeout_seconds)
         rendered = render_qa(pdf, rev_dir / "pages", max_pages=request.app.state.settings.document_max_pages)
+    except DocumentBusyError as exc:
+        # Capacity pressure is transient. Do not poison a valid revision with a
+        # persistent qa_failed state merely because another render owns the slot.
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="Document renderer is busy; retry shortly",
+            headers={"Retry-After": "3"},
+        ) from exc
     except DocumentQAError as exc:
         rendered = {"status": "failed", "issues": [{"code": "render_failed", "message": str(exc)}]}
         _record_gate(db, revision, "render", rendered)
