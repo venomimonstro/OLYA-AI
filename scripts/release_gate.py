@@ -10,6 +10,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,10 +34,9 @@ def run(name: str, argv: list[str], *, timeout: int, required: bool = True, env:
             timeout=timeout,
             shell=False,
         )
-        status = "passed" if completed.returncode == 0 else "failed"
         return {
             "name": name,
-            "status": status,
+            "status": "passed" if completed.returncode == 0 else "failed",
             "required": required,
             "exit_code": completed.returncode,
             "duration_seconds": round((datetime.now(timezone.utc) - started).total_seconds(), 3),
@@ -67,10 +68,10 @@ def run(name: str, argv: list[str], *, timeout: int, required: bool = True, env:
 
 
 def git_head() -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, shell=False
-    ) if shutil.which("git") and (ROOT / ".git").exists() else None
-    return result.stdout.strip() if result is not None and result.returncode == 0 else ""
+    if not shutil.which("git") or not (ROOT / ".git").exists():
+        return ""
+    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, shell=False)
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def project_version() -> str:
@@ -82,11 +83,10 @@ def project_version() -> str:
     return "unknown"
 
 
-def alembic_head_check(timeout: int) -> dict[str, Any]:
-    check = run("alembic_heads", [sys.executable, "-m", "alembic", "heads"], timeout=timeout)
+def parse_alembic_heads(check: dict[str, Any]) -> dict[str, Any]:
     if check["status"] != "passed":
         return check
-    heads = [line.split()[0].strip() for line in check["stdout"].splitlines() if line.strip()]
+    heads = [line.split()[0].strip() for line in check.get("stdout", "").splitlines() if line.strip()]
     check["heads"] = heads
     if len(heads) != 1:
         check["status"] = "failed"
@@ -121,9 +121,38 @@ def write_report(path: Path, payload: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def final_ready_probe(url: str = "http://127.0.0.1:8000/ready", timeout: float = 15.0) -> dict[str, Any]:
+    started = datetime.now(timezone.utc)
+    try:
+        request = Request(url, headers={"Accept": "application/json", "User-Agent": "X1-Release-Gate/1"})
+        with urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            code = int(response.status)
+        status = str(data.get("status") or "")
+        passed = code == 200 and status == "stable"
+        return {
+            "name": "final_ready",
+            "status": "passed" if passed else "failed",
+            "required": True,
+            "http_status": code,
+            "ready_status": status,
+            "score": data.get("score"),
+            "components": data.get("components") or {},
+            "duration_seconds": round((datetime.now(timezone.utc) - started).total_seconds(), 3),
+        }
+    except HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[-4000:]
+        except Exception:
+            body = ""
+        return {"name": "final_ready", "status": "failed", "required": True, "http_status": exc.code, "stderr": body}
+    except (URLError, OSError, ValueError, json.JSONDecodeError) as exc:
+        return {"name": "final_ready", "status": "failed", "required": True, "error": type(exc).__name__, "stderr": str(exc)[:2000]}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="X1 production release gate")
-    parser.add_argument("--runtime", action="store_true", help="also verify a running Docker deployment, backup and restore")
+    parser.add_argument("--runtime", action="store_true", help="also verify the running Docker deployment, backup and restore")
     parser.add_argument("--live-inference", action="store_true", help="run one bounded long-context request against llama.cpp")
     parser.add_argument("--pytest-timeout", type=int, default=1200)
     parser.add_argument("--command-timeout", type=int, default=180)
@@ -134,74 +163,53 @@ def main() -> int:
     checks: list[dict[str, Any]] = []
     python_env = dict(os.environ)
     python_env["PYTHONPATH"] = str(ROOT)
+    docker = docker_available()
+    containerized_gate = bool(docker and (ROOT / ".env").exists())
 
-    checks.append(run(
-        "compileall",
-        [sys.executable, "-m", "compileall", "-q", "app", "scripts", "tests"],
-        timeout=args.command_timeout,
-        env=python_env,
-    ))
-    checks.append(alembic_head_check(args.command_timeout))
-    checks.append(run(
-        "long_context_offline",
-        [sys.executable, "scripts/long_context_probe.py"],
-        timeout=args.command_timeout,
-        env=python_env,
-    ))
-    checks.append(run(
-        "pytest_full",
-        [sys.executable, "-m", "pytest", "-q"],
-        timeout=max(60, args.pytest_timeout),
-        env=python_env,
-    ))
+    if containerized_gate:
+        checks.append(run(
+            "gate_image_build",
+            ["docker", "compose", "--profile", "gate", "build", "gate"],
+            timeout=max(args.command_timeout, 900),
+        ))
+        gate_prefix = ["docker", "compose", "--profile", "gate", "run", "--rm", "--no-deps", "gate"]
+        checks.append(run("compileall", [*gate_prefix, "python", "-m", "compileall", "-q", "app", "scripts", "tests"], timeout=args.command_timeout))
+        checks.append(parse_alembic_heads(run("alembic_heads", [*gate_prefix, "python", "-m", "alembic", "heads"], timeout=args.command_timeout)))
+        checks.append(run("long_context_offline", [*gate_prefix, "python", "scripts/long_context_probe.py"], timeout=args.command_timeout))
+        checks.append(run("pytest_full", [*gate_prefix, "python", "-m", "pytest", "-q"], timeout=max(60, args.pytest_timeout)))
+    else:
+        checks.append(run("compileall", [sys.executable, "-m", "compileall", "-q", "app", "scripts", "tests"], timeout=args.command_timeout, env=python_env))
+        checks.append(parse_alembic_heads(run("alembic_heads", [sys.executable, "-m", "alembic", "heads"], timeout=args.command_timeout, env=python_env)))
+        checks.append(run("long_context_offline", [sys.executable, "scripts/long_context_probe.py"], timeout=args.command_timeout, env=python_env))
+        checks.append(run("pytest_full", [sys.executable, "-m", "pytest", "-q"], timeout=max(60, args.pytest_timeout), env=python_env))
 
-    if docker_available():
+    if docker:
         checks.append(run("compose_config", ["docker", "compose", "config", "--quiet"], timeout=args.command_timeout))
     else:
-        checks.append({
-            "name": "compose_config",
-            "status": "failed" if args.runtime else "not_run",
-            "required": bool(args.runtime),
-            "detail": "Docker Compose is unavailable",
-        })
+        checks.append({"name": "compose_config", "status": "failed" if args.runtime else "not_run", "required": bool(args.runtime), "detail": "Docker Compose is unavailable"})
 
     if args.runtime:
-        checks.append(run("doctor", [sys.executable, "scripts/doctor.py"], timeout=args.command_timeout, env=python_env))
         backup = run("backup", ["bash", "scripts/backup.sh"], timeout=max(args.command_timeout, 600))
         checks.append(backup)
         backup_path = latest_backup_from_output(backup.get("stdout", "")) if backup["status"] == "passed" else ""
         if backup_path:
-            checks.append(run(
-                "restore_drill",
-                ["bash", "scripts/restore_drill.sh", backup_path],
-                timeout=max(args.command_timeout, 900),
-            ))
+            checks.append(run("restore_drill", ["bash", "scripts/restore_drill.sh", backup_path], timeout=max(args.command_timeout, 900)))
         else:
             checks.append({"name": "restore_drill", "status": "failed", "required": True, "detail": "No verified backup produced"})
+
         checks.append(run(
             "http_load_smoke",
-            [sys.executable, "scripts/load_smoke.py", "--requests", "60", "--concurrency", "8"],
+            ["docker", "compose", "exec", "-T", "app", "python", "scripts/load_smoke.py", "--url", "http://127.0.0.1:8000", "--requests", "60", "--concurrency", "8"],
             timeout=max(args.command_timeout, 180),
-            env=python_env,
         ))
-
         if args.live_inference:
             checks.append(run(
                 "long_context_live",
-                [
-                    "docker", "compose", "exec", "-T", "app", "python", "scripts/long_context_probe.py",
-                    "--context-tokens", os.environ.get("X1_DEEP_CONTEXT_TOKENS", "16384"),
-                    "--live-url", "http://llama:8080",
-                ],
+                ["docker", "compose", "exec", "-T", "app", "python", "scripts/long_context_probe.py", "--context-tokens", os.environ.get("X1_DEEP_CONTEXT_TOKENS", "16384"), "--live-url", "http://llama:8080"],
                 timeout=max(args.command_timeout, 600),
             ))
         else:
-            checks.append({
-                "name": "long_context_live",
-                "status": "not_run",
-                "required": False,
-                "detail": "Pass --live-inference on the target node before public launch",
-            })
+            checks.append({"name": "long_context_live", "status": "not_run", "required": False, "detail": "Pass --live-inference on the target node before public launch"})
 
     failed_required = [item["name"] for item in checks if item.get("required", True) and item.get("status") != "passed"]
     status = "passed" if not failed_required else "failed"
@@ -212,6 +220,7 @@ def main() -> int:
         "git_head": git_head(),
         "mode": "runtime" if args.runtime else "static",
         "live_inference_requested": bool(args.live_inference),
+        "containerized_gate": containerized_gate,
         "started_at": started_at,
         "finished_at": utcnow(),
         "failed_required_checks": failed_required,
@@ -220,9 +229,25 @@ def main() -> int:
     report_path = Path(args.report)
     if not report_path.is_absolute():
         report_path = ROOT / report_path
+
+    # Write the preliminary passing report before /ready: the production health
+    # graph intentionally includes ops.release_gate, so this avoids a circular
+    # dependency while still allowing the final readiness response to invalidate
+    # the gate below if any other production checkpoint is not stable.
     write_report(report_path, payload)
+    if args.runtime and status == "passed":
+        ready = final_ready_probe()
+        checks.append(ready)
+        if ready["status"] != "passed":
+            failed_required.append("final_ready")
+            payload["status"] = "failed"
+        payload["failed_required_checks"] = failed_required
+        payload["checks"] = checks
+        payload["finished_at"] = utcnow()
+        write_report(report_path, payload)
+
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
-    return 0 if status == "passed" else 2
+    return 0 if payload["status"] == "passed" else 2
 
 
 if __name__ == "__main__":
