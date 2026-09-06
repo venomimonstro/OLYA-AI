@@ -69,15 +69,10 @@ async def lifespan(app: FastAPI):
         max_chars=settings.research_max_chars,
         max_redirects=settings.research_max_redirects,
     )
-    configured = [
-        item.strip().lower()
-        for item in (settings.search_providers or settings.search_provider).split(",")
-        if item.strip()
-    ]
+    configured = [item.strip().lower() for item in (settings.search_providers or settings.search_provider).split(",") if item.strip()]
     providers = []
     for name in configured:
-        if name == "brave":
-            providers.append(BraveSearchDiscovery(settings.brave_search_api_key, timeout_seconds=settings.search_timeout_seconds))
+        if name == "brave": providers.append(BraveSearchDiscovery(settings.brave_search_api_key, timeout_seconds=settings.search_timeout_seconds))
     app.state.discovery = ProviderPoolDiscovery(providers) if providers else DisabledDiscovery()
 
     beta_scheduler_task = None
@@ -89,7 +84,7 @@ async def lifespan(app: FastAPI):
         app.state.beta_operations_task = beta_scheduler_task
     if is_production and settings.public_launch_watchdog_enabled:
         from app.services.public_launch_scheduler import public_launch_watchdog_loop
-        public_launch_task = asyncio.create_task(public_launch_watchdog_loop(settings), name="x1-public-launch-watchdog")
+        public_launch_task = asyncio.create_task(public_launch_watchdog_loop(app), name="x1-public-launch-watchdog")
         app.state.public_launch_watchdog_task = public_launch_task
 
     try:
@@ -98,22 +93,13 @@ async def lifespan(app: FastAPI):
         for task in (public_launch_task, beta_scheduler_task):
             if task is not None:
                 task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
+                with contextlib.suppress(asyncio.CancelledError): await task
         await app.state.llama.close()
 
 
 _boot_settings = get_settings()
 _is_production = _boot_settings.env.lower() in {"production", "prod", "stable"}
-app = FastAPI(
-    title="X1",
-    version="0.38.0",
-    description="Local-first CPU/RAM AI platform",
-    lifespan=lifespan,
-    docs_url=None if _is_production else "/docs",
-    redoc_url=None if _is_production else "/redoc",
-    openapi_url=None if _is_production else "/openapi.json",
-)
+app = FastAPI(title="X1", version="0.38.0", description="Local-first CPU/RAM AI platform", lifespan=lifespan, docs_url=None if _is_production else "/docs", redoc_url=None if _is_production else "/redoc", openapi_url=None if _is_production else "/openapi.json")
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=3)
 
 
@@ -133,10 +119,7 @@ async def privacy_headers(request: Request, call_next):
 
 @app.get("/robots.txt", include_in_schema=False)
 def robots() -> PlainTextResponse:
-    return PlainTextResponse(
-        "User-agent: *\nDisallow: /v1/\nDisallow: /admin\nDisallow: /media-admin\n",
-        headers={"Cache-Control": "public, max-age=86400"},
-    )
+    return PlainTextResponse("User-agent: *\nDisallow: /v1/\nDisallow: /admin\nDisallow: /media-admin\n", headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.exception_handler(StaleDataError)
@@ -147,56 +130,13 @@ async def stale_task_state_handler(request: Request, exc: StaleDataError):
 
 def _include_optional_router(module: str) -> None:
     try:
-        imported = __import__(module, fromlist=["router"])
-        router = getattr(imported, "router", None)
-    except (ImportError, ModuleNotFoundError):
-        router = None
-    if router is not None:
-        app.include_router(router)
+        imported = __import__(module, fromlist=["router"]); router = getattr(imported, "router", None)
+    except (ImportError, ModuleNotFoundError): router = None
+    if router is not None: app.include_router(router)
 
 
-for router in (
-    health_router,
-    admin_ui_router,
-    media_admin_ui_router,
-    admin_router,
-    operations_router,
-    safety_admin_router,
-    account_router,
-    auth_router,
-    projects_router,
-    memory_router,
-    files_router,
-    conversations_router,
-    usage_router,
-    diagnostics_router,
-    documents_router,
-    code_router,
-    images_router,
-    media_admin_router,
-    runtime_router,
-    development_router,
-    engineering_router,
-    execution_router,
-    sandbox_router,
-    git_router,
-    development_chat_router,
-    quality_router,
-    research_router,
-    tasks_router,
-    chat_router,
-):
+for router in (health_router,admin_ui_router,media_admin_ui_router,admin_router,operations_router,safety_admin_router,account_router,auth_router,projects_router,memory_router,files_router,conversations_router,usage_router,diagnostics_router,documents_router,code_router,images_router,media_admin_router,runtime_router,development_router,engineering_router,execution_router,sandbox_router,git_router,development_chat_router,quality_router,research_router,tasks_router,chat_router):
     app.include_router(router)
 
-for module in (
-    "app.api.routes.complaints",
-    "app.api.routes.reliability",
-    "app.api.routes.commerce",
-    "app.api.routes.api_client",
-    "app.api.routes.beta",
-    "app.api.routes.beta_ops",
-    "app.api.routes.launch",
-    "app.beta_admin_ui",
-    "app.launch_admin_ui",
-):
+for module in ("app.api.routes.complaints","app.api.routes.reliability","app.api.routes.commerce","app.api.routes.api_client","app.api.routes.beta","app.api.routes.beta_ops","app.api.routes.launch","app.beta_admin_ui","app.launch_admin_ui"):
     _include_optional_router(module)
