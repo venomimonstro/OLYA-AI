@@ -41,8 +41,10 @@ git merge-base --is-ancestor "$OLD_HEAD" "$TARGET_HEAD" || fail "origin/main is 
 # created by the target-compatible helper is never handed to an old v1/v2
 # restore implementation during rollback.
 RESTORE_COPY="$(mktemp -t x1-restore.XXXXXX.sh)"
+MIGRATE_COPY="$(mktemp -t x1-migrate-legacy.XXXXXX.sh)"
 git show origin/main:scripts/restore.sh > "$RESTORE_COPY"
-chmod 700 "$RESTORE_COPY"
+git show origin/main:scripts/migrate_legacy_data.sh > "$MIGRATE_COPY"
+chmod 700 "$RESTORE_COPY" "$MIGRATE_COPY"
 BACKUP_PATH=""
 
 rollback() {
@@ -61,7 +63,7 @@ rollback() {
   if printf '%s\n' "$RUNNING_SERVICES" | grep -qx image-worker; then
     docker compose --profile images up -d image-worker >/dev/null 2>&1 || true
   fi
-  rm -f "$RESTORE_COPY"
+  rm -f "$RESTORE_COPY" "$MIGRATE_COPY"
   printf '[X1 update] Previous revision restored: %s\n' "$OLD_HEAD" >&2
   exit 2
 }
@@ -70,6 +72,13 @@ trap 'rollback "update interrupted"' INT TERM
 
 info "Quiescing write-producing services"
 docker compose stop app image-worker sandbox-worker >/dev/null 2>&1 || true
+
+# A pre-Sprint39 installation may still keep all project/user files in a named
+# *_x1_data volume. Copy it to the new host bind before the first v3 backup.
+# The migration is copy-only and deliberately preserves the source volume, so a
+# rollback to the old code still sees its original filesystem unchanged.
+info "Checking for legacy named-volume user data"
+X1_INSTALL_DIR="$ROOT" bash "$MIGRATE_COPY"
 
 info "Creating consistent pre-update backup"
 if grep -q 'docker compose exec -T app python' scripts/backup.sh 2>/dev/null; then
@@ -96,6 +105,6 @@ if printf '%s\n' "$RUNNING_SERVICES" | grep -qx image-worker; then
 fi
 
 trap - ERR INT TERM
-rm -f "$RESTORE_COPY"
+rm -f "$RESTORE_COPY" "$MIGRATE_COPY"
 info "Update committed successfully: $OLD_HEAD -> $(git rev-parse HEAD)"
 info "Rollback snapshot retained at: $BACKUP_PATH"
