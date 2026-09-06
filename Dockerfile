@@ -24,6 +24,7 @@ COPY --chown=x1:x1 alembic.ini ./
 COPY --chown=x1:x1 alembic ./alembic
 COPY --chown=x1:x1 app ./app
 COPY --chown=x1:x1 scripts ./scripts
+COPY --chown=x1:x1 tests ./tests
 
 USER x1
 
