@@ -13,7 +13,8 @@ from app.models import ApiKey, Organization, OrganizationBudget, OrganizationMem
 from app.schemas.commerce import ApiKeyCreate, ApiKeyCreated, ApiKeyRead, BudgetPut, BudgetRead, OrganizationCreate, OrganizationMemberRead, OrganizationMemberUpsert, OrganizationRead, PaymentIngest, PaymentRead
 from app.services.admin import audit, require_admin
 from app.services.auth import get_current_user, normalize_email
-from app.services.commerce import apply_plan_to_quota, budget_state, create_api_key, ingest_payment, list_organizations, measured_user_resources, normalize_slug, organization_role, payment_reconciliation, plan_catalog, require_organization_role
+from app.services.commerce import budget_state, create_api_key, ingest_payment, list_organizations, measured_user_resources, normalize_slug, organization_role, payment_reconciliation, require_organization_role
+from app.services.measured_plans import apply_runtime_plan_to_quota, runtime_plan_catalog
 
 router=APIRouter(prefix="/v1/commerce",tags=["commerce"])
 
@@ -23,14 +24,14 @@ def _require_org(db,user,org_id,minimum="member"):
     except LookupError as exc: raise HTTPException(status_code=404,detail="Organization not found") from exc
 
 @router.get('/plans')
-def plans(request:Request): return plan_catalog(request.app.state.settings)
+def plans(request:Request,db:Session=Depends(get_db)): return runtime_plan_catalog(db,request.app.state.settings)
 
 @router.get('/usage')
 def usage(request:Request,user:User=Depends(get_current_user),db:Session=Depends(get_db)):
     measured=measured_user_resources(db,user.id,request.app.state.settings)
     from app.services.quota import get_or_create_quota
-    quota=get_or_create_quota(db,user,request.app.state.settings); policy=next((x for x in plan_catalog(request.app.state.settings) if x['name']==quota.plan),None)
-    measured['plan']=quota.plan; measured['plan_resource_budget_microunits']=policy['resource_budget_microunits'] if policy else 0; measured['remaining_resource_microunits']=max(0,measured['plan_resource_budget_microunits']-measured['total_cost_microunits']); db.commit(); return measured
+    quota=get_or_create_quota(db,user,request.app.state.settings); policy=next((x for x in runtime_plan_catalog(db,request.app.state.settings) if x['name']==quota.plan),None)
+    measured['plan']=quota.plan; measured['plan_resource_budget_microunits']=policy['resource_budget_microunits'] if policy else 0; measured['remaining_resource_microunits']=max(0,measured['plan_resource_budget_microunits']-measured['total_cost_microunits']); measured['catalog_version']=policy.get('catalog_version') if policy else None; measured['channel_shares']=policy.get('channel_shares',{}) if policy else {}; db.commit(); return measured
 
 @router.post('/organizations',response_model=OrganizationRead,status_code=status.HTTP_201_CREATED)
 def create_org(payload:OrganizationCreate,user:User=Depends(get_current_user),db:Session=Depends(get_db)):
@@ -105,9 +106,9 @@ def reconcile(admin:User=Depends(require_admin),db:Session=Depends(get_db)):
     result=payment_reconciliation(db); audit(db,admin,'commerce.payment_reconciliation','payment_record','',result); db.commit(); return result
 
 @router.post('/users/{user_id}/plan/{plan}')
-def set_plan(user_id:str,plan:str,admin:User=Depends(require_admin),db:Session=Depends(get_db)):
+def set_plan(user_id:str,plan:str,request:Request,admin:User=Depends(require_admin),db:Session=Depends(get_db)):
     target=db.get(User,user_id)
     if target is None: raise HTTPException(status_code=404,detail='User not found')
-    try: quota=apply_plan_to_quota(db,target,plan)
+    try: quota=apply_runtime_plan_to_quota(db,target,request.app.state.settings,plan)
     except ValueError as exc: raise HTTPException(status_code=422,detail=str(exc)) from exc
     audit(db,admin,'commerce.plan_set','user',target.id,{'plan':plan}); db.commit(); return {'user_id':target.id,'plan':quota.plan,'monthly_compute_seconds_limit':quota.monthly_compute_seconds_limit,'max_concurrent_inference':quota.max_concurrent_inference,'max_concurrent_jobs':quota.max_concurrent_jobs}
