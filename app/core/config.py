@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     port: int = 8000
     database_url: str = "sqlite+pysqlite:///./x1.db"
     llama_base_url: str = "http://127.0.0.1:8080"
-    llama_model_name: str = "Qwen3.6-35B-A3B-Q4_K_M"
+    llama_model_name: str = "Qwen3-30B-A3B-Q4_K_M"
     max_context_tokens: int = 8192
     deep_context_tokens: int = 16384
     max_concurrent_generations: int = 1
@@ -45,8 +45,11 @@ class Settings(BaseSettings):
     research_max_bytes: int = 2_000_000
     research_max_chars: int = 500_000
     research_max_redirects: int = 3
-    search_provider: str = "disabled"
-    search_providers: str = ""
+    # Sprint 39 starts a private SearXNG sidecar by default. Brave remains an
+    # optional second provider and is never used for model inference.
+    search_provider: str = "searxng"
+    search_providers: str = "searxng"
+    searxng_base_url: str = "http://searxng:8080"
     search_cache_ttl_seconds: int = 3600
     brave_search_api_key: str = ""
     search_timeout_seconds: float = 10.0
@@ -68,8 +71,12 @@ class Settings(BaseSettings):
     project_runtime_default_disk_mb: int = 2048
     project_runtime_default_process_limit: int = 64
     project_runtime_secret_key: str = "change-me-runtime-secret"
-    project_sandbox_backend: str = "auto"
-    project_sandbox_image: str = ""
+    # The web app never receives the Docker socket. A dedicated internal worker
+    # owns the privileged boundary and can only execute hardened sandbox calls.
+    project_sandbox_backend: str = "remote"
+    project_sandbox_image: str = "x1-sandbox:0.39"
+    project_sandbox_worker_url: str = "http://sandbox-worker:8090"
+    project_sandbox_worker_token: str = "change-me-sandbox-worker"
     project_sandbox_command_timeout_seconds: int = 300
     project_sandbox_preview_timeout_seconds: int = 120
 
@@ -140,7 +147,6 @@ class Settings(BaseSettings):
     beta_operations_check_interval_seconds: float = 3600.0
     beta_snapshot_interval_hours: float = 24.0
 
-    # Sprint 38 progressive public launch / measured plan policy.
     public_launch_breaker_min_requests: int = 50
     public_launch_canary_min_requests: int = 30
     public_launch_max_failure_rate: float = 0.03
