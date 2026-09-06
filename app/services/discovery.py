@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import SearchQueryCache, SearchProviderStat, utcnow
@@ -110,6 +111,7 @@ class BraveSearchDiscovery:
 
 class DisabledDiscovery:
     name = "disabled"
+
     async def search(self, query: str, *, count: int = 10, country: str | None = None, language: str | None = None) -> list[SearchHit]:
         _ = query, count, country, language
         raise DiscoveryError("Search discovery is disabled; configure a search provider")
@@ -117,6 +119,7 @@ class DisabledDiscovery:
 
 class ProviderPoolDiscovery:
     """Runs ordinary search providers with economical failover or quality aggregation."""
+
     def __init__(self, providers: list[object]) -> None:
         self.providers = [p for p in providers if getattr(p, "name", "disabled") != "disabled"]
 
@@ -175,6 +178,95 @@ def _deserialize_hits(rows: list[dict]) -> list[SearchHit]:
     return [SearchHit(**row) for row in rows]
 
 
+def _ensure_provider_stat(db: Session, provider: str) -> None:
+    if db.get(SearchProviderStat, provider) is not None:
+        return
+    candidate = SearchProviderStat(
+        provider=provider,
+        request_count=0,
+        success_count=0,
+        failure_count=0,
+        total_latency_ms=0,
+        last_latency_ms=0,
+        last_error="",
+    )
+    try:
+        with db.begin_nested():
+            db.add(candidate)
+            db.flush()
+    except IntegrityError:
+        # Another concurrent search initialized this provider row first.
+        pass
+
+
+def _record_provider_outcome(db: Session, outcome: ProviderSearchOutcome, now) -> None:
+    _ensure_provider_stat(db, outcome.provider)
+    values = {
+        "request_count": SearchProviderStat.request_count + 1,
+        "last_latency_ms": outcome.latency_ms,
+        "total_latency_ms": SearchProviderStat.total_latency_ms + outcome.latency_ms,
+        "last_checked_at": now,
+        "last_error": outcome.error[:500] if outcome.error else "",
+    }
+    if outcome.error:
+        values["failure_count"] = SearchProviderStat.failure_count + 1
+    else:
+        values["success_count"] = SearchProviderStat.success_count + 1
+    db.execute(
+        update(SearchProviderStat)
+        .where(SearchProviderStat.provider == outcome.provider)
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
+
+
+def _store_cache_result(
+    db: Session,
+    *,
+    existing: SearchQueryCache | None,
+    key: str,
+    query: str,
+    country: str | None,
+    language: str | None,
+    provider_names: str,
+    hits: list[SearchHit],
+    elapsed: int,
+    now,
+) -> None:
+    serialized = _serialize_hits(hits)
+    if existing is not None:
+        existing.results = serialized
+        existing.created_at = now
+        existing.latency_ms = elapsed
+        db.flush()
+        return
+
+    candidate = SearchQueryCache(
+        cache_key=key,
+        query=query,
+        country=country or "",
+        language=language or "",
+        provider_set=provider_names,
+        results=serialized,
+        latency_ms=elapsed,
+    )
+    try:
+        with db.begin_nested():
+            db.add(candidate)
+            db.flush()
+        return
+    except IntegrityError:
+        # A concurrent identical search won the cache-key insert. Merge our
+        # successful result into that canonical row instead of surfacing 500.
+        row = db.get(SearchQueryCache, key)
+        if row is None:
+            raise DiscoveryError("Search cache concurrency recovery failed")
+        row.results = serialized
+        row.created_at = now
+        row.latency_ms = elapsed
+        db.flush()
+
+
 async def cached_provider_search(db: Session, discovery: object, query: str, *, count: int, country: str | None,
                                  language: str | None, ttl_seconds: int = 3600, quality_mode: bool = False) -> list[SearchHit]:
     provider_names = ",".join(sorted(getattr(p, "name", "unknown") for p in getattr(discovery, "providers", [discovery])))
@@ -187,13 +279,22 @@ async def cached_provider_search(db: Session, discovery: object, query: str, *, 
             created = created.replace(tzinfo=now.tzinfo)
         age = (now - created).total_seconds()
         if age <= ttl_seconds:
-            row.hit_count += 1
+            db.execute(
+                update(SearchQueryCache)
+                .where(SearchQueryCache.cache_key == key)
+                .values(hit_count=SearchQueryCache.hit_count + 1)
+                .execution_options(synchronize_session=False)
+            )
             db.flush()
             return _deserialize_hits(list(row.results or []))[:count]
 
     start = time.perf_counter()
     if isinstance(discovery, ProviderPoolDiscovery):
-        ordered = sorted(discovery.providers, key=lambda p: provider_health_score(db.get(SearchProviderStat, getattr(p, "name", ""))), reverse=True)
+        ordered = sorted(
+            discovery.providers,
+            key=lambda p: provider_health_score(db.get(SearchProviderStat, getattr(p, "name", ""))),
+            reverse=True,
+        )
         active = []
         for provider in ordered:
             stat = db.get(SearchProviderStat, getattr(provider, "name", ""))
@@ -203,23 +304,16 @@ async def cached_provider_search(db: Session, discovery: object, query: str, *, 
         if not active:
             active = ordered
         runtime_pool = ProviderPoolDiscovery(active)
-        outcomes = await runtime_pool.search_outcomes(query, count=count, country=country, language=language, use_all=quality_mode)
+        outcomes = await runtime_pool.search_outcomes(
+            query,
+            count=count,
+            country=country,
+            language=language,
+            use_all=quality_mode,
+        )
         good = [o for o in outcomes if not o.error]
         for outcome in outcomes:
-            stat = db.get(SearchProviderStat, outcome.provider)
-            if stat is None:
-                stat = SearchProviderStat(provider=outcome.provider, request_count=0, success_count=0, failure_count=0, total_latency_ms=0, last_latency_ms=0, last_error="")
-                db.add(stat)
-            stat.request_count = int(stat.request_count or 0) + 1
-            stat.last_latency_ms = outcome.latency_ms
-            stat.total_latency_ms = int(stat.total_latency_ms or 0) + outcome.latency_ms
-            stat.last_checked_at = now
-            if outcome.error:
-                stat.failure_count = int(stat.failure_count or 0) + 1
-                stat.last_error = outcome.error[:500]
-            else:
-                stat.success_count = int(stat.success_count or 0) + 1
-                stat.last_error = ""
+            _record_provider_outcome(db, outcome, now)
         if not good:
             db.flush()
             raise DiscoveryError("All configured search providers failed")
@@ -233,15 +327,18 @@ async def cached_provider_search(db: Session, discovery: object, query: str, *, 
     else:
         hits = await discovery.search(query, count=count, country=country, language=language)
     elapsed = int((time.perf_counter() - start) * 1000)
-    if row is None:
-        row = SearchQueryCache(cache_key=key, query=query, country=country or "", language=language or "",
-                               provider_set=provider_names, results=_serialize_hits(hits), latency_ms=elapsed)
-        db.add(row)
-    else:
-        row.results = _serialize_hits(hits)
-        row.created_at = now
-        row.latency_ms = elapsed
-    db.flush()
+    _store_cache_result(
+        db,
+        existing=row,
+        key=key,
+        query=query,
+        country=country,
+        language=language,
+        provider_names=provider_names,
+        hits=hits,
+        elapsed=elapsed,
+        now=now,
+    )
     return hits
 
 
@@ -264,6 +361,13 @@ def classify_source(url: str, title: str = "", snippet: str = "") -> tuple[str, 
 def enrich_hit(hit: SearchHit) -> dict:
     source_kind, base_score = classify_source(hit.url, hit.title, hit.snippet)
     rank_bonus = max(0.0, (11 - min(hit.rank, 10)) / 100)
-    return {"query": hit.query, "title": hit.title, "url": hit.url, "snippet": hit.snippet, "rank": hit.rank,
-            "provider": hit.provider, "source_kind": source_kind,
-            "discovery_score": round(min(base_score + rank_bonus, 0.99), 3)}
+    return {
+        "query": hit.query,
+        "title": hit.title,
+        "url": hit.url,
+        "snippet": hit.snippet,
+        "rank": hit.rank,
+        "provider": hit.provider,
+        "source_kind": source_kind,
+        "discovery_score": round(min(base_score + rank_bonus, 0.99), 3),
+    }
