@@ -53,9 +53,35 @@ from app.services.searxng_discovery import SearxngDiscovery
 logger = logging.getLogger(__name__)
 
 
+def _is_prod(settings) -> bool:
+    return str(settings.env).lower() in {"production", "prod", "stable"}
+
+
+def _production_configuration_errors(settings) -> list[str]:
+    """Return startup-blocking configuration defects for a production process."""
+    if not _is_prod(settings):
+        return []
+    errors: list[str] = []
+    if str(settings.database_url).lower().startswith("sqlite"):
+        errors.append("production_database_must_not_be_sqlite")
+    if not settings.admin_bootstrap_token or settings.admin_bootstrap_token == "change-me":
+        errors.append("admin_bootstrap_token_is_default")
+    if not settings.project_runtime_secret_key or settings.project_runtime_secret_key == "change-me-runtime-secret":
+        errors.append("project_runtime_secret_key_is_default")
+    if str(settings.project_sandbox_backend).lower() == "remote":
+        token = str(settings.project_sandbox_worker_token or "")
+        if not token or token == "change-me-sandbox-worker":
+            errors.append("sandbox_worker_token_is_default")
+    return errors
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    is_production = _is_prod(settings)
+    production_errors = _production_configuration_errors(settings)
+    if production_errors:
+        raise RuntimeError("Unsafe production configuration: " + ", ".join(production_errors))
     if settings.database_auto_create_schema:
         init_db()
     app.state.settings = settings
@@ -95,7 +121,6 @@ async def lifespan(app: FastAPI):
 
     beta_scheduler_task = None
     public_launch_task = None
-    is_production = settings.env.lower() in {"production", "prod", "stable"}
     if is_production and settings.beta_operations_scheduler_enabled:
         from app.services.beta_scheduler import beta_operations_loop
         beta_scheduler_task = asyncio.create_task(beta_operations_loop(settings), name="x1-beta-operations")
@@ -116,7 +141,7 @@ async def lifespan(app: FastAPI):
 
 
 _boot_settings = get_settings()
-_is_production = _boot_settings.env.lower() in {"production", "prod", "stable"}
+_is_production = _is_prod(_boot_settings)
 app = FastAPI(
     title="X1",
     version="0.40.0",
