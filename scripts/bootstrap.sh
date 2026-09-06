@@ -28,10 +28,20 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 
 if [ -d "$INSTALL_DIR/.git" ]; then
-  echo "[X1] Existing installation found at $INSTALL_DIR; fast-forwarding main"
+  echo "[X1] Existing installation found at $INSTALL_DIR; using transactional updater"
+  # Fetching objects does not change the running tree. Execute the updater from
+  # origin/main in a temporary file so even a pre-Sprint40 installation gets the
+  # backup/rollback logic before its working tree is changed.
   git -C "$INSTALL_DIR" fetch origin main
-  git -C "$INSTALL_DIR" checkout main
-  git -C "$INSTALL_DIR" merge --ff-only origin/main
+  UPDATE_TMP="$(mktemp -t x1-update.XXXXXX.sh)"
+  trap 'rm -f "$UPDATE_TMP"' EXIT
+  git -C "$INSTALL_DIR" show origin/main:scripts/update.sh > "$UPDATE_TMP"
+  chmod 700 "$UPDATE_TMP"
+  X1_INSTALL_DIR="$INSTALL_DIR" bash "$UPDATE_TMP" "$@"
+  status=$?
+  rm -f "$UPDATE_TMP"
+  trap - EXIT
+  exit "$status"
 elif [ -e "$INSTALL_DIR" ]; then
   echo "[X1] ERROR: $INSTALL_DIR exists but is not an X1 Git repository" >&2
   exit 1
