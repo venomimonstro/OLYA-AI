@@ -1,6 +1,6 @@
 [project]
 name = "x1-ai"
-version = "0.34.0"
+version = "0.35.0"
 description = "Local-first CPU/RAM AI platform"
 requires-python = ">=3.12"
 dependencies = [
@@ -14,12 +14,21 @@ dependencies = [
   "alembic>=1.14,<2",
   "pypdf>=5.1,<6",
   "python-docx>=1.1,<2",
-  "Pillow>=11,<12",
-  "cryptography>=44,<46"
+  "Pillow>=11,<13",
+  "cryptography>=44,<47"
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3,<9"]
+dev = [
+  "pytest>=8.3,<10",
+  "pytest-asyncio>=0.24,<2"
+]
+image = [
+  "diffusers>=0.35,<1",
+  "transformers>=4.55,<6",
+  "safetensors>=0.5,<1",
+  "torch>=2.8,<3"
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
