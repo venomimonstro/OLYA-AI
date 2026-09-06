@@ -137,6 +137,12 @@ PY
   sleep 1
 done
 
+# Establish a known-good recovery point immediately. Deep health checks can then
+# verify this snapshot instead of a fresh production installation starting with
+# an avoidable "no backup" warning.
+info "Creating initial verified backup"
+bash scripts/backup.sh >/dev/null
+
 info "Running X1 doctor"
 set +e
 python3 scripts/doctor.py
