@@ -15,8 +15,45 @@ docker compose version >/dev/null 2>&1 || { echo "docker compose required" >&2; 
 [ -d "$DATA_ROOT" ] || mkdir -p "$DATA_ROOT"
 DATA_ROOT="$(cd "$DATA_ROOT" && pwd)"
 
-cleanup() { rm -rf "$TMP_DEST"; }
-trap cleanup EXIT
+# DB rows and files form one logical state. A pg_dump followed by a filesystem
+# archive while requests are writing can restore dangling DB/file references.
+# Quiesce only write-producing services; PostgreSQL and llama.cpp stay alive.
+# During update.sh these writers are already stopped, so this helper will not
+# unexpectedly restart them.
+RUNNING_SERVICES="$(docker compose ps --services --filter status=running 2>/dev/null || true)"
+was_running() { printf '%s\n' "$RUNNING_SERVICES" | grep -qx "$1"; }
+WRITERS_QUIESCED=0
+WRITERS_RESUMED=0
+
+resume_writers() {
+  [ "$WRITERS_RESUMED" -eq 0 ] || return 0
+  WRITERS_RESUMED=1
+  set +e
+  if was_running sandbox-worker; then
+    docker compose up -d sandbox-worker >/dev/null 2>&1
+  fi
+  if was_running app; then
+    docker compose up -d app >/dev/null 2>&1
+  fi
+  if was_running image-worker; then
+    docker compose --profile images up -d image-worker >/dev/null 2>&1
+  fi
+  set -e
+}
+
+cleanup() {
+  rm -rf "$TMP_DEST"
+  if [ "$WRITERS_QUIESCED" -eq 1 ]; then
+    resume_writers
+  fi
+}
+trap cleanup EXIT INT TERM
+
+if was_running app || was_running image-worker || was_running sandbox-worker; then
+  WRITERS_QUIESCED=1
+  docker compose stop app image-worker sandbox-worker >/dev/null 2>&1 || true
+fi
+
 mkdir -p "$TMP_DEST"
 
 docker compose exec -T db pg_dump -U x1 -d x1 -Fc > "$TMP_DEST/database.dump"
@@ -41,6 +78,8 @@ for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             raise SystemExit(f"unsupported data member for safe backup: {path.relative_to(root)}")
 with tarfile.open(out, "w") as archive:
     archive.add(root, arcname="data", recursive=True)
+with out.open("rb") as handle:
+    os.fsync(handle.fileno())
 PY
 [ -s "$TMP_DEST/files.tar" ] || { echo "application data archive is empty" >&2; exit 3; }
 
@@ -48,8 +87,9 @@ PY
 git rev-parse HEAD > "$TMP_DEST/git-head.txt" 2>/dev/null || true
 {
   printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf 'format=x1-backup-v3\n'
+  printf 'format=x1-backup-v4\n'
   printf 'data_root=%s\n' "$DATA_ROOT"
+  printf 'writers_quiesced=%s\n' "$WRITERS_QUIESCED"
 } > "$TMP_DEST/METADATA"
 
 (
@@ -62,5 +102,8 @@ git rev-parse HEAD > "$TMP_DEST/git-head.txt" 2>/dev/null || true
 
 mkdir -p "$(dirname "$FINAL_DEST")"
 mv "$TMP_DEST" "$FINAL_DEST"
-trap - EXIT
+if [ "$WRITERS_QUIESCED" -eq 1 ]; then
+  resume_writers
+fi
+trap - EXIT INT TERM
 printf '%s\n' "$FINAL_DEST"
