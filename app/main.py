@@ -12,6 +12,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from app.api.routes.account import router as account_router
 from app.admin_ui import router as admin_ui_router
 from app.media_admin_ui import router as media_admin_ui_router
+from app.public_ui import router as public_ui_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.safety_admin import router as safety_admin_router
 from app.api.routes.auth import router as auth_router
@@ -58,7 +59,6 @@ def _is_prod(settings) -> bool:
 
 
 def _production_configuration_errors(settings) -> list[str]:
-    """Return startup-blocking configuration defects for a production process."""
     if not _is_prod(settings):
         return []
     errors: list[str] = []
@@ -173,6 +173,7 @@ async def privacy_headers(request: Request, call_next):
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()"
     return response
 
 
@@ -201,7 +202,6 @@ async def database_pool_timeout_handler(request: Request, exc: SQLAlchemyTimeout
 
 
 def _include_product_router(module: str) -> None:
-    """Core product surfaces must never disappear silently in production."""
     try:
         imported = __import__(module, fromlist=["router"])
         router = getattr(imported, "router", None)
@@ -216,7 +216,7 @@ def _include_product_router(module: str) -> None:
 
 
 for router in (
-    health_router, admin_ui_router, media_admin_ui_router, admin_router, operations_router,
+    public_ui_router, health_router, admin_ui_router, media_admin_ui_router, admin_router, operations_router,
     safety_admin_router, account_router, auth_router, projects_router, memory_router,
     files_router, conversations_router, usage_router, diagnostics_router, documents_router,
     code_router, images_router, media_admin_router, runtime_router, development_router,
