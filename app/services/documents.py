@@ -24,9 +24,10 @@ class DocumentQAError(RuntimeError):
     pass
 
 
-# Rendering is deliberately independent from the inference governor. LibreOffice
-# and pdftoppm can consume hundreds of MiB each, so a burst of document QA must
-# not create a process storm on the low-cost production node.
+class DocumentBusyError(DocumentQAError):
+    """Transient renderer capacity condition; never persist as document failure."""
+
+
 _RENDER_GATE = threading.BoundedSemaphore(1)
 _RENDER_WAIT_SECONDS = 5.0
 
@@ -60,18 +61,14 @@ def build_docx(spec: dict[str, Any], destination: Path) -> dict[str, Any]:
     section.bottom_margin = Cm(2)
     section.left_margin = Cm(2.2)
     section.right_margin = Cm(2.2)
-
     styles = document.styles
     styles["Normal"].font.name = "Arial"
     styles["Normal"].font.size = Pt(11)
     for level in range(1, 5):
-        style = styles[f"Heading {level}"]
-        style.font.name = "Arial"
-
+        styles[f"Heading {level}"].font.name = "Arial"
     title = str(spec.get("title") or "").strip()
     if title:
         document.add_heading(title, level=0)
-
     block_count = 0
     table_count = 0
     for raw in spec.get("blocks") or []:
@@ -102,7 +99,6 @@ def build_docx(spec: dict[str, Any], destination: Path) -> dict[str, Any]:
         else:
             raise DocumentBuildError(f"Unsupported document block: {kind}")
         block_count += 1
-
     document.save(destination)
     if not destination.is_file() or destination.stat().st_size < 1000:
         raise DocumentBuildError("DOCX generation produced an invalid or empty file")
@@ -115,19 +111,15 @@ def structural_qa(docx_path: Path, spec: dict[str, Any]) -> dict[str, Any]:
         doc = Document(docx_path)
     except Exception as exc:
         raise DocumentQAError("DOCX cannot be opened") from exc
-
     expected_tables = sum(1 for block in spec.get("blocks") or [] if block.get("type") == "table" and block.get("rows"))
     if len(doc.tables) != expected_tables:
         issues.append({"code": "table_count_mismatch", "expected": expected_tables, "actual": len(doc.tables)})
-
     non_empty_text = "\n".join(p.text.strip() for p in doc.paragraphs if p.text.strip())
     if not non_empty_text and not doc.tables:
         issues.append({"code": "empty_document"})
-
     unresolved = [token for token in ("TODO", "TBD", "FIXME", "{{", "}}") if token in non_empty_text]
     if unresolved:
         issues.append({"code": "unresolved_placeholders", "tokens": unresolved})
-
     return {"status": "passed" if not issues else "failed", "issues": issues, "paragraph_count": len(doc.paragraphs), "table_count": len(doc.tables)}
 
 
@@ -138,18 +130,17 @@ def _office_binary() -> str:
     return binary
 
 
+def _acquire_renderer() -> None:
+    if not _RENDER_GATE.acquire(timeout=_RENDER_WAIT_SECONDS):
+        raise DocumentBusyError("Document renderer is busy; retry shortly")
+
+
 def render_docx_to_pdf(docx_path: Path, output_dir: Path, *, timeout_seconds: int = 60) -> Path:
-    acquired = _RENDER_GATE.acquire(timeout=_RENDER_WAIT_SECONDS)
-    if not acquired:
-        raise DocumentQAError("Document renderer is busy; retry shortly")
+    _acquire_renderer()
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="x1-lo-") as profile:
-            cmd = [
-                _office_binary(), "--headless", "--nologo", "--nodefault", "--nofirststartwizard",
-                f"-env:UserInstallation=file://{profile}", "--convert-to", "pdf", "--outdir",
-                str(output_dir), str(docx_path),
-            ]
+            cmd = [_office_binary(), "--headless", "--nologo", "--nodefault", "--nofirststartwizard", f"-env:UserInstallation=file://{profile}", "--convert-to", "pdf", "--outdir", str(output_dir), str(docx_path)]
             env = {**os.environ, "HOME": profile}
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds, env=env, check=False)
@@ -174,7 +165,6 @@ def render_qa(pdf_path: Path, raster_dir: Path | None = None, *, max_pages: int 
         raise DocumentQAError("Rendered PDF contains no pages")
     if page_count > max_pages:
         raise DocumentQAError("Rendered PDF exceeds QA page limit")
-
     issues: list[dict[str, Any]] = []
     pages: list[dict[str, Any]] = []
     for index, page in enumerate(reader.pages, start=1):
@@ -193,43 +183,40 @@ def render_qa(pdf_path: Path, raster_dir: Path | None = None, *, max_pages: int 
 
     raster_status = "not_checked"
     if raster_dir is not None and shutil.which("pdftoppm"):
-        raster_dir.mkdir(parents=True, exist_ok=True)
-        prefix = raster_dir / "page"
-        cmd = ["pdftoppm", "-png", "-r", "72", str(pdf_path), str(prefix)]
+        _acquire_renderer()
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=90, check=False)
-        except subprocess.TimeoutExpired as exc:
-            raise DocumentQAError("Page rasterization timed out") from exc
-        pngs = sorted(raster_dir.glob("page-*.png"))
-        if result.returncode != 0 or len(pngs) != page_count:
-            issues.append({"code": "page_rasterization_failed", "expected": page_count, "actual": len(pngs)})
-            raster_status = "failed"
-        else:
-            raster_status = "passed"
-            for idx, image in enumerate(pngs):
-                pages[idx]["raster_sha256"] = sha256_file(image)
-                pages[idx]["raster_bytes"] = image.stat().st_size
-                with Image.open(image).convert("RGB") as page_image:
-                    white = Image.new("RGB", page_image.size, "white")
-                    diff = ImageChops.difference(page_image, white)
-                    bbox = diff.getbbox()
-                    pages[idx]["raster_width_px"] = page_image.width
-                    pages[idx]["raster_height_px"] = page_image.height
-                    pages[idx]["content_bbox"] = list(bbox) if bbox else None
-                    if bbox is None:
-                        issues.append({"code": "visually_blank_page", "page": idx + 1})
-                    else:
-                        left, top, right, bottom = bbox
-                        edge_distance = min(left, top, page_image.width - right, page_image.height - bottom)
-                        pages[idx]["min_content_edge_distance_px"] = edge_distance
-                        if edge_distance <= 1:
-                            pages[idx]["warning"] = "content_touches_page_edge"
+            raster_dir.mkdir(parents=True, exist_ok=True)
+            prefix = raster_dir / "page"
+            cmd = ["pdftoppm", "-png", "-r", "72", str(pdf_path), str(prefix)]
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=90, check=False)
+            except subprocess.TimeoutExpired as exc:
+                raise DocumentQAError("Page rasterization timed out") from exc
+            pngs = sorted(raster_dir.glob("page-*.png"))
+            if result.returncode != 0 or len(pngs) != page_count:
+                issues.append({"code": "page_rasterization_failed", "expected": page_count, "actual": len(pngs)})
+                raster_status = "failed"
+            else:
+                raster_status = "passed"
+                for idx, image in enumerate(pngs):
+                    pages[idx]["raster_sha256"] = sha256_file(image)
+                    pages[idx]["raster_bytes"] = image.stat().st_size
+                    with Image.open(image).convert("RGB") as page_image:
+                        white = Image.new("RGB", page_image.size, "white")
+                        diff = ImageChops.difference(page_image, white)
+                        bbox = diff.getbbox()
+                        pages[idx]["raster_width_px"] = page_image.width
+                        pages[idx]["raster_height_px"] = page_image.height
+                        pages[idx]["content_bbox"] = list(bbox) if bbox else None
+                        if bbox is None:
+                            issues.append({"code": "visually_blank_page", "page": idx + 1})
+                        else:
+                            left, top, right, bottom = bbox
+                            edge_distance = min(left, top, page_image.width - right, page_image.height - bottom)
+                            pages[idx]["min_content_edge_distance_px"] = edge_distance
+                            if edge_distance <= 1:
+                                pages[idx]["warning"] = "content_touches_page_edge"
+        finally:
+            _RENDER_GATE.release()
 
-    return {
-        "status": "passed" if not issues else "failed",
-        "page_count": page_count,
-        "issues": issues,
-        "pages": pages,
-        "raster_status": raster_status,
-        "visual_model_status": "not_configured",
-    }
+    return {"status": "passed" if not issues else "failed", "page_count": page_count, "issues": issues, "pages": pages, "raster_status": raster_status, "visual_model_status": "not_configured"}
