@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import Depends, Header, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -24,6 +24,55 @@ def _minute_start(now: datetime) -> datetime:
     return now.replace(second=0, microsecond=0)
 
 
+def _consume_rate_limit(db: Session, api_key: ApiKey, now: datetime) -> None:
+    """Atomically consume one request from the fixed-minute API window.
+
+    A read/increment/write ORM sequence permits lost updates under concurrent
+    requests. The conditional UPDATE below makes the database the serialization
+    point so the configured per-key limit cannot be bypassed by a burst.
+    """
+    window_start = _minute_start(now)
+    window = db.scalar(
+        select(ApiRateLimitWindow).where(
+            ApiRateLimitWindow.api_key_id == api_key.id,
+            ApiRateLimitWindow.window_start == window_start,
+        )
+    )
+    if window is None:
+        window = ApiRateLimitWindow(api_key_id=api_key.id, window_start=window_start, request_count=0)
+        db.add(window)
+        try:
+            db.flush()
+        except IntegrityError:
+            # Another request created the same unique minute window first.
+            db.rollback()
+            window = db.scalar(
+                select(ApiRateLimitWindow).where(
+                    ApiRateLimitWindow.api_key_id == api_key.id,
+                    ApiRateLimitWindow.window_start == window_start,
+                )
+            )
+    if window is None:
+        raise HTTPException(status_code=503, detail="API rate limiter unavailable")
+
+    result = db.execute(
+        update(ApiRateLimitWindow)
+        .where(
+            ApiRateLimitWindow.id == window.id,
+            ApiRateLimitWindow.request_count < api_key.rate_limit_per_minute,
+        )
+        .values(request_count=ApiRateLimitWindow.request_count + 1)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+        db.rollback()
+        raise HTTPException(
+            status_code=429,
+            detail="API key rate limit exceeded",
+            headers={"Retry-After": "60"},
+        )
+
+
 def authenticate_api_key(db: Session, token: str, scope: str) -> tuple[ApiKey, User]:
     if not token.startswith("x1k_"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API key required")
@@ -41,25 +90,8 @@ def authenticate_api_key(db: Session, token: str, scope: str) -> tuple[ApiKey, U
     user = db.get(User, row.owner_id)
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API key owner unavailable")
-    window_start = _minute_start(now)
-    window = db.scalar(select(ApiRateLimitWindow).where(
-        ApiRateLimitWindow.api_key_id == row.id, ApiRateLimitWindow.window_start == window_start
-    ))
-    if window is None:
-        window = ApiRateLimitWindow(api_key_id=row.id, window_start=window_start, request_count=0)
-        db.add(window)
-        try:
-            db.flush()
-        except IntegrityError:
-            db.rollback()
-            window = db.scalar(select(ApiRateLimitWindow).where(
-                ApiRateLimitWindow.api_key_id == row.id, ApiRateLimitWindow.window_start == window_start
-            ))
-    if window is None:
-        raise HTTPException(status_code=503, detail="API rate limiter unavailable")
-    if window.request_count >= row.rate_limit_per_minute:
-        raise HTTPException(status_code=429, detail="API key rate limit exceeded", headers={"Retry-After": "60"})
-    window.request_count += 1
+
+    _consume_rate_limit(db, row, now)
     row.last_used_at = utcnow()
     db.commit()
     return row, user
@@ -76,4 +108,5 @@ def require_api_scope(scope: str):
         key, user = authenticate_api_key(db, token, scope)
         request.state.api_key_id = key.id
         return key, user
+
     return dependency
