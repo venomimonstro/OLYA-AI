@@ -8,14 +8,16 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import AuthSession, User
 from app.schemas.auth import AuthResponse, LoginRequest, MeResponse, RegisterRequest
-from app.services.auth import create_session, get_current_user, hash_password, normalize_email, token_digest, verify_password
+from app.services.auth import create_session, get_current_user, hash_password, normalize_email, verify_password
+from app.services.auth_rate_limit import enforce_auth_rate_limit
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
 
 
 @router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
-def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> AuthResponse:
+def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)) -> AuthResponse:
     email = normalize_email(payload.email)
+    enforce_auth_rate_limit(request, email=email, action="register", environment=request.app.state.settings.env)
     if db.scalar(select(User.id).where(User.email == email)) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Account already exists")
 
@@ -32,8 +34,10 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> AuthRes
 
 
 @router.post("/login", response_model=AuthResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> AuthResponse:
-    user = db.scalar(select(User).where(User.email == normalize_email(payload.email)))
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)) -> AuthResponse:
+    email = normalize_email(payload.email)
+    enforce_auth_rate_limit(request, email=email, action="login", environment=request.app.state.settings.env)
+    user = db.scalar(select(User).where(User.email == email))
     if user is None or not user.is_active or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
     token, _ = create_session(db, user)
