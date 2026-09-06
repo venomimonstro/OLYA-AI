@@ -137,11 +137,20 @@ PY
   sleep 1
 done
 
-# Establish a known-good recovery point immediately. Deep health checks can then
-# verify this snapshot instead of a fresh production installation starting with
-# an avoidable "no backup" warning.
-info "Creating initial verified backup"
-bash scripts/backup.sh >/dev/null
+if [ "$WITH_INFERENCE" -eq 1 ]; then
+  info "Running full production release gate"
+  set +e
+  python3 scripts/release_gate.py --runtime --live-inference
+  GATE_STATUS=$?
+  set -e
+  [ "$GATE_STATUS" -eq 0 ] || fail "Production release gate failed; inspect backups/release-gate-latest.json"
+else
+  # A control-plane-only installation cannot pass the local-inference release
+  # gate by definition, but its disaster-recovery path is still verified.
+  info "Creating and restore-testing initial backup"
+  BACKUP_PATH=$(bash scripts/backup.sh)
+  bash scripts/restore_drill.sh "$BACKUP_PATH" >/dev/null
+fi
 
 info "Running X1 doctor"
 set +e
