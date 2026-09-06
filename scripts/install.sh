@@ -150,13 +150,13 @@ docker compose up -d db searxng sandbox-worker
 for _ in $(seq 1 90); do
   db_ok=0; search_ok=0; sandbox_ok=0
   docker compose exec -T db pg_isready -U x1 -d x1 >/dev/null 2>&1 && db_ok=1
-  docker compose exec -T searxng sh -c "wget -q -O /dev/null 'http://127.0.0.1:8080/search?q=x1&format=json'" >/dev/null 2>&1 && search_ok=1
+  docker compose exec -T searxng python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/search?q=x1&format=json',timeout=5).read()" >/dev/null 2>&1 && search_ok=1
   docker compose exec -T sandbox-worker python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health',timeout=3).read()" >/dev/null 2>&1 && sandbox_ok=1
   [ "$db_ok$search_ok$sandbox_ok" = "111" ] && break
   sleep 2
 done
 docker compose exec -T db pg_isready -U x1 -d x1 >/dev/null 2>&1 || fail "PostgreSQL did not become ready"
-docker compose exec -T searxng sh -c "wget -q -O /dev/null 'http://127.0.0.1:8080/search?q=x1&format=json'" >/dev/null 2>&1 || fail "SearXNG did not become ready"
+docker compose exec -T searxng python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/search?q=x1&format=json',timeout=5).read()" >/dev/null 2>&1 || fail "SearXNG did not become ready"
 docker compose exec -T sandbox-worker python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health',timeout=3).read()" >/dev/null 2>&1 || fail "Sandbox worker did not become ready"
 
 info "Applying database migrations"; docker compose run --rm --no-deps app alembic upgrade head
