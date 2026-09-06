@@ -21,6 +21,7 @@ def upgrade() -> None:
         sa.Column("state", sa.String(24), nullable=False, server_default="planned"),
         sa.Column("target_participants", sa.Integer(), nullable=False, server_default="10"),
         sa.Column("admitted_count", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("compute_budget_seconds", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("admission_paused", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("pause_reason", sa.String(500), nullable=False, server_default=""),
         sa.Column("baseline_metrics", sa.JSON(), nullable=False),
