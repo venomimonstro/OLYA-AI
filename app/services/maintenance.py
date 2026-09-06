@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, delete, or_
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
-from app.models import ApiRateLimitWindow, AuthSession, BackgroundJob, SearchQueryCache, SystemHealthSnapshot
+from app.models import (
+    ApiRateLimitWindow,
+    AuthSession,
+    BackgroundJob,
+    SearchQueryCache,
+    SystemCheckpoint,
+    SystemHealthSnapshot,
+)
 from app.services.jobs import reap_exhausted_jobs
 
 logger = logging.getLogger(__name__)
@@ -84,33 +92,97 @@ def cleanup_ephemeral_state(db: Session, settings, *, now: datetime | None = Non
         )
     )
     counts["failed_jobs"] = int(result.rowcount or 0)
-
-    db.commit()
     return counts
+
+
+def _write_checkpoint(db: Session, *, status: str, message: str, details: dict[str, Any]) -> None:
+    row = db.scalar(select(SystemCheckpoint).where(SystemCheckpoint.key == "ops.maintenance"))
+    now = utcnow()
+    if row is None:
+        row = SystemCheckpoint(key="ops.maintenance", subsystem="operations")
+        db.add(row)
+        db.flush()
+    row.status = status
+    row.severity = "warning" if status != "stable" else "info"
+    row.critical = False
+    row.message = message[:500]
+    row.details = {**details, "recommended_action": "Inspect maintenance logs and PostgreSQL growth." if status != "stable" else ""}
+    row.last_checked_at = now
+    if status == "stable":
+        row.consecutive_failures = 0
+        row.last_ok_at = now
+    else:
+        row.consecutive_failures = int(row.consecutive_failures or 0) + 1
 
 
 def run_maintenance_tick(settings) -> dict[str, Any]:
     started = utcnow()
     with SessionLocal() as db:
-        counts = cleanup_ephemeral_state(db, settings, now=started)
-    return {"status": "stable", "cleaned": counts, "finished_at": utcnow().isoformat()}
+        try:
+            counts = cleanup_ephemeral_state(db, settings, now=started)
+            result = {"status": "stable", "cleaned": counts, "finished_at": utcnow().isoformat()}
+            _write_checkpoint(db, status="stable", message="Ephemeral-state retention completed", details=result)
+            db.commit()
+            return result
+        except Exception:
+            db.rollback()
+            raise
+
+
+def _write_failure_checkpoint(error: str, interval: float) -> None:
+    try:
+        with SessionLocal() as db:
+            _write_checkpoint(
+                db,
+                status="failed",
+                message="Ephemeral-state maintenance failed",
+                details={"error": error[:500], "cleanup_interval_seconds": interval},
+            )
+            db.commit()
+    except Exception:
+        # If PostgreSQL itself is unavailable, core.database will already expose
+        # the root cause; a second exception must not kill the maintenance loop.
+        logger.exception("X1 could not persist maintenance failure checkpoint")
+
+
+def _write_heartbeat(last_result: dict[str, Any] | None, interval: float) -> None:
+    try:
+        with SessionLocal() as db:
+            _write_checkpoint(
+                db,
+                status="stable",
+                message="Ephemeral-state maintenance scheduler is alive",
+                details={"last_cleanup": last_result or {}, "cleanup_interval_seconds": interval},
+            )
+            db.commit()
+    except Exception:
+        logger.exception("X1 maintenance heartbeat failed")
 
 
 async def maintenance_loop(app) -> None:
     settings = app.state.settings
-    interval = max(300.0, float(getattr(settings, "maintenance_interval_seconds", 3600.0)))
-    # Give migrations/startup probes time to settle, but establish a first
-    # successful tick soon enough for liveness diagnostics.
-    await asyncio.sleep(min(30.0, interval))
+    cleanup_interval = max(300.0, float(getattr(settings, "maintenance_interval_seconds", 3600.0)))
+    heartbeat_interval = min(240.0, cleanup_interval)
+    next_cleanup = 0.0
+    last_result: dict[str, Any] | None = None
+    await asyncio.sleep(min(30.0, heartbeat_interval))
     while True:
         try:
-            result = await asyncio.to_thread(run_maintenance_tick, settings)
-            app.state.maintenance_last_result = result
-            app.state.maintenance_last_ok_at = utcnow()
-            app.state.maintenance_last_error = ""
+            now_mono = time.monotonic()
+            if now_mono >= next_cleanup:
+                result = await asyncio.to_thread(run_maintenance_tick, settings)
+                last_result = result
+                app.state.maintenance_last_result = result
+                app.state.maintenance_last_ok_at = utcnow()
+                app.state.maintenance_last_error = ""
+                next_cleanup = time.monotonic() + cleanup_interval
+            else:
+                await asyncio.to_thread(_write_heartbeat, last_result, cleanup_interval)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            app.state.maintenance_last_error = f"{type(exc).__name__}: {exc}"[:500]
+            error = f"{type(exc).__name__}: {exc}"[:500]
+            app.state.maintenance_last_error = error
+            await asyncio.to_thread(_write_failure_checkpoint, error, cleanup_interval)
             logger.exception("X1 maintenance tick failed")
-        await asyncio.sleep(interval)
+        await asyncio.sleep(heartbeat_interval)
