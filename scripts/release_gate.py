@@ -175,12 +175,12 @@ def main() -> int:
         gate_prefix = ["docker", "compose", "--profile", "gate", "run", "--rm", "--no-deps", "gate"]
         checks.append(run("compileall", [*gate_prefix, "python", "-m", "compileall", "-q", "app", "scripts", "tests"], timeout=args.command_timeout))
         checks.append(parse_alembic_heads(run("alembic_heads", [*gate_prefix, "python", "-m", "alembic", "heads"], timeout=args.command_timeout)))
-        checks.append(run("long_context_offline", [*gate_prefix, "python", "scripts/long_context_probe.py"], timeout=args.command_timeout))
+        checks.append(run("long_context_offline", [*gate_prefix, "python", "-m", "scripts.long_context_probe"], timeout=args.command_timeout))
         checks.append(run("pytest_full", [*gate_prefix, "python", "-m", "pytest", "-q"], timeout=max(60, args.pytest_timeout)))
     else:
         checks.append(run("compileall", [sys.executable, "-m", "compileall", "-q", "app", "scripts", "tests"], timeout=args.command_timeout, env=python_env))
         checks.append(parse_alembic_heads(run("alembic_heads", [sys.executable, "-m", "alembic", "heads"], timeout=args.command_timeout, env=python_env)))
-        checks.append(run("long_context_offline", [sys.executable, "scripts/long_context_probe.py"], timeout=args.command_timeout, env=python_env))
+        checks.append(run("long_context_offline", [sys.executable, "-m", "scripts.long_context_probe"], timeout=args.command_timeout, env=python_env))
         checks.append(run("pytest_full", [sys.executable, "-m", "pytest", "-q"], timeout=max(60, args.pytest_timeout), env=python_env))
 
     if docker:
@@ -205,7 +205,7 @@ def main() -> int:
         if args.live_inference:
             checks.append(run(
                 "long_context_live",
-                ["docker", "compose", "exec", "-T", "app", "python", "scripts/long_context_probe.py", "--context-tokens", os.environ.get("X1_DEEP_CONTEXT_TOKENS", "16384"), "--live-url", "http://llama:8080"],
+                ["docker", "compose", "exec", "-T", "app", "python", "-m", "scripts.long_context_probe", "--context-tokens", os.environ.get("X1_DEEP_CONTEXT_TOKENS", "16384"), "--live-url", "http://llama:8080"],
                 timeout=max(args.command_timeout, 600),
             ))
         else:
@@ -230,10 +230,6 @@ def main() -> int:
     if not report_path.is_absolute():
         report_path = ROOT / report_path
 
-    # Write the preliminary passing report before /ready: the production health
-    # graph intentionally includes ops.release_gate, so this avoids a circular
-    # dependency while still allowing the final readiness response to invalidate
-    # the gate below if any other production checkpoint is not stable.
     write_report(report_path, payload)
     if args.runtime and status == "passed":
         ready = final_ready_probe()
