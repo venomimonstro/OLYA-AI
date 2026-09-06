@@ -350,7 +350,7 @@ def advance_rollout(db: Session, current: PublicRollout, *, exposure_percent: in
     current.state = "superseded"
     row = PublicRollout(
         version=_next_rollout_version(db),
-        state="active" if exposure_percent < 100 else "complete",
+        state="active",
         exposure_percent=exposure_percent,
         assignment_salt=current.assignment_salt,
         baseline_metrics=current.baseline_metrics,
