@@ -4,7 +4,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import httpx
 
@@ -14,9 +20,6 @@ from app.services.context import ContextCompiler
 
 def offline_probe(context_tokens: int, output_tokens: int) -> dict:
     compiler = ContextCompiler(max_chars=context_tokens * 4)
-    # Russian-heavy synthetic context exercises the conservative chars/token
-    # budget used by the chat route. Distinct markers at both ends prove that
-    # compaction keeps the request intent rather than only its tail.
     payload = "НАЧАЛО_ЗАПРОСА\n" + ("Проверяем длинный русский контекст и сохранение смысла. " * 1800) + "\nКОНЕЦ_ЗАПРОСА"
     messages = [
         ChatMessage(role="system", content="X1 release-gate long-context probe."),
@@ -38,9 +41,6 @@ def offline_probe(context_tokens: int, output_tokens: int) -> dict:
 
 
 async def live_probe(base_url: str, context_tokens: int, timeout: float) -> dict:
-    # Keep enough prompt pressure to cross the old 8192-token configuration but
-    # avoid consuming the entire model window. The probe asks for only 16 output
-    # tokens so it is bounded even on a CPU-only node.
     target_chars = min(max(36_000, (context_tokens - 2048) * 3), 52_000)
     unit = "Контекст для проверки длинного окна модели. "
     body = (unit * (target_chars // len(unit) + 1))[:target_chars]
