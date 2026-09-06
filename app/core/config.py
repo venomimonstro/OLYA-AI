@@ -137,6 +137,11 @@ class Settings(BaseSettings):
     beta_trend_max_success_drop: float = 0.02
     beta_trend_max_frustration_increase: float = 0.02
     beta_trend_max_quality_drop: float = 0.05
+    beta_operations_scheduler_enabled: bool = True
+    beta_operations_cohort: str = "closed-beta-1"
+    beta_operations_window_days: int = 30
+    beta_operations_check_interval_seconds: float = 3600.0
+    beta_snapshot_interval_hours: float = 24.0
 
 
 @lru_cache
