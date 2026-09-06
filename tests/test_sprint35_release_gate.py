@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tarfile
 import tomllib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 from app.main import app
 from app.services import system_observability as obs
 from scripts.long_context_probe import offline_probe
+from scripts.run_full_regression import EXPECTED
 
 
 def _settings(tmp_path: Path, *, env: str = "production") -> SimpleNamespace:
@@ -120,14 +122,30 @@ def test_restore_drill_is_non_destructive_and_checks_archive_safety():
     assert 'DB_NAME="x1_restore_drill_' in script
 
 
+def test_historical_regression_bundle_has_all_45_modules():
+    root = Path(__file__).resolve().parents[1]
+    archive_path = root / "tests" / "legacy_sprint0_26.tar.gz"
+    assert archive_path.is_file() and archive_path.stat().st_size > 10_000
+    with tarfile.open(archive_path, "r:gz") as archive:
+        names = {
+            Path(member.name).name
+            for member in archive.getmembers()
+            if member.isfile() and Path(member.name).name.startswith("test_")
+        }
+    assert len(EXPECTED) == 45
+    assert names == EXPECTED
+
+
 def test_release_gate_runs_full_regression_and_final_readiness():
     root = Path(__file__).resolve().parents[1]
     script = (root / "scripts" / "release_gate.py").read_text("utf-8")
     assert '"pytest_full"' in script
+    assert "scripts.run_full_regression" in script
     assert '"restore_drill"' in script
     assert '"long_context_live"' in script
     assert "final_ready_probe" in script
     assert '"containerized_gate"' in script
+    assert '"historical_regression_modules": 45' in script
 
 
 def test_application_and_package_versions_match():
