@@ -127,8 +127,7 @@ class Settings(BaseSettings):
     beta_max_frustration_per_request: float = 0.05
     beta_max_p95_queue_ms: int = 5000
 
-    # Sprint 37 adaptive beta-wave controller. These are operator-tunable
-    # engineering guardrails and must be recalibrated from real beta telemetry.
+    # Sprint 37 adaptive beta-wave controller.
     beta_wave_default_size: int = 10
     beta_wave_min_observation_requests: int = 50
     beta_wave_max_queue_regression_ratio: float = 1.50
@@ -142,6 +141,22 @@ class Settings(BaseSettings):
     beta_operations_window_days: int = 30
     beta_operations_check_interval_seconds: float = 3600.0
     beta_snapshot_interval_hours: float = 24.0
+
+    # Sprint 38 progressive public launch / measured plan policy.
+    public_launch_breaker_min_requests: int = 50
+    public_launch_max_failure_rate: float = 0.03
+    public_launch_global_budget_microunits: int = 0
+    plan_ratio_free: float = 0.25
+    plan_ratio_x1: float = 1.0
+    plan_ratio_pro: float = 2.0
+    plan_ratio_max: float = 4.0
+    plan_ratio_business: float = 8.0
+    plan_share_fast: float = 0.20
+    plan_share_work: float = 0.35
+    plan_share_deep: float = 0.25
+    plan_share_api: float = 0.10
+    plan_share_image: float = 0.05
+    plan_share_sandbox: float = 0.05
 
 
 @lru_cache
