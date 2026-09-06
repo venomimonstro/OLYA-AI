@@ -15,6 +15,7 @@ from app.schemas.commerce import ApiChatRequest, ApiContextCreate, ApiContextRea
 from app.services.access import require_project_role
 from app.services.api_access import require_api_scope
 from app.services.commerce import ensure_organization_budget, price_resource_ms, record_telemetry
+from app.services.measured_plans import ensure_channel_budget, reset_channel_override, set_channel_override
 
 router = APIRouter(prefix="/v1/api", tags=["api-client"])
 
@@ -63,11 +64,15 @@ async def api_chat(payload: ApiChatRequest, request: Request, principal=Depends(
     context = None
     if payload.context_id:
         context = _context_access(db, key, user, payload.context_id)
+    reserve_seconds = {"fast":15,"work":60,"deep":180}.get(payload.mode, 60)
+    if payload.verification == "strict" or (payload.verification == "auto" and payload.requirements):
+        reserve_seconds *= 2
+    reserve_cost = price_resource_ms(request.app.state.settings, "cpu", reserve_seconds * 1000)
+    try:
+        ensure_channel_budget(db, user, request.app.state.settings, "api", reserve_cost)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     if key.organization_id:
-        reserve_seconds = {"fast":15,"work":60,"deep":180}.get(payload.mode, 60)
-        if payload.verification == "strict" or (payload.verification == "auto" and payload.requirements):
-            reserve_seconds *= 2
-        reserve_cost = price_resource_ms(request.app.state.settings, "cpu", reserve_seconds * 1000)
         try:
             ensure_organization_budget(db, key.organization_id, reserve_cost)
         except RuntimeError as exc:
@@ -78,16 +83,20 @@ async def api_chat(payload: ApiChatRequest, request: Request, principal=Depends(
         data["conversation_id"] = context.conversation_id
     chat_payload = ChatRequest.model_validate(data)
     started = perf_counter(); external_request_id = uuid4().hex
+    token = set_channel_override("api")
     try:
-        response = await chat_handler(chat_payload, request, user, db)
-    except HTTPException as exc:
-        usage = getattr(request.state, "x1_usage", {}) or {}
-        cpu_ms = int(usage.get("cpu_ms", 0)); cost = price_resource_ms(request.app.state.settings, "cpu", cpu_ms)
-        record_telemetry(db, api_key=key, endpoint="/v1/api/chat", request_id=external_request_id, status_code=exc.status_code,
-                         latency_ms=int((perf_counter()-started)*1000), quality_status="failed", context_id=context.id if context else None,
-                         project_id=context.project_id if context else chat_payload.project_id,
-                         resource_usage={"cpu_ms":cpu_ms}, cost_microunits=cost)
-        db.commit(); raise
+        try:
+            response = await chat_handler(chat_payload, request, user, db)
+        except HTTPException as exc:
+            usage = getattr(request.state, "x1_usage", {}) or {}
+            cpu_ms = int(usage.get("cpu_ms", 0)); cost = price_resource_ms(request.app.state.settings, "cpu", cpu_ms)
+            record_telemetry(db, api_key=key, endpoint="/v1/api/chat", request_id=external_request_id, status_code=exc.status_code,
+                             latency_ms=int((perf_counter()-started)*1000), quality_status="failed", context_id=context.id if context else None,
+                             project_id=context.project_id if context else chat_payload.project_id,
+                             resource_usage={"cpu_ms":cpu_ms}, cost_microunits=cost)
+            db.commit(); raise
+    finally:
+        reset_channel_override(token)
     if context and context.conversation_id is None:
         context.conversation_id = getattr(request.state, "x1_conversation_id", None)
     usage = getattr(request.state, "x1_usage", {}) or {}
