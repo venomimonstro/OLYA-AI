@@ -36,10 +36,6 @@ fi
 
 git merge-base --is-ancestor "$OLD_HEAD" "$TARGET_HEAD" || fail "origin/main is not a fast-forward from the installed revision"
 
-# Preserve rollback code outside the repository because git reset may move to a
-# revision that predates Sprint 40. Older installations do not yet have
-# scripts/restore.sh, so obtain the exact target copy without checking target code
-# out into the working tree.
 RESTORE_COPY="$(mktemp -t x1-restore.XXXXXX.sh)"
 if [ -f scripts/restore.sh ]; then
   cp scripts/restore.sh "$RESTORE_COPY"
@@ -75,10 +71,10 @@ info "Quiescing write-producing services"
 docker compose stop app image-worker sandbox-worker >/dev/null 2>&1 || true
 
 info "Creating consistent pre-update backup"
-# When upgrading a pre-Sprint40 installation, its backup.sh still requires the
-# app container. Use the target backup implementation without checking out target
-# code so the quiesced app can stay stopped.
-if grep -q 'authoritative /app/data' scripts/backup.sh 2>/dev/null; then
+# Sprint39 backup streamed /app/data through the app container and therefore
+# cannot run after quiescing it. When that legacy implementation is installed,
+# execute the target Sprint40 host-bind backup helper directly from origin/main.
+if grep -q 'docker compose exec -T app python' scripts/backup.sh 2>/dev/null; then
   BACKUP_HELPER="$(mktemp -t x1-backup.XXXXXX.sh)"
   git show origin/main:scripts/backup.sh > "$BACKUP_HELPER"
   chmod 700 "$BACKUP_HELPER"
