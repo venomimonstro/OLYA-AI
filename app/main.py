@@ -50,15 +50,35 @@ async def lifespan(app: FastAPI):
     if settings.database_auto_create_schema:
         init_db()
     app.state.settings = settings
+    # Sprint 37 keeps the immutable boot ceiling separate from live-safe
+    # reductions. A capacity plan may lower limits immediately, but an increase
+    # above the llama/governor boot envelope requires an explicit restart.
+    app.state.capacity_boot_max_context_tokens = int(settings.max_context_tokens)
+    app.state.capacity_boot_deep_context_tokens = int(settings.deep_context_tokens)
+    app.state.capacity_boot_max_concurrent_generations = int(settings.max_concurrent_generations)
     app.state.llama = LlamaClient(settings.llama_base_url, settings.request_timeout_seconds)
     app.state.context = ContextCompiler(max_chars=settings.deep_context_tokens * 6)
-    app.state.governor = ResourceGovernor(max_concurrent=settings.max_concurrent_generations, max_queue=settings.max_queue_size, wait_timeout_seconds=settings.inference_queue_timeout_seconds)
+    app.state.governor = ResourceGovernor(
+        max_concurrent=settings.max_concurrent_generations,
+        max_queue=settings.max_queue_size,
+        wait_timeout_seconds=settings.inference_queue_timeout_seconds,
+    )
     app.state.user_governor = UserResourceGovernor()
-    app.state.research = ResearchFetcher(timeout_seconds=settings.research_timeout_seconds, max_bytes=settings.research_max_bytes, max_chars=settings.research_max_chars, max_redirects=settings.research_max_redirects)
-    configured = [item.strip().lower() for item in (settings.search_providers or settings.search_provider).split(",") if item.strip()]
+    app.state.research = ResearchFetcher(
+        timeout_seconds=settings.research_timeout_seconds,
+        max_bytes=settings.research_max_bytes,
+        max_chars=settings.research_max_chars,
+        max_redirects=settings.research_max_redirects,
+    )
+    configured = [
+        item.strip().lower()
+        for item in (settings.search_providers or settings.search_provider).split(",")
+        if item.strip()
+    ]
     providers = []
     for name in configured:
-        if name == "brave": providers.append(BraveSearchDiscovery(settings.brave_search_api_key, timeout_seconds=settings.search_timeout_seconds))
+        if name == "brave":
+            providers.append(BraveSearchDiscovery(settings.brave_search_api_key, timeout_seconds=settings.search_timeout_seconds))
     app.state.discovery = ProviderPoolDiscovery(providers) if providers else DisabledDiscovery()
     try:
         yield
@@ -68,7 +88,15 @@ async def lifespan(app: FastAPI):
 
 _boot_settings = get_settings()
 _is_production = _boot_settings.env.lower() in {"production", "prod", "stable"}
-app = FastAPI(title="X1", version="0.36.0", description="Local-first CPU/RAM AI platform", lifespan=lifespan, docs_url=None if _is_production else "/docs", redoc_url=None if _is_production else "/redoc", openapi_url=None if _is_production else "/openapi.json")
+app = FastAPI(
+    title="X1",
+    version="0.37.0",
+    description="Local-first CPU/RAM AI platform",
+    lifespan=lifespan,
+    docs_url=None if _is_production else "/docs",
+    redoc_url=None if _is_production else "/redoc",
+    openapi_url=None if _is_production else "/openapi.json",
+)
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=3)
 
 
@@ -88,7 +116,10 @@ async def privacy_headers(request: Request, call_next):
 
 @app.get("/robots.txt", include_in_schema=False)
 def robots() -> PlainTextResponse:
-    return PlainTextResponse("User-agent: *\nDisallow: /v1/\nDisallow: /admin\nDisallow: /media-admin\n", headers={"Cache-Control": "public, max-age=86400"})
+    return PlainTextResponse(
+        "User-agent: *\nDisallow: /v1/\nDisallow: /admin\nDisallow: /media-admin\n",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.exception_handler(StaleDataError)
@@ -99,14 +130,52 @@ async def stale_task_state_handler(request: Request, exc: StaleDataError):
 
 def _include_optional_router(module: str) -> None:
     try:
-        imported = __import__(module, fromlist=["router"]); router = getattr(imported, "router", None)
+        imported = __import__(module, fromlist=["router"])
+        router = getattr(imported, "router", None)
     except (ImportError, ModuleNotFoundError):
         router = None
-    if router is not None: app.include_router(router)
+    if router is not None:
+        app.include_router(router)
 
 
-for router in (health_router, admin_ui_router, media_admin_ui_router, admin_router, operations_router, safety_admin_router, account_router, auth_router, projects_router, memory_router, files_router, conversations_router, usage_router, diagnostics_router, documents_router, code_router, images_router, media_admin_router, runtime_router, development_router, engineering_router, execution_router, sandbox_router, git_router, development_chat_router, quality_router, research_router, tasks_router, chat_router):
+for router in (
+    health_router,
+    admin_ui_router,
+    media_admin_ui_router,
+    admin_router,
+    operations_router,
+    safety_admin_router,
+    account_router,
+    auth_router,
+    projects_router,
+    memory_router,
+    files_router,
+    conversations_router,
+    usage_router,
+    diagnostics_router,
+    documents_router,
+    code_router,
+    images_router,
+    media_admin_router,
+    runtime_router,
+    development_router,
+    engineering_router,
+    execution_router,
+    sandbox_router,
+    git_router,
+    development_chat_router,
+    quality_router,
+    research_router,
+    tasks_router,
+    chat_router,
+):
     app.include_router(router)
 
-for module in ("app.api.routes.complaints", "app.api.routes.reliability", "app.api.routes.commerce", "app.api.routes.api_client", "app.api.routes.beta"):
+for module in (
+    "app.api.routes.complaints",
+    "app.api.routes.reliability",
+    "app.api.routes.commerce",
+    "app.api.routes.api_client",
+    "app.api.routes.beta",
+):
     _include_optional_router(module)
