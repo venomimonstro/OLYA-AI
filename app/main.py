@@ -1,5 +1,7 @@
 import asyncio
 import contextlib
+import logging
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -47,6 +49,8 @@ from app.services.user_resource_governor import UserResourceGovernor
 from app.services.research import ResearchFetcher
 from app.services.searxng_discovery import SearxngDiscovery
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -59,66 +63,129 @@ async def lifespan(app: FastAPI):
     app.state.capacity_boot_max_concurrent_generations = int(settings.max_concurrent_generations)
     app.state.llama = LlamaClient(settings.llama_base_url, settings.request_timeout_seconds)
     app.state.context = ContextCompiler(max_chars=settings.deep_context_tokens * 6)
-    app.state.governor = ResourceGovernor(max_concurrent=settings.max_concurrent_generations, max_queue=settings.max_queue_size, wait_timeout_seconds=settings.inference_queue_timeout_seconds)
+    app.state.governor = ResourceGovernor(
+        max_concurrent=settings.max_concurrent_generations,
+        max_queue=settings.max_queue_size,
+        wait_timeout_seconds=settings.inference_queue_timeout_seconds,
+    )
     app.state.user_governor = UserResourceGovernor()
-    app.state.research = ResearchFetcher(timeout_seconds=settings.research_timeout_seconds,max_bytes=settings.research_max_bytes,max_chars=settings.research_max_chars,max_redirects=settings.research_max_redirects)
-    configured=[item.strip().lower() for item in (settings.search_providers or settings.search_provider).split(",") if item.strip()]
-    providers=[]
+    # LibreOffice/pdftoppm are expensive on the target CPU/RAM node. This gate is
+    # independent from inference so concurrent document QA cannot OOM the host.
+    app.state.document_render_gate = threading.BoundedSemaphore(max(1, int(settings.document_max_concurrent_renders)))
+    app.state.research = ResearchFetcher(
+        timeout_seconds=settings.research_timeout_seconds,
+        max_bytes=settings.research_max_bytes,
+        max_chars=settings.research_max_chars,
+        max_redirects=settings.research_max_redirects,
+    )
+    configured = [item.strip().lower() for item in (settings.search_providers or settings.search_provider).split(",") if item.strip()]
+    providers = []
     for name in configured:
-        if name=="searxng": providers.append(SearxngDiscovery(settings.searxng_base_url, timeout_seconds=settings.search_timeout_seconds))
-        elif name=="brave": providers.append(BraveSearchDiscovery(settings.brave_search_api_key, timeout_seconds=settings.search_timeout_seconds))
-    app.state.discovery=ProviderPoolDiscovery(providers) if providers else DisabledDiscovery()
+        if name == "searxng":
+            providers.append(SearxngDiscovery(settings.searxng_base_url, timeout_seconds=settings.search_timeout_seconds))
+        elif name == "brave":
+            providers.append(BraveSearchDiscovery(settings.brave_search_api_key, timeout_seconds=settings.search_timeout_seconds))
+    app.state.discovery = ProviderPoolDiscovery(providers) if providers else DisabledDiscovery()
 
-    beta_scheduler_task=None; public_launch_task=None
-    is_production=settings.env.lower() in {"production","prod","stable"}
+    beta_scheduler_task = None
+    public_launch_task = None
+    is_production = settings.env.lower() in {"production", "prod", "stable"}
     if is_production and settings.beta_operations_scheduler_enabled:
         from app.services.beta_scheduler import beta_operations_loop
-        beta_scheduler_task=asyncio.create_task(beta_operations_loop(settings),name="x1-beta-operations"); app.state.beta_operations_task=beta_scheduler_task
+        beta_scheduler_task = asyncio.create_task(beta_operations_loop(settings), name="x1-beta-operations")
+        app.state.beta_operations_task = beta_scheduler_task
     if is_production and settings.public_launch_watchdog_enabled:
         from app.services.public_launch_scheduler import public_launch_watchdog_loop
-        public_launch_task=asyncio.create_task(public_launch_watchdog_loop(app),name="x1-public-launch-watchdog"); app.state.public_launch_watchdog_task=public_launch_task
+        public_launch_task = asyncio.create_task(public_launch_watchdog_loop(app), name="x1-public-launch-watchdog")
+        app.state.public_launch_watchdog_task = public_launch_task
     try:
         yield
     finally:
-        for task in (public_launch_task,beta_scheduler_task):
+        for task in (public_launch_task, beta_scheduler_task):
             if task is not None:
                 task.cancel()
-                with contextlib.suppress(asyncio.CancelledError): await task
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         await app.state.llama.close()
 
 
-_boot_settings=get_settings(); _is_production=_boot_settings.env.lower() in {"production","prod","stable"}
-app=FastAPI(title="X1",version="0.39.0",description="Local-first CPU/RAM AI platform",lifespan=lifespan,docs_url=None if _is_production else "/docs",redoc_url=None if _is_production else "/redoc",openapi_url=None if _is_production else "/openapi.json")
-# Covers both Content-Length and chunked/HTTP2 bodies before request parsing.
-# 32 MiB remains above X1's 25 MiB workspace archive limit and 20 MiB file
-# limit, while stopping arbitrary JSON/body memory amplification.
-app.add_middleware(RequestBodyLimitMiddleware,max_bytes=32*1024*1024)
-app.add_middleware(GZipMiddleware,minimum_size=1024,compresslevel=3)
+_boot_settings = get_settings()
+_is_production = _boot_settings.env.lower() in {"production", "prod", "stable"}
+app = FastAPI(
+    title="X1",
+    version="0.40.0",
+    description="Local-first CPU/RAM AI platform",
+    lifespan=lifespan,
+    docs_url=None if _is_production else "/docs",
+    redoc_url=None if _is_production else "/redoc",
+    openapi_url=None if _is_production else "/openapi.json",
+)
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=32 * 1024 * 1024)
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=3)
 
 
 @app.middleware("http")
-async def privacy_headers(request:Request,call_next):
-    response=await call_next(request); path=request.url.path
-    if path.startswith(("/v1/","/admin","/media-admin")):
-        response.headers["X-Robots-Tag"]="noindex, nofollow, noarchive, nosnippet"; response.headers["Cache-Control"]="no-store"; response.headers["Pragma"]="no-cache"; response.headers["Referrer-Policy"]="no-referrer"; response.headers["X-Content-Type-Options"]="nosniff"; response.headers["X-Frame-Options"]="DENY"
+async def privacy_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith(("/v1/", "/admin", "/media-admin")):
+        response.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive, nosnippet"
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
     return response
 
 
-@app.get("/robots.txt",include_in_schema=False)
-def robots()->PlainTextResponse:
-    return PlainTextResponse("User-agent: *\nDisallow: /v1/\nDisallow: /admin\nDisallow: /media-admin\n",headers={"Cache-Control":"public, max-age=86400"})
+@app.get("/robots.txt", include_in_schema=False)
+def robots() -> PlainTextResponse:
+    return PlainTextResponse(
+        "User-agent: *\nDisallow: /v1/\nDisallow: /admin\nDisallow: /media-admin\n",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.exception_handler(StaleDataError)
-async def stale_task_state_handler(request:Request,exc:StaleDataError):
-    _=request,exc; return JSONResponse(status_code=409,content={"detail":"Concurrent task state update conflict"})
+async def stale_task_state_handler(request: Request, exc: StaleDataError):
+    _ = request, exc
+    return JSONResponse(status_code=409, content={"detail": "Concurrent task state update conflict"})
 
 
-def _include_optional_router(module:str)->None:
-    try: imported=__import__(module,fromlist=["router"]); router=getattr(imported,"router",None)
-    except (ImportError,ModuleNotFoundError): router=None
-    if router is not None: app.include_router(router)
+def _include_product_router(module: str) -> None:
+    """Core product surfaces must never disappear silently in production."""
+    try:
+        imported = __import__(module, fromlist=["router"])
+        router = getattr(imported, "router", None)
+        if router is None:
+            raise RuntimeError(f"{module} does not export router")
+    except (ImportError, ModuleNotFoundError, RuntimeError):
+        if _is_production:
+            raise
+        logger.exception("Optional development router unavailable: %s", module)
+        return
+    app.include_router(router)
 
 
-for router in (health_router,admin_ui_router,media_admin_ui_router,admin_router,operations_router,safety_admin_router,account_router,auth_router,projects_router,memory_router,files_router,conversations_router,usage_router,diagnostics_router,documents_router,code_router,images_router,media_admin_router,runtime_router,development_router,engineering_router,execution_router,sandbox_router,git_router,development_chat_router,quality_router,research_router,tasks_router,chat_router): app.include_router(router)
-for module in ("app.api.routes.complaints","app.api.routes.reliability","app.api.routes.commerce","app.api.routes.api_client","app.api.routes.beta","app.api.routes.beta_ops","app.api.routes.launch","app.beta_admin_ui","app.launch_admin_ui"): _include_optional_router(module)
+for router in (
+    health_router, admin_ui_router, media_admin_ui_router, admin_router, operations_router,
+    safety_admin_router, account_router, auth_router, projects_router, memory_router,
+    files_router, conversations_router, usage_router, diagnostics_router, documents_router,
+    code_router, images_router, media_admin_router, runtime_router, development_router,
+    engineering_router, execution_router, sandbox_router, git_router, development_chat_router,
+    quality_router, research_router, tasks_router, chat_router,
+):
+    app.include_router(router)
+
+for module in (
+    "app.api.routes.complaints",
+    "app.api.routes.reliability",
+    "app.api.routes.commerce",
+    "app.api.routes.api_client",
+    "app.api.routes.beta",
+    "app.api.routes.beta_ops",
+    "app.api.routes.launch",
+    "app.beta_admin_ui",
+    "app.launch_admin_ui",
+):
+    _include_product_router(module)
