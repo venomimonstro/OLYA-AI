@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.main import _production_configuration_errors, app
+from app.services.quality import AnswerQualityEngine
 from app.services.source_context import FRESHNESS_SENTINEL, SourceContextBuilder
 import app.sandbox_worker_api as sandbox_worker
 
@@ -23,15 +24,24 @@ class SourceDB:
         return self.source if key == self.source.id else None
 
 
-def _source(*, age_hours: float, content: str = "Bitcoin current price market data"):
+class MultiSourceDB:
+    def __init__(self, *sources):
+        self.sources = {source.id: source for source in sources}
+
+    def get(self, model, key):
+        _ = model
+        return self.sources.get(key)
+
+
+def _source(*, age_hours: float, content: str = "Bitcoin current price market data", source_id: str = "source-1", url: str = "https://example.com/market"):
     return SimpleNamespace(
-        id="source-1",
+        id=source_id,
         status="ready",
         project_id=None,
         user_id="user-1",
         title="Market source",
-        url="https://example.com/market",
-        final_url="https://example.com/market",
+        url=url,
+        final_url=url,
         content=content,
         content_sha256="a" * 64,
         fetched_at=datetime.now(timezone.utc) - timedelta(hours=age_hours),
@@ -77,6 +87,42 @@ def test_irrelevant_source_is_not_promoted_to_verified_evidence():
         freshness_max_age_seconds=3600,
     )
     assert source.final_url not in verified
+
+
+def test_only_sources_actually_selected_into_prompt_are_verified():
+    primary = _source(
+        age_hours=0.1,
+        source_id="source-primary",
+        url="https://example.com/primary",
+        content="Bitcoin current price market data Bitcoin current price market data",
+    )
+    secondary = _source(
+        age_hours=0.1,
+        source_id="source-secondary",
+        url="https://example.com/secondary",
+        content="Bitcoin market background",
+    )
+    messages, verified = SourceContextBuilder(max_excerpts=1).build(
+        MultiSourceDB(primary, secondary),
+        SimpleNamespace(id="user-1"),
+        [primary.id, secondary.id],
+        "Bitcoin current price market data сейчас",
+        freshness_max_age_seconds=3600,
+    )
+    assert primary.final_url in verified
+    assert secondary.final_url not in verified
+    supplied = "\n".join(message.content for message in messages)
+    assert primary.final_url in supplied
+    assert secondary.final_url not in supplied
+
+
+def test_supported_quality_requires_real_grounded_source_context():
+    engine = AnswerQualityEngine()
+    critic = {"ok": True, "issues": [], "summary": ""}
+    ungrounded = engine.deterministic("323", [], set())
+    grounded = engine.deterministic("323", [], {"https://example.com/source"})
+    assert engine.final_status(ungrounded, critic) == "checked"
+    assert engine.final_status(grounded, critic) == "supported"
 
 
 def test_production_configuration_fails_closed_on_sqlite_and_default_sandbox_secret():
@@ -167,6 +213,26 @@ def test_maintenance_service_is_wired_and_ephemeral_only():
         assert model in service
     for forbidden in ("ResourceExpenseEvent", "PaymentEvent", "Complaint", "Message", "ResearchSource"):
         assert f"delete({forbidden})" not in service
+
+
+def test_runtime_release_gate_requires_component_acceptance_before_ai_journey():
+    gate = (ROOT / "scripts" / "release_gate.py").read_text("utf-8")
+    component = (ROOT / "scripts" / "component_acceptance.py").read_text("utf-8")
+    assert 'run("component_acceptance"' in gate
+    assert "scripts.component_acceptance" in gate
+    assert gate.index('run("component_acceptance"') < gate.index('run("e2e_user_journey"')
+    for marker in (
+        '"register"',
+        '"revoked_session_rejected"',
+        '"memory_roundtrip"',
+        '"file_integrity"',
+        '"document_qa_passed"',
+        '"document_released"',
+        '"sandbox_isolated_available"',
+        '"revoked_api_key_rejected"',
+        '"account_export_contains_project"',
+    ):
+        assert marker in component
 
 
 def test_sprint40_version_is_active():
