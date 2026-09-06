@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
-from app.models import BackgroundJob, UserQuota
+from app.models import BackgroundJob, User, UserQuota
 
 
 class JobLeaseLostError(RuntimeError):
@@ -53,6 +53,16 @@ def lease_next_job(db: Session, *, worker_id: str, lease_seconds: int = 120, kin
     candidates = list(db.scalars(select(BackgroundJob).where(_ready_clause(now), BackgroundJob.attempt_count < BackgroundJob.max_attempts, *([BackgroundJob.kind.in_(kinds)] if kinds else [])).order_by(BackgroundJob.priority.asc(), BackgroundJob.available_at.asc(), BackgroundJob.created_at.asc()).limit(8)).all())
     for candidate in candidates:
         if candidate.user_id:
+            # Serialize admission decisions for one user across independent worker
+            # processes. Without this row lock two workers can both observe zero
+            # active jobs and each lease a different job, violating the user's
+            # max_concurrent_jobs resource envelope. PostgreSQL holds this lock
+            # until the worker commits start_job(); SQLite simply ignores FOR UPDATE.
+            db.scalar(
+                select(User.id)
+                .where(User.id == candidate.user_id)
+                .with_for_update()
+            )
             quota = db.get(UserQuota, candidate.user_id)
             limit = max(1, quota.max_concurrent_jobs if quota is not None else 1)
             active_for_user = db.scalar(select(func.count(BackgroundJob.id)).where(BackgroundJob.user_id == candidate.user_id, BackgroundJob.id != candidate.id, BackgroundJob.status.in_(["leased", "running"]), BackgroundJob.lease_expires_at > now)) or 0
