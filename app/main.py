@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -80,9 +82,22 @@ async def lifespan(app: FastAPI):
         if name == "brave":
             providers.append(BraveSearchDiscovery(settings.brave_search_api_key, timeout_seconds=settings.search_timeout_seconds))
     app.state.discovery = ProviderPoolDiscovery(providers) if providers else DisabledDiscovery()
+
+    beta_scheduler_task = None
+    is_production = settings.env.lower() in {"production", "prod", "stable"}
+    if is_production and settings.beta_operations_scheduler_enabled:
+        from app.services.beta_scheduler import beta_operations_loop
+
+        beta_scheduler_task = asyncio.create_task(beta_operations_loop(settings), name="x1-beta-operations")
+        app.state.beta_operations_task = beta_scheduler_task
+
     try:
         yield
     finally:
+        if beta_scheduler_task is not None:
+            beta_scheduler_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await beta_scheduler_task
         await app.state.llama.close()
 
 
