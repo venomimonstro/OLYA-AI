@@ -23,3 +23,4 @@ from app.models_sprint29 import *  # noqa: F401,F403,E402
 from app.models_sprint30 import *  # noqa: F401,F403,E402
 from app.models_sprint31 import *  # noqa: F401,F403,E402
 from app.models_sprint37 import *  # noqa: F401,F403,E402
+from app.models_sprint38 import *  # noqa: F401,F403,E402
