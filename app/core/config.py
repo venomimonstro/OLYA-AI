@@ -146,6 +146,10 @@ class Settings(BaseSettings):
     public_launch_breaker_min_requests: int = 50
     public_launch_max_failure_rate: float = 0.03
     public_launch_global_budget_microunits: int = 0
+    public_launch_enforce_exposure: bool = False
+    public_launch_watchdog_enabled: bool = True
+    public_launch_watchdog_interval_seconds: float = 300.0
+    public_launch_auto_rollback: bool = True
     plan_ratio_free: float = 0.25
     plan_ratio_x1: float = 1.0
     plan_ratio_pro: float = 2.0
