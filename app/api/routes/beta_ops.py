@@ -24,6 +24,7 @@ class BetaFeedbackConfirm(BaseModel):
 def beta_trends(
     request: Request,
     cohort: str = "closed-beta-1",
+    window_days: int = Query(default=30, ge=1, le=180),
     limit: int = Query(default=14, ge=2, le=90),
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
@@ -32,12 +33,15 @@ def beta_trends(
     rows = list(
         db.scalars(
             select(BetaSnapshot)
-            .where(BetaSnapshot.cohort == cohort)
+            .where(BetaSnapshot.cohort == cohort, BetaSnapshot.window_days == window_days)
             .order_by(BetaSnapshot.created_at.desc())
             .limit(limit)
         ).all()
     )
-    return build_trend(rows, request.app.state.settings)
+    result = build_trend(rows, request.app.state.settings)
+    result["cohort"] = cohort
+    result["window_days"] = window_days
+    return result
 
 
 @router.get("/feedback")
