@@ -19,7 +19,7 @@ services:
           memory: 1536M
 
   searxng:
-    image: ghcr.io/searxng/searxng:2026.9.4-15b0c8ef3
+    image: ghcr.io/searxng/searxng:2026.9.4-15b0c8ef3@sha256:4112d4864885b7ef2fe678b18839633ebbcd3272271ac67ca671e19ae193d773
     restart: unless-stopped
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
@@ -27,7 +27,7 @@ services:
     expose:
       - "8080"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:8080/search?q=x1&format=json' || exit 1"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/search?q=x1&format=json',timeout=5).read()"]
       interval: 20s
       timeout: 8s
       retries: 8
@@ -47,6 +47,12 @@ services:
       X1_HOST_DATA_ROOT: ${X1_HOST_DATA_ROOT:?Set X1_HOST_DATA_ROOT in .env}
       X1_SANDBOX_MIRROR_DATA_ROOT: /app/data
       X1_SANDBOX_RUNTIME_IMAGE: ${X1_PROJECT_SANDBOX_IMAGE:-x1-sandbox:0.39}
+      X1_SANDBOX_MAX_CONCURRENT_EXECUTIONS: ${X1_SANDBOX_MAX_CONCURRENT_EXECUTIONS:-1}
+      X1_SANDBOX_MAX_ACTIVE_PREVIEWS: ${X1_SANDBOX_MAX_ACTIVE_PREVIEWS:-1}
+      X1_SANDBOX_MAX_MEMORY_MB: ${X1_SANDBOX_MAX_MEMORY_MB:-2048}
+      X1_SANDBOX_MAX_CPU: ${X1_SANDBOX_MAX_CPU:-1.0}
+      X1_SANDBOX_MAX_PIDS: ${X1_SANDBOX_MAX_PIDS:-128}
+      X1_SANDBOX_PREVIEW_TTL_SECONDS: ${X1_SANDBOX_PREVIEW_TTL_SECONDS:-900}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/app/data
@@ -97,7 +103,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1536M
+          memory: 2048M
 
   gate:
     profiles: ["gate"]
@@ -143,8 +149,11 @@ services:
 
   llama:
     profiles: ["inference"]
-    image: ghcr.io/ggml-org/llama.cpp:server
+    # Pinned build/digest: a future mutable server tag cannot silently change the
+    # production inference runtime during a repeat one-command installation.
+    image: ghcr.io/ggml-org/llama.cpp:server-b10380@sha256:683ad4c9569bdbd6b8d7ad008a729cf4f9a3dfaf9712c81a7ecac0c5b9a078fc
     restart: unless-stopped
+    mem_limit: ${X1_LLAMA_MEMORY_LIMIT:-24g}
     volumes:
       - ./models:/models:ro
     command:
