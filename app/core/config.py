@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     database_url: str = "sqlite+pysqlite:///./x1.db"
+    database_pool_size: int = 8
+    database_max_overflow: int = 4
+    database_pool_timeout_seconds: float = 5.0
+    database_pool_recycle_seconds: int = 1800
     llama_base_url: str = "http://127.0.0.1:8080"
     llama_model_name: str = "Qwen3-30B-A3B-Q4_K_M"
     max_context_tokens: int = 8192
@@ -33,6 +37,8 @@ class Settings(BaseSettings):
     document_storage_path: str = "./data/documents"
     document_render_timeout_seconds: int = 60
     document_max_pages: int = 300
+    document_max_concurrent_renders: int = 1
+    document_render_queue_timeout_seconds: float = 5.0
 
     database_auto_create_schema: bool = False
     default_monthly_compute_seconds: int = 600
@@ -45,8 +51,6 @@ class Settings(BaseSettings):
     research_max_bytes: int = 2_000_000
     research_max_chars: int = 500_000
     research_max_redirects: int = 3
-    # Sprint 39 starts a private SearXNG sidecar by default. Brave remains an
-    # optional second provider and is never used for model inference.
     search_provider: str = "searxng"
     search_providers: str = "searxng"
     searxng_base_url: str = "http://searxng:8080"
@@ -70,15 +74,22 @@ class Settings(BaseSettings):
     project_runtime_default_memory_mb: int = 1024
     project_runtime_default_disk_mb: int = 2048
     project_runtime_default_process_limit: int = 64
+    project_runtime_max_cpu_limit: float = 1.0
+    project_runtime_max_memory_mb: int = 2048
+    project_runtime_max_process_limit: int = 128
     project_runtime_secret_key: str = "change-me-runtime-secret"
-    # The web app never receives the Docker socket. A dedicated internal worker
-    # owns the privileged boundary and can only execute hardened sandbox calls.
     project_sandbox_backend: str = "remote"
     project_sandbox_image: str = "x1-sandbox:0.39"
     project_sandbox_worker_url: str = "http://sandbox-worker:8090"
     project_sandbox_worker_token: str = "change-me-sandbox-worker"
     project_sandbox_command_timeout_seconds: int = 300
     project_sandbox_preview_timeout_seconds: int = 120
+    sandbox_max_concurrent_executions: int = 1
+    sandbox_max_active_previews: int = 1
+    sandbox_max_memory_mb: int = 2048
+    sandbox_max_cpu: float = 1.0
+    sandbox_max_pids: int = 128
+    sandbox_preview_ttl_seconds: int = 900
 
     image_storage_path: str = "./data/images"
     image_backend: str = "disabled"
