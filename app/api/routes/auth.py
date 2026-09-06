@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
@@ -12,6 +13,10 @@ from app.services.auth import create_session, get_current_user, hash_password, n
 from app.services.auth_rate_limit import enforce_auth_rate_limit
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
+
+# Non-existent accounts still execute one real scrypt verification. This removes
+# the large timing gap that would otherwise help remote account enumeration.
+_DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
 
 
 @router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
@@ -38,7 +43,9 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
     email = normalize_email(payload.email)
     enforce_auth_rate_limit(request, email=email, action="login", environment=request.app.state.settings.env)
     user = db.scalar(select(User).where(User.email == email))
-    if user is None or not user.is_active or not verify_password(payload.password, user.password_hash):
+    candidate_hash = user.password_hash if user is not None else _DUMMY_PASSWORD_HASH
+    password_ok = verify_password(payload.password, candidate_hash)
+    if user is None or not user.is_active or not password_ok:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
     token, _ = create_session(db, user)
     return AuthResponse(access_token=token, user_id=user.id)
