@@ -14,6 +14,31 @@ _PLACEHOLDER_PATTERNS = (
     re.compile(r"\[(?:вставить|insert|placeholder)[^\]]{0,120}\]", re.IGNORECASE),
 )
 _URL_RE = re.compile(r"https?://[^\s<>()\]\[\]{}\"']+", re.IGNORECASE)
+_FRESHNESS_MARKERS = (
+    "сегодня",
+    "сейчас",
+    "на данный момент",
+    "актуальн",
+    "последние новости",
+    "последние данные",
+    "последняя версия",
+    "текущая цена",
+    "текущая стоимость",
+    "текущий курс",
+    "latest",
+    "today",
+    "right now",
+    "currently",
+    "current price",
+    "current rate",
+    "latest version",
+    "latest news",
+)
+
+
+def needs_fresh_grounding(text: str) -> bool:
+    normalized = " ".join(text.casefold().split())
+    return any(marker in normalized for marker in _FRESHNESS_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -31,15 +56,15 @@ class DeterministicAudit:
 
 
 class AnswerQualityEngine:
-    """Cheap quality gates that never ask the model to verify facts it generated.
-
-    Deterministic checks may fail an answer. They never claim that free-form factual
-    prose is true. A model critic can only lower confidence or mark an answer as
-    supported; it cannot produce X1's strongest verification status.
-    """
+    """Cheap quality gates that never ask the model to verify facts it generated."""
 
     def deterministic(
-        self, text: str, requirements: list[AnswerRequirement], verified_urls: set[str] | None = None
+        self,
+        text: str,
+        requirements: list[AnswerRequirement],
+        verified_urls: set[str] | None = None,
+        *,
+        freshness_required: bool = False,
     ) -> DeterministicAudit:
         checks: list[dict[str, Any]] = []
         warnings: list[str] = []
@@ -62,8 +87,8 @@ class AnswerQualityEngine:
             checks.append(self._check(key, label, status, detail))
 
         urls = sorted(set(item.rstrip(".,;:!?)]}") for item in _URL_RE.findall(text)))
+        allowed = {item.rstrip("/") for item in (verified_urls or set())}
         if urls:
-            allowed = {item.rstrip("/") for item in (verified_urls or set())}
             unverified = [item for item in urls if item.rstrip("/") not in allowed]
             if unverified:
                 checks.append(
@@ -85,10 +110,35 @@ class AnswerQualityEngine:
                     )
                 )
 
+        if freshness_required:
+            if allowed:
+                checks.append(
+                    self._check(
+                        "freshness_grounding",
+                        "Актуальные утверждения опираются на загруженные свежие источники",
+                        "passed",
+                        f"Доступно источников: {len(allowed)}",
+                    )
+                )
+            else:
+                checks.append(
+                    self._check(
+                        "freshness_grounding",
+                        "Актуальные утверждения требуют свежего источника",
+                        "unverified",
+                        "К ответу не приложен проверенный research snapshot",
+                    )
+                )
+                warnings.append(
+                    "Запрос зависит от актуальных данных, но свежий проверенный источник не был приложен; текущие факты не считаются подтверждёнными."
+                )
+
         return DeterministicAudit(checks=checks, warnings=warnings)
 
     def critic_messages(self, user_request: str, answer: str, requirements: list[AnswerRequirement]) -> list[ChatMessage]:
-        requirement_lines = "\n".join(f"- {item.label or self._default_label(item)}" for item in requirements) or "- Явных формальных требований нет"
+        requirement_lines = "\n".join(
+            f"- {item.label or self._default_label(item)}" for item in requirements
+        ) or "- Явных формальных требований нет"
         return [
             ChatMessage(
                 role="system",
@@ -118,9 +168,7 @@ class AnswerQualityEngine:
         requirements: list[AnswerRequirement],
     ) -> list[ChatMessage]:
         failures = [item for item in deterministic.checks if item["status"] == "failed"]
-        failure_lines = "\n".join(
-            f"- {item['label']}: {item.get('detail', '')}" for item in failures
-        )
+        failure_lines = "\n".join(f"- {item['label']}: {item.get('detail', '')}" for item in failures)
         requirement_lines = "\n".join(
             f"- {item.label or self._default_label(item)}" for item in requirements
         ) or "- Нет дополнительных формальных требований"
@@ -172,7 +220,6 @@ class AnswerQualityEngine:
         if deterministic.failed:
             return "failed"
         if deterministic.unverifiable:
-            # A critic cannot turn unverified sources into verified evidence.
             return "unverified"
         if critic is None:
             return "checked"
