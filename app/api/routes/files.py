@@ -125,9 +125,9 @@ async def upload_file(
             filename,
             max_pdf_pages=int(settings.max_pdf_pages),
             max_docx_unpacked_bytes=int(settings.max_docx_unpacked_bytes),
-            max_extracted_chars=2_000_000,
-            timeout_seconds=45,
-            memory_mb=768,
+            max_extracted_chars=int(settings.file_max_extracted_chars),
+            timeout_seconds=int(settings.file_parse_timeout_seconds),
+            memory_mb=int(settings.file_parse_memory_mb),
         )
         chunks = chunk_segments(
             segments,
