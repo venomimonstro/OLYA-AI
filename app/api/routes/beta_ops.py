@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -22,6 +22,7 @@ class BetaFeedbackConfirm(BaseModel):
 
 @router.get("/trends")
 def beta_trends(
+    request: Request,
     cohort: str = "closed-beta-1",
     limit: int = Query(default=14, ge=2, le=90),
     admin: User = Depends(require_admin),
@@ -36,9 +37,7 @@ def beta_trends(
             .limit(limit)
         ).all()
     )
-    from app.core.config import get_settings
-
-    return build_trend(rows, get_settings())
+    return build_trend(rows, request.app.state.settings)
 
 
 @router.get("/feedback")
