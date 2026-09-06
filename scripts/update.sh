@@ -16,7 +16,6 @@ command -v git >/dev/null 2>&1 || fail "git is required"
 command -v docker >/dev/null 2>&1 || fail "docker is required"
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
 
-# One updater at a time. flock is part of util-linux on supported Debian/Ubuntu.
 exec 9>"$ROOT/.x1-update.lock"
 if command -v flock >/dev/null 2>&1; then
   flock -n 9 || fail "another X1 update is already running"
@@ -38,9 +37,15 @@ fi
 git merge-base --is-ancestor "$OLD_HEAD" "$TARGET_HEAD" || fail "origin/main is not a fast-forward from the installed revision"
 
 # Preserve rollback code outside the repository because git reset may move to a
-# revision that predates this script.
+# revision that predates Sprint 40. Older installations do not yet have
+# scripts/restore.sh, so obtain the exact target copy without checking target code
+# out into the working tree.
 RESTORE_COPY="$(mktemp -t x1-restore.XXXXXX.sh)"
-cp scripts/restore.sh "$RESTORE_COPY"
+if [ -f scripts/restore.sh ]; then
+  cp scripts/restore.sh "$RESTORE_COPY"
+else
+  git show origin/main:scripts/restore.sh > "$RESTORE_COPY"
+fi
 chmod 700 "$RESTORE_COPY"
 BACKUP_PATH=""
 
@@ -54,8 +59,6 @@ rollback() {
   if [ -n "$BACKUP_PATH" ] && [ -d "$BACKUP_PATH" ]; then
     X1_INSTALL_DIR="$ROOT" bash "$RESTORE_COPY" "$BACKUP_PATH" >/dev/null 2>&1 || printf '[X1 update] WARNING: automatic data restore failed; backup remains at %s\n' "$BACKUP_PATH" >&2
   fi
-  # Rebuild the previous application code so a newly-built failed image is not
-  # accidentally restarted after the Git rollback.
   docker compose build app sandbox-worker >/dev/null 2>&1 || true
   docker compose --profile inference up -d db searxng sandbox-worker llama app >/dev/null 2>&1 || true
   if printf '%s\n' "$RUNNING_SERVICES" | grep -qx image-worker; then
@@ -70,11 +73,20 @@ trap 'rollback "update interrupted"' INT TERM
 
 info "Quiescing write-producing services"
 docker compose stop app image-worker sandbox-worker >/dev/null 2>&1 || true
-# PostgreSQL stays running so pg_dump/restore-drill can use the exact production
-# engine. With app/workers stopped there are no normal X1 writers.
 
 info "Creating consistent pre-update backup"
-BACKUP_PATH="$(bash scripts/backup.sh)"
+# When upgrading a pre-Sprint40 installation, its backup.sh still requires the
+# app container. Use the target backup implementation without checking out target
+# code so the quiesced app can stay stopped.
+if grep -q 'authoritative /app/data' scripts/backup.sh 2>/dev/null; then
+  BACKUP_HELPER="$(mktemp -t x1-backup.XXXXXX.sh)"
+  git show origin/main:scripts/backup.sh > "$BACKUP_HELPER"
+  chmod 700 "$BACKUP_HELPER"
+  BACKUP_PATH="$(X1_HOST_DATA_ROOT="${X1_HOST_DATA_ROOT:-$ROOT/data}" bash "$BACKUP_HELPER")"
+  rm -f "$BACKUP_HELPER"
+else
+  BACKUP_PATH="$(bash scripts/backup.sh)"
+fi
 [ -d "$BACKUP_PATH" ] || rollback "backup path was not created"
 info "Validating pre-update backup by non-destructive restore drill"
 bash scripts/restore_drill.sh "$BACKUP_PATH" >/dev/null
@@ -83,9 +95,6 @@ info "Fast-forwarding code to $TARGET_HEAD"
 git merge --ff-only origin/main
 
 info "Installing/migrating/verifying the new revision"
-# The installer is idempotent and preserves existing secrets. Full E2E/chaos is
-# intentionally kept on for a production update; a revision that cannot pass the
-# same gates as a clean install is rolled back.
 bash scripts/install.sh "$@"
 
 if printf '%s\n' "$RUNNING_SERVICES" | grep -qx image-worker; then
