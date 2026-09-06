@@ -124,7 +124,7 @@ def test_release_gate_exposes_sprint39_full_e2e_flags():
     assert '"--chaos"' in script
     assert '"e2e_user_journey"' in script
     assert '"chaos_simulation"' in script
-    assert '"format": "x1-release-gate-v3"' in script
+    assert '"format": "x1-release-gate-v4"' in script
 
 
 def test_legacy_volume_migration_is_copy_only_and_preserves_source():
