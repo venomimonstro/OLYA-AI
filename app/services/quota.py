@@ -48,8 +48,6 @@ def compute_seconds_used(db: Session, user_id: str, now: datetime | None = None)
 
 
 def _inferred_channel(reserve_seconds: int) -> str:
-    # Chat reserve contracts are 15/60/180 seconds and may be doubled by strict
-    # verification. Keep each doubled value in the originating fairness lane.
     if reserve_seconds in {15, 30}:
         return "fast"
     if reserve_seconds in {60, 120}:
@@ -73,7 +71,7 @@ def ensure_compute_available(
 
     try:
         from app.services.commerce import measured_user_resources, price_resource_ms
-        from app.services.measured_plans import ensure_channel_budget, plan_policy
+        from app.services.measured_plans import current_channel_override, ensure_channel_budget, plan_policy
 
         policy = plan_policy(db, settings, quota.plan)
         if policy is not None:
@@ -82,7 +80,7 @@ def ensure_compute_available(
             total_budget = max(0, int(policy.get("resource_budget_microunits") or 0))
             if total_budget and measured["total_cost_microunits"] + reserve_cost > total_budget:
                 raise QuotaExceededError("Monthly measured resource budget exhausted")
-            fairness_channel = channel or _inferred_channel(reserve_seconds)
+            fairness_channel = channel or current_channel_override() or _inferred_channel(reserve_seconds)
             try:
                 ensure_channel_budget(db, user, settings, fairness_channel, reserve_cost)
             except RuntimeError as exc:
