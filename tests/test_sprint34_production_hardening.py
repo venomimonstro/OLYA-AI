@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -80,7 +79,12 @@ def test_compose_persists_data_matches_model_and_keeps_socket_out_of_web_app():
     assert "scripts.image_worker" in compose
 
 
-def test_backup_streams_authoritative_container_data():
+def test_backup_archives_authoritative_host_data_and_is_atomic():
     root=Path(__file__).resolve().parents[1]; script=(root/"scripts"/"backup.sh").read_text("utf-8")
-    assert 'Path("/app/data")' in script
-    assert "SHA256SUMS" in script and ".partial." in script
+    assert 'DATA_ROOT="${X1_HOST_DATA_ROOT:-$ROOT/data}"' in script
+    assert "os.walk(root, followlinks=False)" in script
+    assert "unsupported data member for safe backup" in script
+    assert "SHA256SUMS" in script and ".partial.$$" in script
+    # Update flow stops app before backup; backup therefore must not depend on
+    # executing inside the stopped web container.
+    assert "docker compose exec -T app" not in script
