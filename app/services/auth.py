@@ -51,105 +51,54 @@ def create_session(db: Session, user: User) -> tuple[str, AuthSession]:
     settings = get_settings()
     token = secrets.token_urlsafe(48)
     now = datetime.now(timezone.utc)
-    record = AuthSession(
-        user_id=user.id,
-        token_hash=token_digest(token),
-        expires_at=now + timedelta(days=settings.session_ttl_days),
-        last_seen_at=now,
-    )
-    db.add(record)
-    db.commit()
-    db.refresh(record)
-    return token, record
+    record = AuthSession(user_id=user.id, token_hash=token_digest(token), expires_at=now + timedelta(days=settings.session_ttl_days), last_seen_at=now)
+    db.add(record); db.commit(); db.refresh(record); return token, record
 
 
 def _expensive_public_path(path: str) -> bool:
-    return path.startswith((
-        "/v1/chat",
-        "/v1/images",
-        "/v1/documents",
-        "/v1/research",
-        "/v1/project-sandboxes",
-        "/v1/development",
-        "/v1/engineering",
-        "/v1/execution",
-    ))
+    return path.startswith(("/v1/chat","/v1/images","/v1/documents","/v1/research","/v1/project-sandboxes","/v1/development","/v1/engineering","/v1/execution"))
 
 
 def _enforce_public_exposure(request: Request, db: Session, user: User) -> None:
     settings = getattr(request.app.state, "settings", get_settings())
-    if not bool(getattr(settings, "public_launch_enforce_exposure", False)) or not _expensive_public_path(request.url.path):
+    if not _expensive_public_path(request.url.path) or bool(getattr(user, "is_admin", False)):
         return
-    if bool(getattr(user, "is_admin", False)):
+    from app.services.progressive_launch import user_has_open_breaker
+    if user_has_open_breaker(db, user.id):
+        raise HTTPException(status_code=429, detail={"code":"user_circuit_breaker_open","message":"AI access is temporarily paused for this account because an abuse/resource safety guardrail was triggered."})
+    if not bool(getattr(settings, "public_launch_enforce_exposure", False)):
         return
     from app.models import BetaParticipant
     from app.services.progressive_launch import active_rollout, rollout_allows_user
-
     beta = db.scalar(select(BetaParticipant.id).where(BetaParticipant.user_id == user.id, BetaParticipant.state != "removed").limit(1))
-    if beta or rollout_allows_user(active_rollout(db), user.id):
+    rollout = active_rollout(db)
+    if beta or rollout_allows_user(rollout, user.id):
         return
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail={
-            "code": "public_rollout_not_exposed",
-            "message": "AI access for this account has not been enabled by the current rollout stage yet.",
-            "exposure_percent": (active_rollout(db).exposure_percent if active_rollout(db) else 0),
-        },
-    )
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail={"code":"public_rollout_not_exposed","message":"AI access for this account has not been enabled by the current rollout stage yet.","exposure_percent":rollout.exposure_percent if rollout else 0})
 
 
 def _enforce_resource_lane(request: Request, db: Session, user: User) -> None:
     if request.method.upper() != "POST":
         return
-    path = request.url.path
-    channel = None
-    if path == "/v1/images/generations":
-        channel = "image_worker"
-    elif path.startswith("/v1/project-sandboxes/") and path.endswith("/execute"):
-        channel = "sandbox"
-    elif path == "/v1/project-sandboxes/previews":
-        channel = "sandbox"
-    if not channel:
-        return
+    path=request.url.path; channel=None
+    if path=="/v1/images/generations": channel="image_worker"
+    elif path.startswith("/v1/project-sandboxes/") and path.endswith("/execute"): channel="sandbox"
+    elif path=="/v1/project-sandboxes/previews": channel="sandbox"
+    if not channel:return
     from app.services.measured_plans import ensure_channel_budget
-    try:
-        ensure_channel_budget(db, user, request.app.state.settings, channel, 0)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    try: ensure_channel_budget(db,user,request.app.state.settings,channel,0)
+    except RuntimeError as exc: raise HTTPException(status_code=429,detail=str(exc)) from exc
 
 
-def get_current_user(
-    request: Request,
-    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
-    db: Session = Depends(get_db),
-) -> User:
-    if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-
-    now = datetime.now(timezone.utc)
-    session = db.scalar(select(AuthSession).where(AuthSession.token_hash == token_digest(credentials.credentials)))
-    if session is None or session.revoked_at is not None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
-
-    expires_at = session.expires_at
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at <= now:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
-
-    user = db.get(User, session.user_id)
-    if user is None or not user.is_active:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account unavailable")
-
-    _enforce_public_exposure(request, db, user)
-    _enforce_resource_lane(request, db, user)
-
-    last_seen = session.last_seen_at
-    if last_seen.tzinfo is None:
-        last_seen = last_seen.replace(tzinfo=timezone.utc)
-    if (now - last_seen).total_seconds() > 300:
-        session.last_seen_at = now
-        db.commit()
-
-    request.state.auth_session_id = session.id
-    return user
+def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials|None=Depends(_bearer), db: Session=Depends(get_db)) -> User:
+    if credentials is None or credentials.scheme.lower()!="bearer": raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="Authentication required")
+    now=datetime.now(timezone.utc); session=db.scalar(select(AuthSession).where(AuthSession.token_hash==token_digest(credentials.credentials)))
+    if session is None or session.revoked_at is not None: raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="Invalid session")
+    expires_at=session.expires_at if session.expires_at.tzinfo else session.expires_at.replace(tzinfo=timezone.utc)
+    if expires_at<=now: raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="Session expired")
+    user=db.get(User,session.user_id)
+    if user is None or not user.is_active: raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,detail="Account unavailable")
+    _enforce_public_exposure(request,db,user); _enforce_resource_lane(request,db,user)
+    last_seen=session.last_seen_at if session.last_seen_at.tzinfo else session.last_seen_at.replace(tzinfo=timezone.utc)
+    if (now-last_seen).total_seconds()>300: session.last_seen_at=now; db.commit()
+    request.state.auth_session_id=session.id; return user
