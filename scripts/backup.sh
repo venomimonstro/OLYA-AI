@@ -19,24 +19,28 @@ cleanup() { rm -rf "$TMP_DEST"; }
 trap cleanup EXIT
 mkdir -p "$TMP_DEST"
 
-# pg_dump is executed after callers have quiesced write-producing application
-# services for update backups. A failed dump can never be promoted as complete.
 docker compose exec -T db pg_dump -U x1 -d x1 -Fc > "$TMP_DEST/database.dump"
 [ -s "$TMP_DEST/database.dump" ] || { echo "database dump is empty" >&2; exit 3; }
 
-# Sprint 39+ uses a host bind as the authoritative /app/data. Archive it directly
-# so backups still work while the web application is stopped during a safe
-# update. Reject links/devices: the matching restore path is deliberately
-# traversal/link safe.
+# Do not silently lose a symlink/device from user project data. The production
+# restore path intentionally refuses links, so backup must fail loudly if such an
+# unsupported member exists rather than producing a green but incomplete copy.
 python3 - "$DATA_ROOT" "$TMP_DEST/files.tar" <<'PY'
 from __future__ import annotations
-import sys, tarfile
+import os, stat, sys, tarfile
 from pathlib import Path
 
 root = Path(sys.argv[1]).resolve()
 out = Path(sys.argv[2])
+for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+    base = Path(dirpath)
+    for name in [*dirnames, *filenames]:
+        path = base / name
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode) or not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            raise SystemExit(f"unsupported data member for safe backup: {path.relative_to(root)}")
 with tarfile.open(out, "w") as archive:
-    archive.add(root, arcname="data", recursive=True, filter=lambda info: None if (info.issym() or info.islnk() or info.isdev() or info.isfifo()) else info)
+    archive.add(root, arcname="data", recursive=True)
 PY
 [ -s "$TMP_DEST/files.tar" ] || { echo "application data archive is empty" >&2; exit 3; }
 
