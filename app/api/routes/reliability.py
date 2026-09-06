@@ -5,10 +5,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import SystemHealthSnapshot, User
+from app.models import PublicRollout, SystemHealthSnapshot, User
 from app.services.adaptive_capacity import active_plan, plan_dict
 from app.services.admin import audit, require_admin
 from app.services.capacity import read_capacity_report
+from app.services.progressive_launch import active_measured_catalog, catalog_dict, evaluate_public_launch, rollout_dict
 from app.services.system_observability import STABLE, collect_system_health, latest_checkpoints
 
 router = APIRouter(prefix="/v1/admin/reliability", tags=["admin-reliability"])
@@ -53,10 +54,7 @@ def _runtime_capacity_match(request: Request, plan) -> tuple[bool, dict]:
         if key not in actual:
             continue
         observed = actual[key]
-        if isinstance(observed, float):
-            equal = abs(float(expected) - observed) < 0.001
-        else:
-            equal = int(expected) == observed
+        equal = abs(float(expected) - observed) < 0.001 if isinstance(observed, float) else int(expected) == observed
         if not equal:
             mismatches[key] = {"expected": expected, "actual": observed}
     return not mismatches, {"actual": actual, "mismatches": mismatches}
@@ -91,30 +89,38 @@ async def release_readiness(request: Request, refresh: bool = Query(default=True
     capacity_plan = active_plan(db)
     runtime_match = None
     if capacity_plan is None:
-        blockers.append({
-            "key": "ops.capacity_plan",
-            "status": "missing",
-            "message": "No approved active capacity plan exists",
-            "recommended_action": "Build, approve and activate a capacity plan from measured beta + target-node calibration data.",
-        })
+        blockers.append({"key": "ops.capacity_plan", "status": "missing", "message": "No approved active capacity plan exists", "recommended_action": "Build, approve and activate a capacity plan from measured beta + target-node calibration data."})
     else:
         matches, runtime_match = _runtime_capacity_match(request, capacity_plan)
         if not matches:
-            blockers.append({
-                "key": "ops.capacity_plan",
-                "status": "degraded",
-                "message": "Active capacity plan does not match the running configuration",
-                "recommended_action": "Apply the generated capacity-plan env artifact and restart the affected runtime before release.",
-                "mismatches": runtime_match["mismatches"],
-            })
+            blockers.append({"key": "ops.capacity_plan", "status": "degraded", "message": "Active capacity plan does not match the running configuration", "recommended_action": "Apply the generated capacity-plan env artifact and restart the affected runtime before release.", "mismatches": runtime_match["mismatches"]})
 
+    measured_catalog = active_measured_catalog(db)
+    if measured_catalog is None:
+        blockers.append({"key": "ops.measured_plan_catalog", "status": "missing", "message": "Measured Free/X1/Pro/Max/Business catalog is not active", "recommended_action": "Propose, review, approve and activate the catalog from closed-beta measurements before public launch."})
+
+    launch_evaluation = evaluate_public_launch(db, request.app.state.settings, persist=False)
+    exposure_enforced = bool(getattr(request.app.state.settings, "public_launch_enforce_exposure", False))
+    latest_rollout = db.scalar(select(PublicRollout).order_by(PublicRollout.version.desc()).limit(1))
+    if exposure_enforced:
+        if latest_rollout is None or latest_rollout.state not in {"active", "complete"}:
+            blockers.append({"key": "ops.public_rollout", "status": "missing", "message": "Public exposure enforcement is enabled without an active/completed rollout", "recommended_action": "Create the rollout and advance it only while public-launch guardrails are green."})
+        if launch_evaluation.get("status") != "stable":
+            blockers.append({"key": "ops.public_launch_guardrails", "status": "degraded", "message": "Public launch watchdog has blockers", "recommended_action": "Resolve circuit breakers/system regressions before increasing public exposure.", "reasons": launch_evaluation.get("blockers") or []})
+
+    required_extra = ["ops.capacity_calibration", "ops.capacity_plan", "ops.measured_plan_catalog"]
+    if exposure_enforced:
+        required_extra += ["ops.public_rollout", "ops.public_launch_guardrails"]
     return {
         "ready_for_public_release": not blockers,
         "app_version": str(getattr(request.app, "version", "unknown")),
-        "required_checkpoints": [*required, "ops.capacity_calibration", "ops.capacity_plan"],
+        "required_checkpoints": [*required, *required_extra],
         "capacity": capacity,
         "capacity_plan": plan_dict(capacity_plan) if capacity_plan else None,
         "capacity_runtime_match": runtime_match,
+        "measured_plan_catalog": catalog_dict(measured_catalog) if measured_catalog else None,
+        "public_rollout": rollout_dict(latest_rollout) if latest_rollout else None,
+        "public_launch_evaluation": launch_evaluation,
         "blockers": blockers,
         "checked_at": result.get("checked_at") if refresh else None,
     }
