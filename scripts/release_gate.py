@@ -176,12 +176,12 @@ def main() -> int:
         checks.append(run("compileall", [*gate_prefix, "python", "-m", "compileall", "-q", "app", "scripts", "tests"], timeout=args.command_timeout))
         checks.append(parse_alembic_heads(run("alembic_heads", [*gate_prefix, "python", "-m", "alembic", "heads"], timeout=args.command_timeout)))
         checks.append(run("long_context_offline", [*gate_prefix, "python", "-m", "scripts.long_context_probe"], timeout=args.command_timeout))
-        checks.append(run("pytest_full", [*gate_prefix, "python", "-m", "pytest", "-q"], timeout=max(60, args.pytest_timeout)))
+        checks.append(run("pytest_full", [*gate_prefix, "python", "-m", "scripts.run_full_regression"], timeout=max(60, args.pytest_timeout)))
     else:
         checks.append(run("compileall", [sys.executable, "-m", "compileall", "-q", "app", "scripts", "tests"], timeout=args.command_timeout, env=python_env))
         checks.append(parse_alembic_heads(run("alembic_heads", [sys.executable, "-m", "alembic", "heads"], timeout=args.command_timeout, env=python_env)))
         checks.append(run("long_context_offline", [sys.executable, "-m", "scripts.long_context_probe"], timeout=args.command_timeout, env=python_env))
-        checks.append(run("pytest_full", [sys.executable, "-m", "pytest", "-q"], timeout=max(60, args.pytest_timeout), env=python_env))
+        checks.append(run("pytest_full", [sys.executable, "-m", "scripts.run_full_regression"], timeout=max(60, args.pytest_timeout), env=python_env))
 
     if docker:
         checks.append(run("compose_config", ["docker", "compose", "config", "--quiet"], timeout=args.command_timeout))
@@ -221,6 +221,7 @@ def main() -> int:
         "mode": "runtime" if args.runtime else "static",
         "live_inference_requested": bool(args.live_inference),
         "containerized_gate": containerized_gate,
+        "historical_regression_modules": 45,
         "started_at": started_at,
         "finished_at": utcnow(),
         "failed_required_checks": failed_required,
