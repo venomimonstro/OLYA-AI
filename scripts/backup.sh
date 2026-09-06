@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${X1_INSTALL_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT"
 
 FINAL_DEST="${1:-$ROOT/backups/$(date -u +%Y%m%dT%H%M%SZ)}"
