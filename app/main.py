@@ -121,6 +121,7 @@ async def lifespan(app: FastAPI):
 
     beta_scheduler_task = None
     public_launch_task = None
+    maintenance_task = None
     if is_production and settings.beta_operations_scheduler_enabled:
         from app.services.beta_scheduler import beta_operations_loop
         beta_scheduler_task = asyncio.create_task(beta_operations_loop(settings), name="x1-beta-operations")
@@ -129,10 +130,16 @@ async def lifespan(app: FastAPI):
         from app.services.public_launch_scheduler import public_launch_watchdog_loop
         public_launch_task = asyncio.create_task(public_launch_watchdog_loop(app), name="x1-public-launch-watchdog")
         app.state.public_launch_watchdog_task = public_launch_task
+    if is_production and settings.maintenance_enabled:
+        from app.services.maintenance import maintenance_loop
+        app.state.maintenance_last_ok_at = None
+        app.state.maintenance_last_error = ""
+        maintenance_task = asyncio.create_task(maintenance_loop(app), name="x1-ephemeral-maintenance")
+        app.state.maintenance_task = maintenance_task
     try:
         yield
     finally:
-        for task in (public_launch_task, beta_scheduler_task):
+        for task in (maintenance_task, public_launch_task, beta_scheduler_task):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
