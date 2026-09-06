@@ -51,12 +51,11 @@ async def lifespan(app: FastAPI):
         init_db()
     app.state.settings = settings
     app.state.llama = LlamaClient(settings.llama_base_url, settings.request_timeout_seconds)
-    # Allocate the compiler for the largest supported route. Each request still
-    # supplies its own fast/work/deep budget when compile() is called.
     app.state.context = ContextCompiler(max_chars=settings.deep_context_tokens * 6)
     app.state.governor = ResourceGovernor(
         max_concurrent=settings.max_concurrent_generations,
         max_queue=settings.max_queue_size,
+        wait_timeout_seconds=settings.inference_queue_timeout_seconds,
     )
     app.state.user_governor = UserResourceGovernor()
     app.state.research = ResearchFetcher(
