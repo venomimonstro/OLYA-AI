@@ -1,12 +1,12 @@
 import asyncio
 import contextlib
 import logging
-import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.routes.account import router as account_router
@@ -43,6 +43,7 @@ from app.db import init_db
 from app.inference.client import LlamaClient
 from app.services.context import ContextCompiler
 from app.services.discovery import BraveSearchDiscovery, DisabledDiscovery, ProviderPoolDiscovery
+from app.services.documents import configure_render_gate
 from app.services.http_limits import RequestBodyLimitMiddleware
 from app.services.resource_governor import ResourceGovernor
 from app.services.user_resource_governor import UserResourceGovernor
@@ -69,16 +70,21 @@ async def lifespan(app: FastAPI):
         wait_timeout_seconds=settings.inference_queue_timeout_seconds,
     )
     app.state.user_governor = UserResourceGovernor()
-    # LibreOffice/pdftoppm are expensive on the target CPU/RAM node. This gate is
-    # independent from inference so concurrent document QA cannot OOM the host.
-    app.state.document_render_gate = threading.BoundedSemaphore(max(1, int(settings.document_max_concurrent_renders)))
+    configure_render_gate(
+        settings.document_max_concurrent_renders,
+        settings.document_render_queue_timeout_seconds,
+    )
     app.state.research = ResearchFetcher(
         timeout_seconds=settings.research_timeout_seconds,
         max_bytes=settings.research_max_bytes,
         max_chars=settings.research_max_chars,
         max_redirects=settings.research_max_redirects,
     )
-    configured = [item.strip().lower() for item in (settings.search_providers or settings.search_provider).split(",") if item.strip()]
+    configured = [
+        item.strip().lower()
+        for item in (settings.search_providers or settings.search_provider).split(",")
+        if item.strip()
+    ]
     providers = []
     for name in configured:
         if name == "searxng":
@@ -150,6 +156,16 @@ def robots() -> PlainTextResponse:
 async def stale_task_state_handler(request: Request, exc: StaleDataError):
     _ = request, exc
     return JSONResponse(status_code=409, content={"detail": "Concurrent task state update conflict"})
+
+
+@app.exception_handler(SQLAlchemyTimeoutError)
+async def database_pool_timeout_handler(request: Request, exc: SQLAlchemyTimeoutError):
+    _ = request, exc
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database capacity is temporarily busy; retry shortly"},
+        headers={"Retry-After": "2"},
+    )
 
 
 def _include_product_router(module: str) -> None:
