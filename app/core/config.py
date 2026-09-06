@@ -35,7 +35,11 @@ class Settings(BaseSettings):
     max_docx_unpacked_bytes: int = 100 * 1024 * 1024
     file_parse_timeout_seconds: int = 45
     file_parse_memory_mb: int = 768
+    file_parse_queue_timeout_seconds: float = 5.0
     file_max_extracted_chars: int = 2_000_000
+    file_user_storage_quota_bytes: int = 2 * 1024 * 1024 * 1024
+    file_storage_min_free_bytes: int = 2 * 1024 * 1024 * 1024
+    file_storage_min_free_percent: float = 10.0
 
     document_storage_path: str = "./data/documents"
     document_render_timeout_seconds: int = 60
