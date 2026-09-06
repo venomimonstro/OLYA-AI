@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: x1
       POSTGRES_USER: x1
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-x1-dev-only}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - x1_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -24,11 +24,26 @@ services:
     env_file: .env
     environment:
       X1_DATABASE_AUTO_CREATE_SCHEMA: "false"
+      # One credential source for both PostgreSQL and the application prevents
+      # the previous x1/x1-dev-only password mismatch on a fresh installation.
+      X1_DATABASE_URL: postgresql+psycopg://x1:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/x1
     ports:
-      - "8000:8000"
+      # Safer default for a production node: expose X1 through a TLS reverse
+      # proxy. Set X1_BIND_ADDRESS=0.0.0.0 explicitly only when appropriate.
+      - "${X1_BIND_ADDRESS:-127.0.0.1}:${X1_PORT:-8000}:8000"
+    volumes:
+      # All user-created artifacts survive image rebuilds and container recreate.
+      - x1_data:/app/data
+      - x1_backups:/app/backups
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -60,3 +75,5 @@ services:
 
 volumes:
   x1_pgdata:
+  x1_data:
+  x1_backups:
