@@ -20,9 +20,6 @@ class _AttemptLimiter:
         with self._lock:
             bucket = self._events.get(key)
             if bucket is None:
-                # Sweep oldest stale buckets first. If an attacker keeps spraying
-                # never-before-seen emails/IPs, evict the oldest bucket instead of
-                # letting the protection structure itself become an unbounded DoS.
                 while self._events:
                     oldest_key, oldest_values = next(iter(self._events.items()))
                     while oldest_values and oldest_values[0] <= cutoff:
@@ -61,13 +58,17 @@ def _valid_ip(value: str) -> str | None:
 def _client_ip(request: Request) -> str:
     peer_raw = request.client.host if request.client else "unknown"
     peer = _valid_ip(peer_raw) or peer_raw[:128]
-    # Only a direct loopback reverse proxy may assert the original address.
+    # X1's supported public topology has exactly one trusted local reverse proxy.
+    # A proxy normally appends the real client address to any attacker-supplied
+    # X-Forwarded-For chain, so use the LAST valid hop, not the first spoofable
+    # value. If the direct peer is not loopback, ignore forwarding headers entirely.
     if peer in {"127.0.0.1", "::1"}:
         forwarded = request.headers.get("x-forwarded-for", "")
         if forwarded:
-            candidate = _valid_ip(forwarded.split(",", 1)[0])
-            if candidate:
-                return candidate
+            for raw in reversed(forwarded.split(",")):
+                candidate = _valid_ip(raw)
+                if candidate:
+                    return candidate
     return peer
 
 
@@ -78,8 +79,6 @@ def enforce_auth_rate_limit(request: Request, *, email: str, action: str, enviro
     ip_limit = 12 if action == "register" else 30
     if not _limiter.consume(f"auth:{action}:ip:{ip}", limit=ip_limit):
         raise HTTPException(status_code=429, detail="Too many authentication attempts", headers={"Retry-After": "60"})
-    # Hashing prevents attacker-controlled email strings from becoming large map
-    # keys while preserving independent per-account throttling.
     import hashlib
     email_key = hashlib.sha256(email.casefold().encode("utf-8", errors="ignore")).hexdigest()[:24]
     if not _limiter.consume(f"auth:{action}:email:{email_key}", limit=8):
