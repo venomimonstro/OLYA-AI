@@ -35,38 +35,43 @@ Production Release Gate: isolated test container, historical Sprint 0–26 regre
 ## Sprint 36 — DONE (implementation; real target-node data required)
 
 Target-Node Capacity & Closed-Beta Launch Calibration:
-- `scripts/capacity_calibrate.py` measures the deployed llama container rather than using estimated limits;
-- candidate contexts: 8192 / 12288 / 16384;
-- each candidate records live inference success, p95 latency, peak llama RSS, swap growth and minimum host MemAvailable;
-- automatic recommendation chooses the largest context that passes memory/swap/latency guardrails;
-- recommended concurrency remains conservative for the CPU node and queue size/timeout are derived from measured service latency;
-- calibration produces `capacity-latest.json` and a review-only `capacity-recommended.env`;
-- release gate now runs capacity calibration during `--runtime --live-inference`;
-- public release readiness blocks when target-node capacity data are missing/stale/failed;
-- beta analytics now include D30, p50/p95/p99 latency and queue, quality-supported request metrics and explicit active/paused/removed participant counts;
-- `GET /v1/admin/beta/current` returns live metrics without mutating history;
-- `GET /v1/admin/beta/calibration` combines measured server capacity with measured beta behavior;
-- measured monthly compute limits are not recalculated until the beta data gate is met: 50–100 participants and >=500 tasks;
-- D1/D7/D30 are reported as product signals; no arbitrary retention release threshold is invented.
+- live target-node 8K / 12K / 16K context probes;
+- p95 latency, llama RSS, swap growth and MemAvailable guardrails;
+- current capacity report required by public release readiness;
+- D1/D7/D30, p50/p95/p99, frustration, quality-supported request metrics and verified-success/CPU-minute;
+- measured compute-plan recalculation only after 50–100 participants and >=500 tasks.
 
-### Sprint 36 target-node gate
-
-On the actual production CPU/RAM node:
-
-```bash
-python3 scripts/release_gate.py --runtime --live-inference
-```
-
-The generated capacity report must be current and `GET /v1/admin/reliability/release-readiness` must return no blockers.
-
-## Sprint 37 — NEXT
+## Sprint 37 — DONE (implementation; real beta telemetry required for final numeric limits)
 
 Closed-Beta Operations & Adaptive Capacity Control:
-- cohort rollout waves instead of admitting all users at once;
-- per-wave capacity budgets and automatic admission pause when queue/error/frustration guardrails break;
-- real daily D1/D7/D30 trend comparison;
-- anomaly detection for regressions in quality, latency, queue, compute efficiency and frustration;
-- capacity-plan versioning and safe operator approval before changing `.env` limits;
-- rollback to last-known-good capacity plan;
-- beta feedback triage integrated with Complaint Regression;
-- final measured Free/X1/Pro/Max/Business limits based on actual production CPU economics rather than assumptions.
+- persistent `BetaWave` lifecycle: planned → open → observing/paused → closed;
+- staged participant admission instead of opening the beta to everyone at once;
+- per-wave participant cap and independent CPU compute budget;
+- admission is fail-closed when the target-node calibration is stale/failed;
+- admission automatically pauses when wave success-rate, frustration, p95 queue/duration, verified-success/CPU efficiency or compute-budget guardrails fail;
+- explicit audited admin override is available for exceptional admissions;
+- production beta scheduler stores no more than one historical snapshot per configured interval and re-evaluates the active wave without running inference;
+- D1/D7/D30 history plus anomaly detection for quality, latency, queue, compute efficiency and frustration;
+- persistent versioned `CapacityPlan`: draft → approved → active, with signals, guardrails and diff from the previous plan;
+- approval is blocked while measured calibration is incomplete or has blockers;
+- live-safe reductions can be applied without restart; increases beyond the boot llama/governor envelope remain pending until the generated secret-free env artifact is applied and the runtime restarted;
+- a pending-restart plan never replaces the currently active known-good plan in database state;
+- rollback is append-only: X1 creates a new capacity-plan version based on a previously active plan;
+- public release readiness requires an active capacity plan that matches the running configuration;
+- beta feedback is joined with cohort/wave context and confirmed beta defects flow into the existing Complaint Regression system rather than a parallel bug tracker;
+- `/admin/beta` exposes admission state, beta signals, trends, waves, capacity plans and feedback triage.
+
+Final Free/X1/Pro/Max/Business numeric limits are deliberately **not fabricated** in Sprint 37. They must be calculated from the actual target node plus the required real beta sample.
+
+## Sprint 38 — NEXT
+
+Progressive Public Launch & Measured Plan Finalization:
+- convert the completed closed-beta measurements into final measured Free/X1/Pro/Max/Business resource envelopes and unit economics;
+- introduce canary public rollout waves after closed beta instead of one global launch switch;
+- automated comparison of canary vs last-known-good quality, latency, frustration and verified-success/CPU-minute;
+- rollback/freeze of public expansion when canary guardrails regress;
+- quota fairness under mixed Fast/Work/Deep/API/image workloads so one workload cannot starve the node;
+- abuse/cost circuit breakers tied to measured CPU economics;
+- operator incident runbook and launch dashboard for capacity, queue, quality, complaints and rollback state;
+- require a fresh Sprint 35–37 release/capacity/restore evidence set before each public expansion step;
+- after sufficient real data, persist the production tariff limits as a versioned commercial capacity policy rather than static assumptions.
