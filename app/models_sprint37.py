@@ -31,6 +31,7 @@ class BetaWave(Base):
     state: Mapped[str] = mapped_column(String(24), default="planned", index=True)
     target_participants: Mapped[int] = mapped_column(Integer, default=10)
     admitted_count: Mapped[int] = mapped_column(Integer, default=0)
+    compute_budget_seconds: Mapped[int] = mapped_column(Integer, default=0)
     admission_paused: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     pause_reason: Mapped[str] = mapped_column(String(500), default="")
     baseline_metrics: Mapped[dict] = mapped_column(JSON, default=dict)
