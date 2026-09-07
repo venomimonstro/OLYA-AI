@@ -38,9 +38,34 @@ def _service_section(rendered: str, service: str) -> str:
             return ""
     else:
         rest = rendered.split(marker, 1)[1]
-    # Next top-level service is exactly two spaces before a non-space token.
     match = re.search(r"\n  [A-Za-z0-9_.-]+:\n", rest)
     return rest[: match.start()] if match else rest
+
+
+def _env_value(text: str, key: str) -> str:
+    prefix = key + "="
+    value = ""
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            value = line.split("=", 1)[1].strip()
+    return value
+
+
+def _memory_gib(value: str) -> float | None:
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([gGmM])(?:[bB])?\s*", value or "")
+    if not match:
+        return None
+    number = float(match.group(1))
+    return number if match.group(2).lower() == "g" else number / 1024.0
+
+
+def _host_memory_gib() -> float:
+    try:
+        text = Path("/proc/meminfo").read_text("utf-8")
+        match = re.search(r"^MemTotal:\s+(\d+)\s+kB", text, flags=re.MULTILINE)
+        return int(match.group(1)) / 1024.0 / 1024.0 if match else 0.0
+    except (OSError, ValueError):
+        return 0.0
 
 
 def main() -> int:
@@ -67,6 +92,20 @@ def main() -> int:
     inference_expected = "X1_LLAMA_BASE_URL=http://llama:8080" in env_text
     if inference_expected:
         checks.append(result("qwen_model", "stable" if MODEL.is_file() and MODEL.stat().st_size > 17_000_000_000 else "failed", f"{MODEL} ({MODEL.stat().st_size if MODEL.exists() else 0} bytes)"))
+        host_gib = _host_memory_gib()
+        llama_gib = _memory_gib(_env_value(env_text, "X1_LLAMA_MEMORY_LIMIT"))
+        max_safe = max(0.0, host_gib - 8.0)
+        memory_ok = bool(host_gib >= 29.5 and llama_gib is not None and llama_gib <= min(24.0, max_safe) + 0.05)
+        checks.append(result(
+            "host_memory_budget",
+            "stable" if memory_ok else "failed",
+            json.dumps({
+                "host_gib": round(host_gib, 2),
+                "llama_limit_gib": None if llama_gib is None else round(llama_gib, 2),
+                "required_non_llama_reserve_gib": 8,
+                "safe_llama_ceiling_gib": round(min(24.0, max_safe), 2),
+            }),
+        ))
 
     if shutil.which("docker"):
         compose = cmd(["docker", "compose", "config"])
@@ -92,8 +131,6 @@ def main() -> int:
         data_probe = cmd(["docker", "compose", "exec", "-T", "app", "python", "-c", "from pathlib import Path; p=Path('/app/data'); p.mkdir(parents=True,exist_ok=True); assert p.is_dir() and p.exists()"])
         checks.append(result("app_data_runtime", "stable" if data_probe and data_probe.returncode == 0 else "failed", "writable persistent data path" if data_probe and data_probe.returncode == 0 else "app data path unavailable"))
 
-        # SearXNG is itself a Python application; use Python stdlib instead of
-        # assuming an incidental wget/curl binary exists in the pinned image.
         search_probe = cmd([
             "docker", "compose", "exec", "-T", "searxng", "python", "-c",
             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/search?q=x1-doctor&format=json',timeout=5).read()",
