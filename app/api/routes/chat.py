@@ -137,6 +137,7 @@ async def chat(
                 ),
                 quality=None,
                 development=dev.state.model_dump(mode="json"),
+                conversation_id=getattr(dev.state, "conversation_id", None) or payload.conversation_id,
             )
 
     repeat_query = detect_repeat_query(db, payload.conversation_id, user_text)
@@ -184,9 +185,6 @@ async def chat(
 
     raw_chars = sum(len(message.content) for message in trusted)
     max_tokens = min(payload.max_output_tokens or route.max_output_tokens, route.max_output_tokens)
-    # Total llama.cpp context = prompt + generated output. Keep a safety margin and
-    # use a conservative char/token ratio for Russian/multilingual text rather
-    # than the previous optimistic 6 chars/token approximation.
     prompt_tokens = max(512, route.max_context_tokens - max_tokens - 384)
     prompt_char_budget = prompt_tokens * 3
     compiled = request.app.state.context.compile(trusted, max_chars=prompt_char_budget)
@@ -197,11 +195,7 @@ async def chat(
 
     # Never hold a PostgreSQL connection while waiting for the CPU inference
     # queue or while Qwen is generating. This transaction contains only bounded
-    # reads plus durable conversation/quota state. Committing here releases the
-    # DB connection back to the small production pool; answer/telemetry writes
-    # below use a new short transaction. It also keeps a new conversation valid
-    # when inference fails, so the failure UsageEvent cannot reference a row that
-    # was erased by rollback.
+    # reads plus durable conversation/quota state.
     db.commit()
 
     request_id = str(uuid4())
@@ -392,6 +386,7 @@ async def chat(
             verification=payload.verification,
         ),
         quality=quality_report,
+        conversation_id=conversation.id,
     )
 
 
