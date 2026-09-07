@@ -200,8 +200,6 @@ async def upload_file(
             queue_timeout_seconds=float(settings.file_parse_queue_timeout_seconds),
         )
     except FileParseBusyError as exc:
-        # Capacity pressure is transient, not a corrupt user document. Do not
-        # leave a permanent red/error artifact that the user must manually delete.
         _remove_failed_processing_file(db, file, destination)
         raise HTTPException(
             status_code=503,
@@ -219,14 +217,20 @@ async def upload_file(
             return row
         raise HTTPException(status_code=422, detail="File parsing failed") from exc
 
-    row = db.get(ProjectFile, file.id)
-    if row is None:
-        raise HTTPException(status_code=409, detail="File upload state disappeared during parsing")
     chunks = chunk_segments(
         segments,
         max_chars=settings.file_chunk_chars,
         overlap_chars=settings.file_chunk_overlap_chars,
     )
+
+    # Reacquire the project serialization lock before publishing parser results.
+    # If a newer version already completed while this older parser was running,
+    # the older request must never steal the current flag back from it.
+    db.execute(select(Project.id).where(Project.id == project_id).with_for_update())
+    row = db.get(ProjectFile, file.id)
+    if row is None:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="File upload state disappeared during parsing")
     if not chunks:
         row.status = "error"
         row.error_message = "No readable text found"
@@ -247,19 +251,33 @@ async def upload_file(
                 char_count=len(item.text),
             )
         )
-    db.execute(
-        update(ProjectFile)
+
+    newer_current = db.scalar(
+        select(ProjectFile.id)
         .where(
             ProjectFile.project_id == project_id,
             ProjectFile.logical_name == name,
-            ProjectFile.id != row.id,
+            ProjectFile.version > row.version,
             ProjectFile.is_current.is_(True),
         )
-        .values(is_current=False)
+        .limit(1)
     )
+    if newer_current is None:
+        db.execute(
+            update(ProjectFile)
+            .where(
+                ProjectFile.project_id == project_id,
+                ProjectFile.logical_name == name,
+                ProjectFile.id != row.id,
+                ProjectFile.is_current.is_(True),
+            )
+            .values(is_current=False)
+        )
+        row.is_current = True
+    else:
+        row.is_current = False
     row.status = "ready"
     row.error_message = ""
-    row.is_current = True
     db.commit()
     db.refresh(row)
     return row
