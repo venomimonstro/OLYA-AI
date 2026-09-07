@@ -129,18 +129,27 @@ def main() -> int:
     started_at = utcnow(); checks: list[dict[str, Any]] = []
     python_env = dict(os.environ); python_env["PYTHONPATH"] = str(ROOT)
     docker = docker_available(); containerized_gate = bool(docker and (ROOT / ".env").exists())
+    shell_scripts = sorted(path.relative_to(ROOT).as_posix() for path in (ROOT / "scripts").glob("*.sh"))
+    if not shell_scripts:
+        checks.append({"name": "shell_syntax", "status": "failed", "required": True, "detail": "No shell scripts found"})
 
     if containerized_gate:
         checks.append(run("gate_image_build", ["docker", "compose", "--profile", "gate", "build", "gate"], timeout=max(args.command_timeout, 1200)))
         gate_prefix = ["docker", "compose", "--profile", "gate", "run", "--rm", "--no-deps", "gate"]
+        if shell_scripts:
+            checks.append(run("shell_syntax", [*gate_prefix, "bash", "-n", *shell_scripts], timeout=args.command_timeout))
         checks.append(run("compileall", [*gate_prefix, "python", "-m", "compileall", "-q", "app", "scripts", "tests"], timeout=args.command_timeout))
+        checks.append(run("static_contract_audit", [*gate_prefix, "python", "-m", "scripts.static_contract_audit"], timeout=args.command_timeout))
         checks.append(run("stability_probe", [*gate_prefix, "python", "-m", "scripts.stability_probe"], timeout=args.command_timeout))
         checks.append(run("document_render_probe", [*gate_prefix, "python", "-m", "scripts.document_render_probe"], timeout=max(args.command_timeout, 180)))
         checks.append(parse_alembic_heads(run("alembic_heads", [*gate_prefix, "python", "-m", "alembic", "heads"], timeout=args.command_timeout)))
         checks.append(run("long_context_offline", [*gate_prefix, "python", "-m", "scripts.long_context_probe"], timeout=args.command_timeout))
         checks.append(run("pytest_full", [*gate_prefix, "python", "-m", "scripts.run_full_regression"], timeout=max(60, args.pytest_timeout)))
     else:
+        if shell_scripts:
+            checks.append(run("shell_syntax", ["bash", "-n", *shell_scripts], timeout=args.command_timeout, env=python_env))
         checks.append(run("compileall", [sys.executable, "-m", "compileall", "-q", "app", "scripts", "tests"], timeout=args.command_timeout, env=python_env))
+        checks.append(run("static_contract_audit", [sys.executable, "-m", "scripts.static_contract_audit"], timeout=args.command_timeout, env=python_env))
         checks.append(run("stability_probe", [sys.executable, "-m", "scripts.stability_probe"], timeout=args.command_timeout, env=python_env))
         if shutil.which("libreoffice") or shutil.which("soffice"):
             checks.append(run("document_render_probe", [sys.executable, "-m", "scripts.document_render_probe"], timeout=max(args.command_timeout, 180), env=python_env))
