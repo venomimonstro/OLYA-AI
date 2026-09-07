@@ -125,6 +125,11 @@ def memory_gb(value):
     if not match: return None
     number=float(match.group(1)); return number if match.group(2).lower()=='g' else number/1024.0
 
+def bounded_int(key, default, lower, upper):
+    try: value=int(values.get(key, default))
+    except (TypeError, ValueError): value=int(default)
+    return max(int(lower), min(int(upper), value))
+
 setv('X1_ENV','production'); setv('X1_BIND_ADDRESS','127.0.0.1'); setv('X1_HOST_DATA_ROOT',host_data)
 ensure_secret('POSTGRES_PASSWORD',generated_db,{'change-me-db'}); db=values['POSTGRES_PASSWORD']; setv('X1_DATABASE_URL',f'postgresql+psycopg://x1:{db}@db:5432/x1')
 ensure_secret('X1_ADMIN_BOOTSTRAP_TOKEN',generated_admin,{'change-me'}); ensure_secret('X1_PROJECT_RUNTIME_SECRET_KEY',generated_runtime,{'change-me-runtime-secret'}); ensure_secret('X1_PROJECT_SANDBOX_WORKER_TOKEN',generated_sandbox,{'change-me-sandbox-worker'})
@@ -138,12 +143,23 @@ setv('X1_PUBLIC_LAUNCH_ENFORCE_EXPOSURE','true')
 current_memory=memory_gb(values.get('X1_LLAMA_MEMORY_LIMIT'))
 if current_memory is None or current_memory > llama_memory_gb:
     setv('X1_LLAMA_MEMORY_LIMIT',f'{llama_memory_gb}g')
+
+# The llama container is always booted with X1_DEEP_CONTEXT_TOKENS. Therefore
+# every other model-facing context limit must be <= that physical ceiling. This
+# normalization also repairs old installations that carried a larger Work limit
+# from a previous server or version.
 if new_env:
-    setv('X1_MAX_CONTEXT_TOKENS',min(8192,safe_context)); setv('X1_DEEP_CONTEXT_TOKENS',safe_context); setv('X1_LLAMA_THREADS',threads); setv('X1_LLAMA_THREADS_BATCH',threads)
+    deep_context=safe_context
+    normal_context=min(8192,deep_context)
 else:
-    try: current=int(values.get('X1_DEEP_CONTEXT_TOKENS',safe_context))
-    except ValueError: current=safe_context
-    if current>safe_context: setv('X1_DEEP_CONTEXT_TOKENS',safe_context)
+    deep_context=bounded_int('X1_DEEP_CONTEXT_TOKENS',safe_context,1024,safe_context)
+    normal_context=bounded_int('X1_MAX_CONTEXT_TOKENS',min(8192,deep_context),1024,deep_context)
+setv('X1_DEEP_CONTEXT_TOKENS',deep_context)
+setv('X1_MAX_CONTEXT_TOKENS',min(normal_context,deep_context))
+
+if new_env:
+    setv('X1_LLAMA_THREADS',threads); setv('X1_LLAMA_THREADS_BATCH',threads)
+else:
     if not values.get('X1_LLAMA_THREADS'): setv('X1_LLAMA_THREADS',threads)
     if not values.get('X1_LLAMA_THREADS_BATCH'): setv('X1_LLAMA_THREADS_BATCH',threads)
 for key,value in {'X1_HTTP_LIMIT_CONCURRENCY':'128','X1_HTTP_BACKLOG':'2048','X1_HTTP_KEEPALIVE_SECONDS':'5'}.items():
