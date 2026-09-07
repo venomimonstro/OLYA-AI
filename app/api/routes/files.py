@@ -2,19 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import shutil
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import FileChunk, ProjectFile, User
+from app.models import FileChunk, Project, ProjectFile, User
 from app.schemas.files import FileChunkRead, FileRead
 from app.services.access import require_project_role
 from app.services.auth import get_current_user
-from app.services.file_parse_isolation import FileParseError, parse_file_isolated
+from app.services.file_parse_isolation import FileParseBusyError, FileParseError, parse_file_isolated
 from app.services.files import (
     chunk_segments,
     next_file_version,
@@ -55,6 +56,51 @@ def _download_disposition(filename: str) -> str:
     return f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{encoded}'
 
 
+def _ensure_storage_capacity(db: Session, user: User, root: Path, incoming_bytes: int, settings) -> None:
+    """Fail before writing when either host disk or per-user storage is exhausted."""
+    root.mkdir(parents=True, exist_ok=True)
+    usage = shutil.disk_usage(root)
+    minimum_bytes = max(0, int(settings.file_storage_min_free_bytes))
+    minimum_percent = max(0.0, min(99.0, float(settings.file_storage_min_free_percent)))
+    required_free = max(minimum_bytes, int(usage.total * minimum_percent / 100.0))
+    if usage.free - max(0, int(incoming_bytes)) < required_free:
+        raise HTTPException(
+            status_code=507,
+            detail="File storage does not have enough safe free space for this upload",
+        )
+
+    used = int(
+        db.scalar(
+            select(func.coalesce(func.sum(ProjectFile.size_bytes), 0)).where(
+                ProjectFile.uploaded_by == user.id
+            )
+        )
+        or 0
+    )
+    quota = max(0, int(settings.file_user_storage_quota_bytes))
+    if quota and used + incoming_bytes > quota:
+        raise HTTPException(status_code=507, detail="User file storage quota reached")
+
+
+def _remove_failed_processing_file(db: Session, file: ProjectFile, destination: Path) -> None:
+    """Remove a transient processing row/file when no parsing slot was available."""
+    try:
+        row = db.get(ProjectFile, file.id)
+        if row is not None:
+            db.delete(row)
+            db.commit()
+    except Exception:
+        db.rollback()
+    try:
+        if destination.is_file():
+            destination.unlink()
+        parent = destination.parent
+        if parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError:
+        pass
+
+
 @router.post("/{project_id}/files", response_model=FileRead, status_code=status.HTTP_201_CREATED)
 async def upload_file(
     project_id: str,
@@ -66,11 +112,24 @@ async def upload_file(
 ) -> ProjectFile:
     _project, role = require_project_role(db, user, project_id, "member")
     settings = request.app.state.settings
+
+    # Authorization is already complete. Do not keep a PostgreSQL transaction
+    # checked out while an untrusted client slowly streams up to 20 MiB.
+    db.commit()
     content = await _read_limited_body(request, int(settings.max_file_size_bytes))
     if not content:
         raise HTTPException(status_code=400, detail="Empty file")
 
     name = safe_filename(logical_name or filename)
+    digest = sha256_bytes(content)
+    root = Path(settings.file_storage_path).resolve()
+
+    # Serialize file version allocation within a project and user quota admission
+    # within an account. Both locks are held only for bounded DB/filesystem work;
+    # never across parser execution.
+    db.execute(select(Project.id).where(Project.id == project_id).with_for_update())
+    db.execute(select(User.id).where(User.id == user.id).with_for_update())
+
     current_same_name = db.scalar(
         select(ProjectFile).where(
             ProjectFile.project_id == project_id,
@@ -79,9 +138,9 @@ async def upload_file(
         )
     )
     if current_same_name is not None and role not in {"owner", "manager"}:
+        db.rollback()
         raise HTTPException(status_code=403, detail="Only project manager can replace an existing file")
 
-    digest = sha256_bytes(content)
     existing = db.scalar(
         select(ProjectFile).where(
             ProjectFile.project_id == project_id,
@@ -91,8 +150,10 @@ async def upload_file(
         )
     )
     if existing is not None:
+        db.commit()
         return existing
 
+    _ensure_storage_capacity(db, user, root, len(content), settings)
     version = next_file_version(db, project_id, name)
     file = ProjectFile(
         project_id=project_id,
@@ -109,16 +170,24 @@ async def upload_file(
     db.add(file)
     db.flush()
 
-    root = Path(settings.file_storage_path).resolve()
     destination = storage_path(root, project_id, file.id, version, filename)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(content)
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+    except OSError as exc:
+        db.rollback()
+        try:
+            if destination.is_file():
+                destination.unlink()
+        except OSError:
+            pass
+        raise HTTPException(status_code=507, detail="File storage is temporarily unavailable") from exc
+
     file.storage_path = str(destination)
+    # Durable processing state + released row locks before parser queue/child.
+    db.commit()
 
     try:
-        # PDF/DOCX parsers are complex and process attacker-controlled bytes. Do
-        # not run them inside the single async API process: a malformed parser
-        # workload must be killable without freezing chat/auth/health endpoints.
         segments = await asyncio.to_thread(
             parse_file_isolated,
             destination,
@@ -128,45 +197,72 @@ async def upload_file(
             max_extracted_chars=int(settings.file_max_extracted_chars),
             timeout_seconds=int(settings.file_parse_timeout_seconds),
             memory_mb=int(settings.file_parse_memory_mb),
+            queue_timeout_seconds=float(settings.file_parse_queue_timeout_seconds),
         )
-        chunks = chunk_segments(
-            segments,
-            max_chars=settings.file_chunk_chars,
-            overlap_chars=settings.file_chunk_overlap_chars,
-        )
-        if not chunks:
-            raise FileParseError("No readable text found")
-        for ordinal, item in enumerate(chunks):
-            chunk_digest = sha256_bytes(item.text.encode("utf-8"))
-            db.add(
-                FileChunk(
-                    file_id=file.id,
-                    ordinal=ordinal,
-                    page_number=item.page_number,
-                    content=item.text,
-                    content_sha256=chunk_digest,
-                    char_count=len(item.text),
-                )
+    except FileParseBusyError as exc:
+        # Capacity pressure is transient, not a corrupt user document. Do not
+        # leave a permanent red/error artifact that the user must manually delete.
+        _remove_failed_processing_file(db, file, destination)
+        raise HTTPException(
+            status_code=503,
+            detail="File parser is at safe capacity; retry shortly",
+            headers={"Retry-After": "3"},
+        ) from exc
+    except FileParseError as exc:
+        row = db.get(ProjectFile, file.id)
+        if row is not None:
+            row.status = "error"
+            row.error_message = str(exc)[:1000]
+            row.is_current = False
+            db.commit()
+            db.refresh(row)
+            return row
+        raise HTTPException(status_code=422, detail="File parsing failed") from exc
+
+    row = db.get(ProjectFile, file.id)
+    if row is None:
+        raise HTTPException(status_code=409, detail="File upload state disappeared during parsing")
+    chunks = chunk_segments(
+        segments,
+        max_chars=settings.file_chunk_chars,
+        overlap_chars=settings.file_chunk_overlap_chars,
+    )
+    if not chunks:
+        row.status = "error"
+        row.error_message = "No readable text found"
+        row.is_current = False
+        db.commit()
+        db.refresh(row)
+        return row
+
+    for ordinal, item in enumerate(chunks):
+        chunk_digest = sha256_bytes(item.text.encode("utf-8"))
+        db.add(
+            FileChunk(
+                file_id=row.id,
+                ordinal=ordinal,
+                page_number=item.page_number,
+                content=item.text,
+                content_sha256=chunk_digest,
+                char_count=len(item.text),
             )
-        db.execute(
-            update(ProjectFile)
-            .where(
-                ProjectFile.project_id == project_id,
-                ProjectFile.logical_name == name,
-                ProjectFile.id != file.id,
-                ProjectFile.is_current.is_(True),
-            )
-            .values(is_current=False)
         )
-        file.status = "ready"
-        file.is_current = True
-    except Exception as exc:
-        file.status = "error"
-        file.error_message = str(exc)[:1000]
-        file.is_current = False
+    db.execute(
+        update(ProjectFile)
+        .where(
+            ProjectFile.project_id == project_id,
+            ProjectFile.logical_name == name,
+            ProjectFile.id != row.id,
+            ProjectFile.is_current.is_(True),
+        )
+        .values(is_current=False)
+    )
+    row.status = "ready"
+    row.error_message = ""
+    row.is_current = True
     db.commit()
-    db.refresh(file)
-    return file
+    db.refresh(row)
+    return row
 
 
 @router.get("/{project_id}/files", response_model=list[FileRead])
