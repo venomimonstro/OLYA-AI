@@ -78,3 +78,7 @@ class ChatResponse(BaseModel):
     usage: ChatUsage
     quality: QualityReport | None = None
     development: dict[str, Any] | None = None
+    # Clients need the server-owned conversation identifier after the first turn.
+    # Without it a UI must resend client-authored assistant text and loses the
+    # canonical history/trust boundary on every message.
+    conversation_id: str | None = None
