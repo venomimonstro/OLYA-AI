@@ -18,7 +18,12 @@ _CORE_SYSTEM_POLICY = (
 
 
 class ContextCompiler:
-    """Deterministic low-RAM compiler for long chats."""
+    """Deterministic low-RAM compiler for long chats.
+
+    Sprint 45 reserves prompt space for the current/hot conversation before
+    admitting project-memory/system payloads. Long-term memory is useful only if
+    it cannot evict the user's current request.
+    """
 
     def __init__(self, max_chars: int = 48_000, max_message_chars: int | None = None) -> None:
         self.max_chars = max(128, int(max_chars))
@@ -42,21 +47,36 @@ class ContextCompiler:
 
     def compile(self, messages: list[ChatMessage], *, max_chars: int | None = None) -> list[ChatMessage]:
         budget_total = max(128, int(max_chars or self.max_chars))
-        supplied_systems = [
-            ChatMessage(role="system", content=self._clip(message.content))
-            for message in messages
-            if message.role == "system"
-        ][-2:]
+        raw_systems = [message for message in messages if message.role == "system"][-2:]
 
-        # Sprint 44: compile explicit user constraints on every request. The
-        # ContextVar is request/task-local, so concurrent users cannot leak scope
-        # contracts into one another. Calling the compiler with no user message
-        # deliberately resets the contract to inactive.
+        # Sprint 44: explicit user constraints are request-local and higher
+        # priority than retrieved memory.
         latest_user = next((message.content for message in reversed(messages) if message.role == "user"), "")
         scope_contract = compile_scope_contract(latest_user)
         scope_guard = scope_guard_message(scope_contract)
 
-        systems = [ChatMessage(role="system", content=_CORE_SYSTEM_POLICY), *supplied_systems]
+        fixed = [ChatMessage(role="system", content=_CORE_SYSTEM_POLICY)]
+        if scope_guard is not None:
+            fixed.append(scope_guard)
+        fixed_chars = sum(len(message.content) for message in fixed)
+
+        # Keep at least 55% of the available prompt for recent conversation and
+        # the current user request. Optional system/project/memory context shares
+        # the remainder and is clipped deterministically.
+        conversation_reserve = max(1024, int(budget_total * 0.55))
+        optional_budget = max(0, budget_total - conversation_reserve - fixed_chars)
+        supplied_systems: list[ChatMessage] = []
+        if raw_systems and optional_budget > 0:
+            per_system = max(1, optional_budget // len(raw_systems))
+            remaining = optional_budget
+            for index, message in enumerate(raw_systems):
+                limit = remaining if index == len(raw_systems) - 1 else min(per_system, remaining)
+                content = self._clip_to(message.content, limit)
+                if content:
+                    supplied_systems.append(ChatMessage(role="system", content=content))
+                    remaining -= len(content)
+
+        systems = [fixed[0], *supplied_systems]
         if scope_guard is not None:
             systems.append(scope_guard)
         system_chars = sum(len(message.content) for message in systems)
