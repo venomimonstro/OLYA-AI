@@ -61,7 +61,7 @@ ram_gb=$((ram_kb / 1024 / 1024))
 disk_gb=$(df -Pk "$ROOT" | awk 'NR==2 {print int($4/1024/1024)}')
 cores=$(nproc)
 if [ "$WITH_INFERENCE" -eq 1 ]; then
-  (( ram_gb >= 28 )) || fail "Qwen3-30B-A3B Q4_K_M requires at least 28 GB RAM in the supported X1 profile; found ${ram_gb} GB"
+  (( ram_gb >= 30 )) || fail "Qwen3-30B-A3B Q4_K_M production profile requires at least 30 GiB detected RAM (use a 32 GB+ server); found ${ram_gb} GiB"
   (( disk_gb >= 60 )) || fail "At least 60 GB free disk is required for model + containers + backups; found ${disk_gb} GB"
 else
   (( ram_gb >= 6 )) || fail "At least 6 GB RAM is required for the control plane"
@@ -71,13 +71,13 @@ if (( ram_gb < 32 )); then safe_context=8192
 elif (( ram_gb < 48 )); then safe_context=12288
 else safe_context=16384
 fi
-# Never let llama consume the RAM needed by PostgreSQL, X1, SearXNG,
-# sandbox-worker and the host kernel/page cache. The 24 GiB ceiling is enough
-# for the supported Q4 profile while preventing a larger host from accidentally
-# turning an inference leak into a whole-node OOM event.
-llama_memory_gb=$((ram_gb - 6))
+# Reserve memory outside llama for PostgreSQL, app, SearXNG, sandbox-worker, one
+# bounded sandbox child and the host kernel/page cache. The 24 GiB ceiling is
+# enough for the supported Q4 profile while preventing a larger host from turning
+# an inference leak into a whole-node OOM event.
+llama_memory_gb=$((ram_gb - 8))
 (( llama_memory_gb > 24 )) && llama_memory_gb=24
-(( llama_memory_gb >= 20 )) || fail "Not enough RAM remains for Qwen after reserving 6 GB for the X1 control plane and operating system"
+(( llama_memory_gb >= 20 )) || fail "Not enough RAM remains for Qwen after reserving 8 GiB for X1 services, sandbox execution and the operating system"
 threads=$cores; (( threads > 2 )) && threads=$((threads - 1)); (( threads > 24 )) && threads=24; (( threads < 2 )) && threads=2
 grep -qE 'avx2|avx512' /proc/cpuinfo || info "WARNING: AVX2/AVX512 not detected; local inference can be very slow"
 
@@ -151,7 +151,7 @@ for key,value in {'X1_HTTP_LIMIT_CONCURRENCY':'128','X1_HTTP_BACKLOG':'2048','X1
 path.write_text('\n'.join(lines).rstrip()+'\n','utf-8')
 PY
 chmod 600 .env
-info "Production configuration prepared (RAM=${ram_gb}GB, CPU=${cores}, llama cap=${llama_memory_gb}GB, safe initial context=${safe_context})"
+info "Production configuration prepared (RAM=${ram_gb}GiB, CPU=${cores}, llama cap=${llama_memory_gb}GiB, reserved=8GiB, safe initial context=${safe_context})"
 
 if [ "$WITH_INFERENCE" -eq 1 ]; then info "Downloading/verifying official Qwen3-30B-A3B Q4_K_M GGUF (resumable)"; python3 scripts/download_model.py; fi
 
