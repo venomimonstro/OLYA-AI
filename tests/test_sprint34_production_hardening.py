@@ -74,7 +74,7 @@ def test_compose_persists_data_matches_model_and_keeps_socket_out_of_web_app():
     assert "/var/run/docker.sock" not in app_section
     assert "POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}" in compose
     assert '${X1_DEEP_CONTEXT_TOKENS:-8192}' in compose
-    assert "/models/Qwen3-30B-A3B-Q4_K_M.gguf" in compose
+    assert "/models/${X1_LLAMA_MODEL_FILE:-Qwen3.6-35B-A3B-Q4_K_M.gguf}" in compose
     assert "sandbox-worker:" in compose and "/var/run/docker.sock:/var/run/docker.sock" in compose
     assert "scripts.image_worker" in compose
 
@@ -85,6 +85,4 @@ def test_backup_archives_authoritative_host_data_and_is_atomic():
     assert "os.walk(root, followlinks=False)" in script
     assert "unsupported data member for safe backup" in script
     assert "SHA256SUMS" in script and ".partial.$$" in script
-    # Update flow stops app before backup; backup therefore must not depend on
-    # executing inside the stopped web container.
     assert "docker compose exec -T app" not in script

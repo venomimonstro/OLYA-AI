@@ -69,7 +69,7 @@ def test_compose_enforces_memory_limits_in_non_swarm_mode():
         "mem_limit: 384m",
         "mem_limit: 2048m",
         "mem_limit: 4096m",
-        "mem_limit: ${X1_LLAMA_MEMORY_LIMIT:-22g}",
+        "mem_limit: ${X1_LLAMA_MEMORY_LIMIT:-23g}",
     ):
         assert marker in compose
 
@@ -78,13 +78,16 @@ def test_installer_and_doctor_reserve_host_memory_outside_llama():
     install = (ROOT / "scripts" / "install.sh").read_text("utf-8")
     doctor = (ROOT / "scripts" / "doctor.py").read_text("utf-8")
     env = (ROOT / ".env.example").read_text("utf-8")
-    assert "ram_gb >= 30" in install
-    assert "llama_memory_gb=$((ram_gb - 8))" in install
-    assert "llama_memory_gb > 24" in install
+    manifest = (ROOT / "model-manifest.json").read_text("utf-8")
+    assert "MIN_DETECTED_RAM_GIB" in install
+    assert "NON_LLAMA_RESERVE_GIB" in install
+    assert "LLAMA_MEMORY_CAP_GIB" in install
     assert "X1_LLAMA_MEMORY_LIMIT" in install
     assert "host_memory_budget" in doctor
     assert "required_non_llama_reserve_gib" in doctor
-    assert "X1_LLAMA_MEMORY_LIMIT=22g" in env
+    assert "X1_LLAMA_MEMORY_LIMIT=23g" in env
+    assert '"non_llama_reserve_gib": 8' in manifest
+    assert '"llama_memory_cap_gib": 24' in manifest
 
 
 def test_auth_session_growth_is_bounded_and_logout_all_revokes_everything(client, db_session):
@@ -94,7 +97,6 @@ def test_auth_session_growth_is_bounded_and_logout_all_revokes_everything(client
     assert created.status_code == 201, created.text
     latest_token = created.json()["access_token"]
 
-    # Create substantially more live tokens than the default allowed window.
     for _ in range(24):
         login = client.post("/v1/auth/login", json={"email": email, "password": password})
         assert login.status_code == 200, login.text
@@ -115,7 +117,5 @@ def test_auth_session_growth_is_bounded_and_logout_all_revokes_everything(client
     logout = client.post("/v1/auth/logout-all", headers={"Authorization": f"Bearer {latest_token}"})
     assert logout.status_code == 204, logout.text
     db_session.expire_all()
-    remaining = int(
-        db_session.scalar(select(func.count(AuthSession.id)).where(AuthSession.revoked_at.is_(None))) or 0
-    )
+    remaining = int(db_session.scalar(select(func.count(AuthSession.id)).where(AuthSession.revoked_at.is_(None))) or 0)
     assert remaining == 0

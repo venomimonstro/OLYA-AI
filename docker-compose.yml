@@ -94,9 +94,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      # Search and sandbox are feature dependencies, not core-process
-      # dependencies. The API must remain available while either sidecar
-      # restarts; their own endpoints fail/degrade explicitly until recovery.
       searxng:
         condition: service_started
       sandbox-worker:
@@ -158,16 +155,14 @@ services:
 
   llama:
     profiles: ["inference"]
-    # Pinned build/digest: a future mutable server tag cannot silently change the
-    # production inference runtime during a repeat one-command installation.
     image: ghcr.io/ggml-org/llama.cpp:server-b10380@sha256:683ad4c9569bdbd6b8d7ad008a729cf4f9a3dfaf9712c81a7ecac0c5b9a078fc
     restart: unless-stopped
-    mem_limit: ${X1_LLAMA_MEMORY_LIMIT:-22g}
+    mem_limit: ${X1_LLAMA_MEMORY_LIMIT:-23g}
     volumes:
       - ./models:/models:ro
     command:
       - -m
-      - /models/Qwen3-30B-A3B-Q4_K_M.gguf
+      - /models/${X1_LLAMA_MODEL_FILE:-Qwen3.6-35B-A3B-Q4_K_M.gguf}
       - --host
       - 0.0.0.0
       - --port

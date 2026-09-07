@@ -1,0 +1,40 @@
+{
+  "format": "x1-llm-model-manifest-v1",
+  "primary": {
+    "model_name": "Qwen3.6-35B-A3B-Q4_K_M",
+    "family": "Qwen3.6-35B-A3B",
+    "quantization": "Q4_K_M",
+    "repository": "ggml-org/Qwen3.6-35B-A3B-GGUF",
+    "revision": "3d8df365c4f151fb00629e8d9f2a2b6a4f8b441a",
+    "filename": "Qwen3.6-35B-A3B-Q4_K_M.gguf",
+    "sha256": "671e47e0ec53c665d048b98c3ecbfd5236b5ca9c3e02ed19fc8f81f7b85140c7",
+    "size_bytes": 20419565568
+  },
+  "legacy_rollback": {
+    "model_name": "Qwen3-30B-A3B-Q4_K_M",
+    "family": "Qwen3-30B-A3B",
+    "quantization": "Q4_K_M",
+    "repository": "Qwen/Qwen3-30B-A3B-GGUF",
+    "revision": "dae61f032d7880e6effe712505db4de5d06d6549",
+    "filename": "Qwen3-30B-A3B-Q4_K_M.gguf",
+    "sha256": "0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5",
+    "size_bytes": 18556685824
+  },
+  "host_policy": {
+    "minimum_detected_ram_gib": 31,
+    "non_llama_reserve_gib": 8,
+    "llama_memory_cap_gib": 24,
+    "llama_min_memory_gib": 23,
+    "context_tiers": [
+      {"min_ram_gib": 31, "max_ram_gib_exclusive": 48, "tokens": 8192},
+      {"min_ram_gib": 48, "max_ram_gib_exclusive": 64, "tokens": 12288},
+      {"min_ram_gib": 64, "max_ram_gib_exclusive": null, "tokens": 16384}
+    ]
+  },
+  "low_ram_policy": {
+    "automatic_downgrade": false,
+    "candidates": ["Q4_K_S", "IQ4_XS"],
+    "status": "manual_validation_required",
+    "reason": "OLYA AI never silently changes quantization. A low-RAM candidate must receive its own pinned repository, revision, SHA-256, benchmark and release acceptance before production use."
+  }
+}

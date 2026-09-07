@@ -11,8 +11,6 @@ class LlamaClient:
     def __init__(self, base_url: str, timeout_seconds: int = 180) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = httpx.Timeout(timeout_seconds, connect=min(10.0, float(timeout_seconds)))
-        # Reuse a tiny bounded keep-alive pool. X1 deliberately runs one local
-        # inference slot, so an unbounded HTTP pool provides no throughput value.
         self._client = httpx.AsyncClient(
             timeout=self.timeout,
             trust_env=False,
@@ -29,6 +27,29 @@ class LlamaClient:
         except httpx.HTTPError:
             return False
 
+    @staticmethod
+    def _sampling(reasoning: bool) -> dict:
+        # Qwen3.6 is sensitive to over-constrained sampling. These are the
+        # upstream-recommended general presets, deliberately kept explicit so a
+        # future model migration cannot silently inherit unsuitable parameters.
+        if reasoning:
+            return {
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "top_k": 20,
+                "min_p": 0.0,
+                "presence_penalty": 1.5,
+                "repeat_penalty": 1.0,
+            }
+        return {
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "top_k": 20,
+            "min_p": 0.0,
+            "presence_penalty": 1.5,
+            "repeat_penalty": 1.0,
+        }
+
     async def chat(
         self,
         messages: list[ChatMessage],
@@ -41,11 +62,10 @@ class LlamaClient:
             "messages": [message.model_dump() for message in messages],
             "max_tokens": max_tokens,
             "stream": False,
-            "temperature": 0.3 if reasoning else 0.2,
-            # Qwen3 is a hybrid thinking model. llama.cpp b10380 supports these
-            # OpenAI-compatible request controls. Fast/Work must not silently use
-            # the response budget for hidden reasoning. Deep keeps reasoning on,
-            # while reasoning_format separates the trace from final content.
+            **self._sampling(reasoning),
+            # Qwen3.6 thinks by default. OLYA explicitly owns this switch so Fast
+            # and simple Work requests do not burn the output/CPU budget on hidden
+            # reasoning, while analytical Work/Deep can opt in.
             "chat_template_kwargs": {"enable_thinking": bool(reasoning)},
             "reasoning_format": "deepseek" if reasoning else "none",
         }

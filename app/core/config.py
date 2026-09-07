@@ -14,9 +14,10 @@ class Settings(BaseSettings):
     database_pool_timeout_seconds: float = 5.0
     database_pool_recycle_seconds: int = 1800
     llama_base_url: str = "http://127.0.0.1:8080"
-    llama_model_name: str = "Qwen3-30B-A3B-Q4_K_M"
+    llama_model_name: str = "Qwen3.6-35B-A3B-Q4_K_M"
+    llama_model_file: str = "Qwen3.6-35B-A3B-Q4_K_M.gguf"
     max_context_tokens: int = 8192
-    deep_context_tokens: int = 16384
+    deep_context_tokens: int = 8192
     max_concurrent_generations: int = 1
     max_queue_size: int = 64
     inference_queue_timeout_seconds: float = 120.0

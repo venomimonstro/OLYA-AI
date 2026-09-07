@@ -54,30 +54,56 @@ install_host_packages
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 docker info >/dev/null 2>&1 || fail "Docker daemon is unavailable"
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable"
+[ -f model-manifest.json ] || fail "model-manifest.json is missing"
 if [ "$DOCTOR_ONLY" -eq 1 ]; then exec python3 scripts/doctor.py; fi
 
 ram_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
-ram_gb=$((ram_kb / 1024 / 1024))
 disk_gb=$(df -Pk "$ROOT" | awk 'NR==2 {print int($4/1024/1024)}')
 cores=$(nproc)
+
+# Read the production model and host envelope from one canonical manifest.
+readarray -t policy < <(PYTHONPATH="$ROOT" python3 - "$ram_kb" <<'PY'
+import sys
+from scripts.download_model import (
+    DEFAULT_FILE, DEFAULT_MODEL_NAME, LLAMA_MEMORY_CAP_GIB, LLAMA_MIN_MEMORY_GIB,
+    MIN_DETECTED_RAM_GIB, NON_LLAMA_RESERVE_GIB, safe_context_for_ram_gib,
+)
+ram_gib=int(sys.argv[1])/1024/1024
+print(DEFAULT_MODEL_NAME)
+print(DEFAULT_FILE)
+print(MIN_DETECTED_RAM_GIB)
+print(NON_LLAMA_RESERVE_GIB)
+print(LLAMA_MEMORY_CAP_GIB)
+print(LLAMA_MIN_MEMORY_GIB)
+try: print(safe_context_for_ram_gib(ram_gib))
+except ValueError: print(0)
+print(f"{ram_gib:.3f}")
+PY
+)
+model_name="${policy[0]}"
+model_file="${policy[1]}"
+min_ram_gib="${policy[2]}"
+reserve_gib="${policy[3]}"
+llama_cap_gib="${policy[4]}"
+llama_min_gib="${policy[5]}"
+safe_context="${policy[6]}"
+ram_gib_exact="${policy[7]}"
+
 if [ "$WITH_INFERENCE" -eq 1 ]; then
-  (( ram_gb >= 30 )) || fail "Qwen3-30B-A3B Q4_K_M production profile requires at least 30 GiB detected RAM (use a 32 GB+ server); found ${ram_gb} GiB"
+  [ "$safe_context" -gt 0 ] || fail "$model_name requires at least ${min_ram_gib} GiB detected RAM; found ${ram_gib_exact} GiB"
   (( disk_gb >= 60 )) || fail "At least 60 GB free disk is required for model + containers + backups; found ${disk_gb} GB"
 else
-  (( ram_gb >= 8 )) || fail "At least 8 GiB detected RAM is required for the full X1 control plane and one bounded sandbox execution"
+  (( ram_kb >= 8*1024*1024 )) || fail "At least 8 GiB detected RAM is required for the full X1 control plane and one bounded sandbox execution"
   (( disk_gb >= 15 )) || fail "At least 15 GB free disk is required"
+  [ "$safe_context" -gt 0 ] || safe_context=8192
 fi
-if (( ram_gb < 32 )); then safe_context=8192
-elif (( ram_gb < 48 )); then safe_context=12288
-else safe_context=16384
+
+ram_floor_gib=$((ram_kb / 1024 / 1024))
+llama_memory_gb=$((ram_floor_gib - reserve_gib))
+(( llama_memory_gb > llama_cap_gib )) && llama_memory_gb=$llama_cap_gib
+if [ "$WITH_INFERENCE" -eq 1 ] && (( llama_memory_gb < llama_min_gib )); then
+  fail "Not enough safe RAM remains for $model_name after reserving ${reserve_gib} GiB for X1 services and the host"
 fi
-# Reserve memory outside llama for PostgreSQL, app, SearXNG, sandbox-worker, one
-# bounded sandbox child and the host kernel/page cache. The 24 GiB ceiling is
-# enough for the supported Q4 profile while preventing a larger host from turning
-# an inference leak into a whole-node OOM event.
-llama_memory_gb=$((ram_gb - 8))
-(( llama_memory_gb > 24 )) && llama_memory_gb=24
-(( llama_memory_gb >= 20 )) || fail "Not enough RAM remains for Qwen after reserving 8 GiB for X1 services, sandbox execution and the operating system"
 threads=$cores; (( threads > 2 )) && threads=$((threads - 1)); (( threads > 24 )) && threads=24; (( threads < 2 )) && threads=2
 grep -qE 'avx2|avx512' /proc/cpuinfo || info "WARNING: AVX2/AVX512 not detected; local inference can be very slow"
 
@@ -94,14 +120,15 @@ runtime_secret=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
 sandbox_token=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
 host_data_root="$(realpath "$ROOT/data")"
 
-python3 - "$new_env" "$db_password" "$admin_token" "$runtime_secret" "$sandbox_token" "$host_data_root" "$safe_context" "$threads" "$llama_memory_gb" <<'PY'
+python3 - "$new_env" "$db_password" "$admin_token" "$runtime_secret" "$sandbox_token" "$host_data_root" "$safe_context" "$threads" "$llama_memory_gb" "$llama_min_gib" "$model_name" "$model_file" <<'PY'
 from pathlib import Path
 import re
 import sys
 
 path=Path('.env'); text=path.read_text('utf-8')
 new_env=bool(int(sys.argv[1])); generated_db,generated_admin,generated_runtime,generated_sandbox,host_data=sys.argv[2:7]
-safe_context=int(sys.argv[7]); threads=int(sys.argv[8]); llama_memory_gb=int(sys.argv[9]); lines=text.splitlines(); values={}
+safe_context=int(sys.argv[7]); threads=int(sys.argv[8]); llama_memory_gb=int(sys.argv[9]); llama_min_gib=int(sys.argv[10]); model_name=sys.argv[11]; model_file=sys.argv[12]
+lines=text.splitlines(); values={}
 for line in lines:
     if line and not line.lstrip().startswith('#') and '=' in line:
         k,v=line.split('=',1); values[k]=v
@@ -132,22 +159,27 @@ def bounded_int(key, default, lower, upper):
 
 setv('X1_ENV','production'); setv('X1_BIND_ADDRESS','127.0.0.1'); setv('X1_HOST_DATA_ROOT',host_data)
 ensure_secret('POSTGRES_PASSWORD',generated_db,{'change-me-db'}); db=values['POSTGRES_PASSWORD']; setv('X1_DATABASE_URL',f'postgresql+psycopg://x1:{db}@db:5432/x1')
-ensure_secret('X1_ADMIN_BOOTSTRAP_TOKEN',generated_admin,{'change-me'}); ensure_secret('X1_PROJECT_RUNTIME_SECRET_KEY',generated_runtime,{'change-me-runtime-secret'}); ensure_secret('X1_PROJECT_SANDBOX_WORKER_TOKEN',generated_sandbox,{'change-me-sandbox-worker'})
-setv('X1_LLAMA_MODEL_NAME','Qwen3-30B-A3B-Q4_K_M'); setv('X1_LLAMA_BASE_URL','http://llama:8080'); setv('X1_PROJECT_SANDBOX_BACKEND','remote'); setv('X1_PROJECT_SANDBOX_IMAGE','x1-sandbox:0.39'); setv('X1_PROJECT_SANDBOX_WORKER_URL','http://sandbox-worker:8090')
+ensure_secret('X1_ADMIN_BOOTSTRAP_TOKEN',generated_admin,{'change-me'})
+ensure_secret('X1_PROJECT_RUNTIME_SECRET_KEY',generated_runtime,{'change-me-runtime-secret'})
+ensure_secret('X1_PROJECT_SANDBOX_WORKER_TOKEN',generated_sandbox,{'change-me-sandbox-worker'})
+
+# Model identity is an installation contract, not a user-tunable setting. Keeping
+# name and filename in sync prevents a half-migrated deployment.
+setv('X1_LLAMA_MODEL_NAME',model_name)
+setv('X1_LLAMA_MODEL_FILE',model_file)
+setv('X1_LLAMA_BASE_URL','http://llama:8080')
+setv('X1_PROJECT_SANDBOX_BACKEND','remote'); setv('X1_PROJECT_SANDBOX_IMAGE','x1-sandbox:0.39'); setv('X1_PROJECT_SANDBOX_WORKER_URL','http://sandbox-worker:8090')
 if values.get('X1_SEARCH_PROVIDER','') in {'','disabled'}: setv('X1_SEARCH_PROVIDER','searxng')
 if values.get('X1_SEARCH_PROVIDERS','') in {'','disabled'}: setv('X1_SEARCH_PROVIDERS','searxng')
 setv('X1_SEARXNG_BASE_URL','http://searxng:8080')
-# Production AI access is always protected by the measured rollout gate. A full
-# launch is represented by a 100% rollout, not by disabling the guard itself.
 setv('X1_PUBLIC_LAUNCH_ENFORCE_EXPOSURE','true')
+
 current_memory=memory_gb(values.get('X1_LLAMA_MEMORY_LIMIT'))
-if current_memory is None or current_memory > llama_memory_gb:
+if current_memory is None or current_memory > llama_memory_gb or current_memory < llama_min_gib:
     setv('X1_LLAMA_MEMORY_LIMIT',f'{llama_memory_gb}g')
 
-# The llama container is always booted with X1_DEEP_CONTEXT_TOKENS. Therefore
-# every other model-facing context limit must be <= that physical ceiling. This
-# normalization also repairs old installations that carried a larger Work limit
-# from a previous server or version.
+# llama.cpp boots with DEEP_CONTEXT_TOKENS. Existing installations are clamped
+# down when moved to a smaller host or when a new model needs a safer envelope.
 if new_env:
     deep_context=safe_context
     normal_context=min(8192,deep_context)
@@ -167,9 +199,12 @@ for key,value in {'X1_HTTP_LIMIT_CONCURRENCY':'128','X1_HTTP_BACKLOG':'2048','X1
 path.write_text('\n'.join(lines).rstrip()+'\n','utf-8')
 PY
 chmod 600 .env
-info "Production configuration prepared (RAM=${ram_gb}GiB, CPU=${cores}, llama cap=${llama_memory_gb}GiB, reserved=8GiB, safe initial context=${safe_context})"
+info "Production configuration prepared (RAM=${ram_gib_exact}GiB, CPU=${cores}, model=${model_name}, llama cap=${llama_memory_gb}GiB, reserved=${reserve_gib}GiB, context=${safe_context})"
 
-if [ "$WITH_INFERENCE" -eq 1 ]; then info "Downloading/verifying official Qwen3-30B-A3B Q4_K_M GGUF (resumable)"; python3 scripts/download_model.py; fi
+if [ "$WITH_INFERENCE" -eq 1 ]; then
+  info "Downloading/verifying pinned ${model_name} GGUF (resumable + SHA-256)"
+  python3 scripts/download_model.py --profile primary
+fi
 
 info "Pulling pinned runtime images"
 docker compose pull db searxng >/dev/null
@@ -194,7 +229,7 @@ docker compose exec -T searxng python -c "import urllib.request; urllib.request.
 docker compose exec -T sandbox-worker python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health',timeout=3).read()" >/dev/null 2>&1 || fail "Sandbox worker did not become ready"
 
 info "Applying database migrations"; docker compose run --rm --no-deps app alembic upgrade head
-if [ "$WITH_INFERENCE" -eq 1 ]; then info "Starting Qwen llama.cpp and X1"; docker compose --profile inference up -d llama app
+if [ "$WITH_INFERENCE" -eq 1 ]; then info "Starting Qwen3.6 llama.cpp and X1"; docker compose --profile inference up -d llama app
 else info "Starting X1 control plane without inference"; docker compose up -d app; fi
 
 for _ in $(seq 1 180); do
@@ -211,7 +246,7 @@ urlopen('http://127.0.0.1:8000/health',timeout=5).read()
 PY
 
 if [ "$WITH_INFERENCE" -eq 1 ]; then
-  info "Waiting for Qwen model readiness"
+  info "Waiting for pinned Qwen3.6 model readiness"
   for _ in $(seq 1 180); do
     docker compose exec -T app python - <<'PY' >/dev/null 2>&1 && break
 from urllib.request import urlopen
@@ -219,10 +254,11 @@ urlopen('http://llama:8080/health',timeout=4).read()
 PY
     sleep 3
   done
-  docker compose exec -T app python - <<'PY' >/dev/null 2>&1 || fail "llama.cpp/Qwen did not become ready"
+  docker compose exec -T app python - <<'PY' >/dev/null 2>&1 || fail "llama.cpp/Qwen3.6 did not become ready"
 from urllib.request import urlopen
 urlopen('http://llama:8080/health',timeout=5).read()
 PY
+  python3 scripts/download_model.py --profile primary --verify-only >/dev/null || fail "Pinned Qwen3.6 GGUF integrity check failed after startup"
 fi
 
 info "Running hardened sandbox execution probe"; docker compose exec -T app python -m scripts.sandbox_probe

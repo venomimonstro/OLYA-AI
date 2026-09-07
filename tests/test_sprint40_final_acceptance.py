@@ -10,11 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_qwen_artifact_is_immutable_and_checksum_pinned():
-    assert DEFAULT_REPO == "Qwen/Qwen3-30B-A3B-GGUF"
-    assert DEFAULT_REVISION == "dae61f032d7880e6effe712505db4de5d06d6549"
-    assert DEFAULT_FILE == "Qwen3-30B-A3B-Q4_K_M.gguf"
-    assert DEFAULT_SHA256 == "0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5"
-    assert DEFAULT_SIZE == 18_556_685_824
+    assert DEFAULT_REPO == "ggml-org/Qwen3.6-35B-A3B-GGUF"
+    assert DEFAULT_REVISION == "3d8df365c4f151fb00629e8d9f2a2b6a4f8b441a"
+    assert DEFAULT_FILE == "Qwen3.6-35B-A3B-Q4_K_M.gguf"
+    assert DEFAULT_SHA256 == "671e47e0ec53c665d048b98c3ecbfd5236b5ca9c3e02ed19fc8f81f7b85140c7"
+    assert DEFAULT_SIZE == 20_419_565_568
     assert f"/resolve/{DEFAULT_REVISION}/{DEFAULT_FILE}" in DEFAULT_URL
     assert "/resolve/main/" not in DEFAULT_URL
 
@@ -54,6 +54,7 @@ def test_transactional_updater_uses_one_target_version_recovery_toolset():
     assert 'bash "$BACKUP_COPY"' in update
     assert 'bash "$DRILL_COPY" "$BACKUP_PATH"' in update
     assert 'bash "$RESTORE_COPY" "$BACKUP_PATH"' in update
+    assert 'cp -p "$ENV_COPY" .env' in update
     assert update.index("Checking for legacy named-volume user data") < update.index("Creating consistent pre-update backup") < update.index("Fast-forwarding code")
 
 

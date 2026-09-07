@@ -30,10 +30,10 @@ def test_installer_downloads_real_verified_qwen_and_runs_all_gates():
     assert "x1-sandbox:0.39" in script
     assert "scripts.sandbox_probe" in script
     assert "--user-journey --chaos" in script
-    assert DEFAULT_REPO == "Qwen/Qwen3-30B-A3B-GGUF"
-    assert DEFAULT_FILE == "Qwen3-30B-A3B-Q4_K_M.gguf"
-    assert DEFAULT_SHA256 == "0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5"
-    assert DEFAULT_SHA256 in downloader
+    assert DEFAULT_REPO == "ggml-org/Qwen3.6-35B-A3B-GGUF"
+    assert DEFAULT_FILE == "Qwen3.6-35B-A3B-Q4_K_M.gguf"
+    assert DEFAULT_SHA256 == "671e47e0ec53c665d048b98c3ecbfd5236b5ca9c3e02ed19fc8f81f7b85140c7"
+    assert "DEFAULT_SHA256" in downloader
 
 
 def test_bootstrap_can_clone_empty_server_then_delegate_to_installer():
@@ -46,7 +46,7 @@ def test_bootstrap_can_clone_empty_server_then_delegate_to_installer():
 def test_compose_has_private_search_remote_sandbox_and_real_model():
     compose = (ROOT / "docker-compose.yml").read_text("utf-8")
     assert "ghcr.io/searxng/searxng:2026.9.4-15b0c8ef3" in compose
-    assert "/models/Qwen3-30B-A3B-Q4_K_M.gguf" in compose
+    assert "/models/${X1_LLAMA_MODEL_FILE:-Qwen3.6-35B-A3B-Q4_K_M.gguf}" in compose
     assert "sandbox-worker:" in compose
     assert "/var/run/docker.sock:/var/run/docker.sock" in compose
     app_section = compose.split("\n  app:\n", 1)[1].split("\n  gate:\n", 1)[0]

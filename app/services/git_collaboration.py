@@ -1,3 +1,424 @@
-# Restored losslessly from the canonical cumulative source.
-import base64 as _b64, zlib as _zlib
-exec(compile(_zlib.decompress(_b64.b85decode('c-qYxYjfK+^1FWp%Je2;DpGR#xSl#{&X*{OCywK>ojy+1aVQd!SW^T`khWY~|NV9sAPG{EW9ND^_1F>#EEfCT#lo{pEScxcioD3U=doy+iY#Y-l8D^TBaz6xJw3MY<sy!z<*Sh8Q^w0DxhV1|uHK4inu&nR3Nq)*bQZ;YZ-(2ZevSysJx}0OO%z!S<8JC_l9#hEM(=wH#7|RK^6V-C^ll(R?p=%QQl@@Tt@ybd7-gBrx=i{r?qxg%wywB`oA2%I1+gzBdlTgZ)HyAZJX)$1_F#{}PYM74cs6=@Iy(1G4$jX<r^jb($i_6?vC=HM@^kK8@*ArQ!T@rXDKOc|EC+x7HF|S+%sMXyr)LN3ZuFAfeK;8%pPjvB_KTC#!=Db$N9^6`SAw-{yQ|U8qkK_Jy<A-Kq>cAt3h3sG^iBf-GqyKAaQ^K(fApPyc$3@b{qFi=YM}G4rRN8zjBSKoOb^~29*kivAer3mf7e_*=LyfEz>_@4c-~&zc@fz}k)K9m&zZb{4ek`^9g%;BG6emE_Jw>l9t<b=_4LA;yfA2XdtY5RL)^Q&rmZI+^^nh4BC@3)M}Kfna|@=>x$@(J517m|n>jzSyhvj{hPN&&KPF0jnSTwsB5)T*qqJjdwSqB)FjX2>2O!l{G}E)L3>JLJ*%w1*E%H2-786-Hw-7Q<d_AiuLz$Q$1z0G7)I+5tjG^BPp4}Mlv&^3_d6Fyo6%P?OLS>}Zha|pXfuD#Z3jCP8JwHD=!|Auh6f~0x8RY^{emp&r%+EOU<5*nt(5g7kCE9PwX1FVhlA5}Fp`~Q?EZdc79Od*#LYb7}iFwi?G&XYod^e?AiDJt_=4{Ft$#l@`)za&UYp}E)!gpL4wl&Q(+$B6fIc;6if@3aELU|2XIu@?7Y=a`T1i!`u=NrWWm_roOsA0zcF^$ogeD$SOnF9nvwZ@$lalG{NV9_CxY}6ah(l+|J4T*F1ZW$dWiX1H~!i%U3p`j6JYQU+AEMYTii|}q~?Yei1OV=cct|>b0Q0PY<Pp&$d5cz=OE;&&c1^Kw`K5Dz$ih2to;9F||;U9#46=foE=NxQ=hP%w_6*B9^0_?IkjgkSq(gS>0I-n4qw;$e*Eb?HYgY}r@uJ(a6XCaVV1N6<|xd&1A{o(P!k#}<X;r+=uthD-83+CmA<JX68yyFjNzn-0s-XqMu33K$)J2*PR;g{~m^ViPzjmd-KH=9%IQf66^81m|ZU(Mx!#gQbDO}gw^mtpD<1%O0J4%YQuABHgg5tlGvfq)>Q1eXIg6(WX_^Q_<``#M*;FTo;Xp7ZcT4UB7TfOKGy%CheDA_C*G$lgsug@N71h8XyY2Sx5rV@Q>fmiSkG6yt!#1e%3?8g`;4koOJ@jg|T)w!6FxqYQ%qL@YT(e!8#$h{Y3^^r{vvc%1S~3F3|&i-f}l_*GJ_1Xa;Zd;GHRk?KFZ8y#B{SU^A(%q;9`yf~#x3m{11b0^LCELsh%)xLv9<;zQqy$+}#=d0Wxjp7Rw5wU<IFbnI!MGAO{W3`Jp<6dVG<a|Wcv7UT^*4>kfizM(t+!xlD`xh3*)n^}d3V3ESs1uTW#-9F7UR)$k+0&Jy^07l)J!L=qz&4=(l_>?l3SeCN!37otJb}_DO6EhW$Y)@)4GM$BQiPqp_<O%^H|2`x4$j`49GsnzSQUE&6D%<<jzMDJ%T9nE9S8`M3n4Bg%3|0H`Bg80;AT}2V7a*nMC_6RDBBDZe#JAGe1?vqqHdnu)CvwzxQ5lEf5GP9AlKm#4Gy`x8p0ojBVcl90KXdjbo}w?h-Sdy%&C*ZlM#*cEZZEfR9`vkP=CW35JNnC?Z;9Z#w<#J7lURnQ*Fo9P~{ZbMBE~YqvW!)jHCp`G@Ss}llwz?9fAN{6<o1;#WdQlu`cBtq|*Tq#R#SY^#YXQ3;D5t4XH+FGjLzb?_=kie!oAMv=G53?3Kn)3wOxaKxgCA(W`@(=c88>mE38ZabO<7cf}9Hq^qb#Ito%9CnHHwgA#Zvy<o^|B$YbuQw(!qEyfaCqvDCgGYRFAHo`8OW_}VZs>r(ZF};*oY+%MiTvg%T9T}_R0t*FKVUglkGq|?-GZ0oOqRYlslu+`uoT*jPI#GxkV1Y<x(HsG>R&*)P!^<!G41)h}JjmGr)ZV%EfVCV%Kt2fpFI9{GNwUL2wM3vLk1R+y-xX5Fb|rBLfeH5@{)qZC)ew4Jl3)=&P_?$92{Yfdl<|c940SLTt`r}b58<GIHwe}F4XY1tQYbR8zD0ox2qP408FER0E+K^K7fHqN8n>!hrE!=dl~d_TqE#A%YNk<XtS7aCYm^T$l(LRhJWM$dz!mk{Xh29^=D{xzxb+y*6sXn_Qm+!~L$hnX#As?P1h1M|w={r^uQ9tN5Ra@X-7Zs?5J}S~bY+n(^Nd5NSf&;FEtJ@sL7nUqpvgQ*4(I|-BAncxOZ9?bG3Ji48Z}fstB0<V8&-zM7z79ulVwk|c@1?8D<k;+_eO$ivY>n=nuGAU$5DTBGxJxW(b%lZ>Y`^O4{V5O_ZEL)Z(ndfY{zJj`QU-!P9wLJNl`j)5S;NVhmMs<<=fH0D{G>wUo*#6`9mkSGP_W&Y-GqGWJr~tU`rjZiVV%sQ)csj<i#{rxe(Wm-uY21?UhvH0vO*UyA?~}L@|YO(rcwUmFBQ^Zm_4J?hRYudKwNZ|BU}$L|N4r*kqeng)&+(4uLqD-Kb|+NPVCgsCg!PXiBnot5C1EN@c4)cO=hJLhaO9OSeR6%BKRsL14w0Gpf$#pUq^(mm=q~C$eY`)&8x4e>=+++s}9NZO}WjwqpLIh|C&8S&SAJI?Lcu%O_POu<(;P52;Hk+m2NodLQXt<H-&?i=~4n2bCa}^cm8pP>SHIATC1gKoCnpKT~smz|p1Qa8hJ&Xztvus1R6TqBnd{b+Rt{s@h$xZN+FSHnzGUk7V$c%D#xQd}s|A*#gk2!^eOc02Vq+`K;tD;dMM&@A5(-Pe~#bS-@kcb%$5`r4($V&$*Rhg;(u_m6B2e3JGeYB^6Bmb>oyn?802rP9X*5QBv?a4-#d75@E-K=k>V*?WP?6dN3(_hWKu?AKBMcAg^#M@?1Ync>+o-xgO|E@RSKS;T^x$4aK*`uF9lZ>RZx;UF)GrgLXq7`l;;ypytD9Hfu!dXIP~8;3ri-M{9iPuRK7I$+8u+-|u^HGHV$Y9*t2U7GkbSB{-rwjR81Wi_EI3RJ~;-I>b`S4Hg7GIQOoYj<C9JgKbQMX$n;Bp`;HFKnYPapk?Dh#UF${3+nhJ@N)u3B_jwbxdH+hx$vKV`yEPKT_U+^fM8wfVsJQ7x(mJvBanLDv8%>g8H%XYVoIN4lhJ~!V^i}sU{ba+#dXX4=~h6szY$d>(MC<H<bulGyg*Xd5Vq?}59|0<$7r;y0-m-np_ngmqJ_MfsIlw?7~5ua(FKpSS7B2?ADV#<8`6pt@fA0=-5?!vuBJFwajRanLG4e-&VwnnP!EjDz)vBtR7W^#3*|bdq<9X;P~V}(Ioh5Nx`r=Lg7bpWJV!UdzfXjoO%;K5OD}+96`UWCb6?xdMx$(#_m4@0X84NZCoy;r3EEL`Q*Eapg+$+v$p@M#1_EuHaKu3JN;sNn+A6U`P7C(B=@fb&BPZb^JYmobo@sGm>lU-gA+Des3+)oP$R*0)Nx5}%0sh1hwQ|Xk15qTHbFekp?<!oV;tX_bv#;3x#_E#qI_~QzPwZNV9HR<+!5fsX7-Q%_Yj2>^DW=2-5opN1?QarnUZQB&y=`N<5E9E})QmezE+qs-U8J|wOId-hQaF%-elWST3in6V6+2rGW#b+vjkb&q`??h|G?H7nV}mqmL~7tKhApypQgI~c))9_$Wu3_2P!B}a4asW=A8@Enk}4C?rD`L}VmL(`-x5|=W=O5eIYKbmQrl`&n^kM0cZX2BxjGhAjg$+mcgt>gC+2{*o2&mTsP?HGdFMW7w3raFDID1^L40aAs0qPIFzvg)i3m*Dx?PQ*A~R1X>j6HaBb3kR4e)H$;wkqY5BB>LdrJ?&4^`=mmmtrOY+XC5B;T$(>l#Ft6sjHp?{lz^hnGKQt%<bBPE+8mN@a`4_13#2|Ad{Pobm;y{DS=!w06i~P|zt;6KK<ZkjFO!rV)|}xa=)nTfhoz4}<4PyyFVphbWcM+@sc3uS3#FQS~`$5fhSKN5j96VQ86`$1fe>v~~EioNm}!v81XMaokfu1fsKg(B-v9YhjeWbqz1gvQlpaL;9(#`#_+cIuC!U1Knzed{)nOTl)%6`zVq*&m927M@7*8+~25i%MIMr{QUF*zDA*)y0u&hQ9*gFPT&14`>JiW^_*Vs>p0Z)Y3#kT9n|RCep+^qy$w@Tu^7C)NR8XDuba1FTQ0L6cP*yK)g{kHgKskqY9GO&aet!E<TgA~wSs7x4b2(P?`sI|yj-dBeOuvmUx?OjaedlyqfK9FRQH8G)p;*t#Dn&)B8LIJC4iW-?Kq+?1vgIc>$1n17INW1APu7s|241O#=2jw#__Q#>#Bc;Awzp0qeSJ_Dh#tD&2IFN6yk1K`bVV`w{FgNWa>IQtL9Lbu7L=_+I4Sf%XQT_YsQzY{*D=!aAmtTAe_w$hmwcS>d2w$9-^xI3T<P;P}I&s{Be5PEMnApl|<F`oV4yKxE1)HP;aBCwv^hM<;MjDlTu>=5!^&*5^hR&C;g|&Y4pXzgIIXN4okz=0_~R96%1qyW#W_rY496x38@^bKoYA9l>k~>z{6f55@+Vi+=2INKMQFyx9L`zsU2DN&k2s(oomUnId`yKuQrIJQ*uLYTU`d|ELwWneHRV8bLgk_Ql2Qc2$gK_2bG<AME92KqXu&*=~iWcI0g?X4>shdHT8KprjaS=rIlK$#M3Z{9r?#3Wxe-bbPK@g')), __file__, "exec"), globals())
+from __future__ import annotations
+
+import base64
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlparse
+
+
+class GitError(RuntimeError):
+    pass
+
+
+_MAX_OUTPUT_CHARS = 200_000
+_MAX_SCAN_BYTES = 5 * 1024 * 1024
+_GITHUB_OWNER = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+_GITHUB_REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+_SHA = re.compile(r"^[0-9a-f]{40}$")
+_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("private_key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")),
+    ("github_token", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b")),
+    ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
+    ("bearer_token", re.compile(r"(?i)\bAuthorization\s*:\s*Bearer\s+[A-Za-z0-9._~+/=-]{20,}")),
+    ("generic_secret", re.compile(r"(?i)\b(?:password|passwd|secret|api[_-]?key|access[_-]?token|client[_-]?secret)\b\s*[:=]\s*['\"]?([^\s'\"#]{12,})")),
+)
+_PLACEHOLDER_SECRET = re.compile(r"(?i)^(?:change-me|example|placeholder|dummy|test|your[_-]|xxx+|<.*>|\$\{.*\})")
+
+
+def _validate_branch(value: str) -> str:
+    branch = value.strip()
+    if not branch or len(branch) > 160:
+        raise GitError("Invalid Git branch")
+    if branch.startswith(("-", "/", ".")) or branch.endswith(("/", ".", ".lock")):
+        raise GitError("Invalid Git branch")
+    if any(token in branch for token in ("..", "@{", "\\", " ", "~", "^", ":", "?", "*", "[")):
+        raise GitError("Invalid Git branch")
+    if any(ord(char) < 32 or ord(char) == 127 for char in branch) or "//" in branch or "/." in branch:
+        raise GitError("Invalid Git branch")
+    return branch
+
+
+def _safe_path(value: str) -> str:
+    raw = value.replace("\\", "/").strip()
+    path = PurePosixPath(raw)
+    if not raw or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise GitError("Unsafe Git path")
+    if path.parts[0] in {".git", ".ssh", ".gnupg"}:
+        raise GitError("Protected Git path")
+    return path.as_posix()
+
+
+def _repo_root(root: Path, *, require_git: bool = True) -> Path:
+    candidate = root.expanduser()
+    if candidate.is_symlink():
+        raise GitError("Workspace root cannot be a symlink")
+    candidate = candidate.resolve()
+    if require_git:
+        marker = candidate / ".git"
+        if marker.is_symlink() or not marker.exists():
+            raise GitError("Workspace is not a Git repository")
+    return candidate
+
+
+def normalize_github_url(value: str) -> tuple[str, str, str]:
+    raw = value.strip()
+    if raw.startswith("git@github.com:"):
+        path = raw[len("git@github.com:"):]
+    else:
+        parsed = urlparse(raw)
+        if parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() != "github.com":
+            raise GitError("Only HTTPS github.com repository URLs are allowed")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.port not in {None, 443}:
+            raise GitError("GitHub repository URL cannot contain credentials, query parameters or a custom port")
+        path = parsed.path.lstrip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = [part for part in path.split("/") if part]
+    if len(parts) != 2:
+        raise GitError("GitHub repository URL must contain exactly owner/repository")
+    owner, name = parts
+    if not _GITHUB_OWNER.fullmatch(owner) or not _GITHUB_REPO.fullmatch(name) or name in {".", ".."}:
+        raise GitError("Invalid GitHub owner or repository name")
+    return f"https://github.com/{owner}/{name}.git", owner, name
+
+
+def _redact(text: str, token: str = "", auth_header: str = "") -> str:
+    result = text or ""
+    for secret in (token, auth_header):
+        if secret:
+            result = result.replace(secret, "[REDACTED]")
+    return result[-_MAX_OUTPUT_CHARS:]
+
+
+@contextmanager
+def _git_env(token: str = ""):
+    env = dict(os.environ)
+    for key in list(env):
+        if key.startswith("GIT_"):
+            env.pop(key, None)
+    env.update({
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_PAGER": "cat",
+        "GIT_EDITOR": "true",
+        "GIT_SEQUENCE_EDITOR": "true",
+        "GIT_EXTERNAL_DIFF": "",
+        "LC_ALL": "C.UTF-8",
+        "HTTP_PROXY": "",
+        "HTTPS_PROXY": "",
+        "ALL_PROXY": "",
+        "NO_PROXY": "github.com",
+    })
+    config_path = ""
+    auth_header = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="olya-git-", suffix=".config", delete=False) as handle:
+            config_path = handle.name
+            handle.write("[credential]\n\thelper =\n")
+            if token:
+                basic = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+                auth_header = f"Authorization: Basic {basic}"
+                handle.write('[http "https://github.com/"]\n')
+                handle.write(f"\textraHeader = {auth_header}\n")
+        os.chmod(config_path, 0o600)
+        env["GIT_CONFIG_GLOBAL"] = config_path
+        yield env, auth_header
+    finally:
+        if config_path:
+            try:
+                os.unlink(config_path)
+            except FileNotFoundError:
+                pass
+
+
+def _run_git(cwd: Path, args: list[str], *, token: str = "", timeout: int = 120, check: bool = True) -> subprocess.CompletedProcess[str]:
+    argv = [
+        "git",
+        "-c", "core.hooksPath=/dev/null",
+        "-c", "commit.gpgSign=false",
+        "-c", "protocol.file.allow=never",
+        "-c", "protocol.ext.allow=never",
+        *args,
+    ]
+    with _git_env(token) as (env, auth_header):
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise GitError(f"Git command failed: {type(exc).__name__}") from exc
+    if check and completed.returncode != 0:
+        detail = _redact(completed.stderr or completed.stdout, token, auth_header).strip()
+        raise GitError(detail or f"Git command failed with exit code {completed.returncode}")
+    return completed
+
+
+def _identity(root: Path) -> None:
+    name = _run_git(root, ["config", "--get", "user.name"], check=False)
+    if name.returncode != 0 or not name.stdout.strip():
+        _run_git(root, ["config", "user.name", "OLYA AI"])
+    email = _run_git(root, ["config", "--get", "user.email"], check=False)
+    if email.returncode != 0 or not email.stdout.strip():
+        _run_git(root, ["config", "user.email", "olya-ai@localhost"])
+
+
+def head(root: Path) -> str:
+    repo = _repo_root(root)
+    result = _run_git(repo, ["rev-parse", "--verify", "HEAD"], check=False)
+    value = result.stdout.strip().lower() if result.returncode == 0 else ""
+    return value if _SHA.fullmatch(value) else ""
+
+
+def changed_paths(root: Path) -> list[str]:
+    repo = _repo_root(root)
+    result = _run_git(repo, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+    tokens = result.stdout.split("\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(tokens):
+        record = tokens[index]
+        index += 1
+        if not record or len(record) < 4:
+            continue
+        status = record[:2]
+        candidate = record[3:]
+        if candidate:
+            try:
+                paths.append(_safe_path(candidate))
+            except GitError:
+                pass
+        if "R" in status or "C" in status:
+            if index < len(tokens) and tokens[index]:
+                try:
+                    paths.append(_safe_path(tokens[index]))
+                except GitError:
+                    pass
+                index += 1
+    return sorted(set(paths))
+
+
+def git_status(root: Path) -> dict:
+    repo = _repo_root(root)
+    branch_result = _run_git(repo, ["symbolic-ref", "--quiet", "--short", "HEAD"], check=False)
+    branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
+    paths = changed_paths(repo)
+    return {"branch": branch, "head": head(repo), "dirty": bool(paths), "changed_paths": paths}
+
+
+def git_diff(root: Path, *, staged: bool = False) -> dict:
+    repo = _repo_root(root)
+    args = ["diff", "--no-ext-diff", "--no-color"]
+    if staged:
+        args.append("--cached")
+    result = _run_git(repo, args)
+    full = result.stdout
+    return {"staged": bool(staged), "diff": full[:_MAX_OUTPUT_CHARS], "truncated": len(full) > _MAX_OUTPUT_CHARS}
+
+
+def ensure_local_repo(root: Path, default_branch: str) -> dict:
+    branch = _validate_branch(default_branch)
+    repo = _repo_root(root, require_git=False)
+    repo.mkdir(parents=True, exist_ok=True)
+    marker = repo / ".git"
+    if marker.exists():
+        if marker.is_symlink():
+            raise GitError("Git metadata cannot be a symlink")
+    else:
+        _run_git(repo, ["init", "--initial-branch", branch])
+    _identity(repo)
+    return git_status(repo)
+
+
+def set_origin(root: Path, repository_url: str) -> None:
+    repo = _repo_root(root)
+    canonical, _, _ = normalize_github_url(repository_url)
+    current = _run_git(repo, ["remote", "get-url", "origin"], check=False)
+    if current.returncode == 0:
+        _run_git(repo, ["remote", "set-url", "origin", canonical])
+    else:
+        _run_git(repo, ["remote", "add", "origin", canonical])
+
+
+def checkout_branch(root: Path, branch: str, *, base_branch: str = "main") -> dict:
+    repo = _repo_root(root)
+    target = _validate_branch(branch)
+    base = _validate_branch(base_branch)
+    local = _run_git(repo, ["show-ref", "--verify", "--quiet", f"refs/heads/{target}"], check=False)
+    if local.returncode == 0:
+        _run_git(repo, ["checkout", target])
+        return git_status(repo)
+    base_ref = ""
+    for candidate in (f"refs/heads/{base}", f"refs/remotes/origin/{base}"):
+        probe = _run_git(repo, ["show-ref", "--verify", "--quiet", candidate], check=False)
+        if probe.returncode == 0:
+            base_ref = candidate
+            break
+    _run_git(repo, ["checkout", "-b", target, base_ref] if base_ref else ["checkout", "-b", target])
+    return git_status(repo)
+
+
+def clone_into_workspace(root: Path, repository_url: str, default_branch: str, token: str) -> dict:
+    canonical, _, _ = normalize_github_url(repository_url)
+    branch = _validate_branch(default_branch)
+    destination = _repo_root(root, require_git=False)
+    if destination.exists() and any(destination.iterdir()):
+        raise GitError("Workspace must be empty before clone")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(prefix=f".{destination.name}.clone-", dir=destination.parent))
+    try:
+        _run_git(destination.parent, ["clone", "--no-tags", "--single-branch", "--branch", branch, canonical, str(temp_dir)], token=token, timeout=300)
+        _identity(temp_dir)
+        if destination.exists():
+            destination.rmdir()
+        os.replace(temp_dir, destination)
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+    return git_status(destination)
+
+
+def remote_head(root: Path, branch: str, token: str) -> str:
+    repo = _repo_root(root)
+    target = _validate_branch(branch)
+    result = _run_git(repo, ["ls-remote", "--heads", "origin", f"refs/heads/{target}"], token=token)
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == f"refs/heads/{target}":
+            value = parts[0].lower()
+            if _SHA.fullmatch(value):
+                return value
+    return ""
+
+
+def fetch(root: Path, branch: str, token: str) -> dict:
+    repo = _repo_root(root)
+    target = _validate_branch(branch)
+    before = remote_head(repo, target, token)
+    _run_git(repo, ["fetch", "--no-tags", "--prune", "origin", f"refs/heads/{target}:refs/remotes/origin/{target}"], token=token, timeout=300)
+    result = _run_git(repo, ["rev-parse", "--verify", f"refs/remotes/origin/{target}"], check=False)
+    after = result.stdout.strip().lower() if result.returncode == 0 else ""
+    if after and not _SHA.fullmatch(after):
+        after = ""
+    return {"branch": target, "remote_head_before": before, "remote_head_after": after, "local_head": head(repo)}
+
+
+def push_candidate_paths(root: Path, branch: str, token: str) -> tuple[str, list[str]]:
+    repo = _repo_root(root)
+    target = _validate_branch(branch)
+    before = remote_head(repo, target, token)
+    if before:
+        _run_git(repo, ["fetch", "--no-tags", "origin", f"refs/heads/{target}:refs/remotes/origin/{target}"], token=token, timeout=300)
+        result = _run_git(repo, ["diff", "--name-only", "--diff-filter=ACMR", f"refs/remotes/origin/{target}..HEAD", "--"])
+    else:
+        result = _run_git(repo, ["ls-files"])
+    paths: list[str] = []
+    for line in result.stdout.splitlines():
+        if line.strip():
+            try:
+                paths.append(_safe_path(line.strip()))
+            except GitError:
+                pass
+    return before, sorted(set(paths))
+
+
+def _text_from_head(root: Path, path: str) -> str | None:
+    result = _run_git(root, ["show", f"HEAD:{path}"], check=False)
+    if result.returncode != 0 or len(result.stdout.encode("utf-8", errors="ignore")) > _MAX_SCAN_BYTES:
+        return None
+    return result.stdout
+
+
+def _scan_text(path: str, text: str, origin: str) -> list[dict]:
+    findings: list[dict] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        for kind, pattern in _SECRET_PATTERNS:
+            match = pattern.search(line)
+            if not match:
+                continue
+            if kind == "generic_secret" and _PLACEHOLDER_SECRET.match(match.group(1).strip()):
+                continue
+            findings.append({"path": path, "line": number, "kind": kind, "origin": origin})
+            break
+    return findings
+
+
+def scan_secrets(root: Path, paths: list[str]) -> list[dict]:
+    repo = _repo_root(root)
+    findings: list[dict] = []
+    for raw in sorted(set(paths)):
+        path = _safe_path(raw)
+        target = (repo / path).resolve()
+        try:
+            target.relative_to(repo)
+        except ValueError:
+            findings.append({"path": path, "line": 0, "kind": "unsafe_path", "origin": "workspace"})
+            continue
+        if target.is_symlink():
+            findings.append({"path": path, "line": 0, "kind": "symlink_not_scanned", "origin": "workspace"})
+            continue
+        if target.is_file() and target.stat().st_size <= _MAX_SCAN_BYTES:
+            data = target.read_bytes()
+            if b"\x00" not in data:
+                findings.extend(_scan_text(path, data.decode("utf-8", errors="replace"), "workspace"))
+        committed = _text_from_head(repo, path)
+        if committed is not None:
+            findings.extend(_scan_text(path, committed, "HEAD"))
+    unique = {(item["path"], item["line"], item["kind"], item["origin"]): item for item in findings}
+    return list(unique.values())
+
+
+def commit(root: Path, message: str, paths: list[str], *, expected_head: str = "") -> dict:
+    repo = _repo_root(root)
+    clean_message = message.strip()
+    if len(clean_message) < 3 or len(clean_message) > 300 or "\x00" in clean_message:
+        raise GitError("Invalid commit message")
+    before = head(repo)
+    if expected_head and before != expected_head.lower():
+        raise GitError("Local Git HEAD changed since the operation was planned")
+    selected = [_safe_path(path) for path in paths]
+    _run_git(repo, ["add", "-A", "--", *selected] if selected else ["add", "-A", "--", "."])
+    diff = _run_git(repo, ["diff", "--cached", "--quiet"], check=False)
+    if diff.returncode == 0:
+        raise GitError("Nothing to commit")
+    if diff.returncode != 1:
+        raise GitError("Unable to inspect staged Git changes")
+    _identity(repo)
+    _run_git(repo, ["commit", "--no-gpg-sign", "-m", clean_message], timeout=180)
+    after = head(repo)
+    if not after or after == before:
+        raise GitError("Git commit did not advance HEAD")
+    changed = _run_git(repo, ["diff-tree", "--no-commit-id", "--name-only", "-r", after]).stdout.splitlines()
+    return {"head_before": before, "head_after": after, "paths": [path for path in changed if path]}
+
+
+def push(root: Path, branch: str, token: str, *, expected_head: str = "", expected_remote_head: str = "") -> dict:
+    repo = _repo_root(root)
+    target = _validate_branch(branch)
+    local = head(repo)
+    if not local:
+        raise GitError("Cannot push an unborn Git repository")
+    if expected_head and local != expected_head.lower():
+        raise GitError("Local Git HEAD changed since push was planned")
+    before = remote_head(repo, target, token)
+    if expected_remote_head and before != expected_remote_head.lower():
+        raise GitError("Remote branch changed since push was planned")
+    _run_git(repo, ["push", "--porcelain", "origin", f"HEAD:refs/heads/{target}"], token=token, timeout=300)
+    after = remote_head(repo, target, token)
+    if after != local:
+        raise GitError("Remote HEAD does not match the pushed local commit")
+    return {"branch": target, "local_head": local, "remote_head_before": before, "remote_head_after": after}
