@@ -13,6 +13,7 @@ from app.api.routes.account import router as account_router
 from app.admin_ui import router as admin_ui_router
 from app.media_admin_ui import router as media_admin_ui_router
 from app.public_ui import router as public_ui_router
+from app.user_ui import router as user_ui_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.safety_admin import router as safety_admin_router
 from app.api.routes.auth import router as auth_router
@@ -166,7 +167,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=3)
 async def privacy_headers(request: Request, call_next):
     response = await call_next(request)
     path = request.url.path
-    if path.startswith(("/v1/", "/admin", "/media-admin")):
+    if path.startswith(("/v1/", "/admin", "/media-admin", "/app")):
         response.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive, nosnippet"
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
@@ -180,7 +181,7 @@ async def privacy_headers(request: Request, call_next):
 @app.get("/robots.txt", include_in_schema=False)
 def robots() -> PlainTextResponse:
     return PlainTextResponse(
-        "User-agent: *\nDisallow: /v1/\nDisallow: /admin\nDisallow: /media-admin\n",
+        "User-agent: *\nDisallow: /v1/\nDisallow: /app\nDisallow: /admin\nDisallow: /media-admin\n",
         headers={"Cache-Control": "public, max-age=86400"},
     )
 
@@ -203,12 +204,6 @@ async def database_pool_timeout_handler(request: Request, exc: SQLAlchemyTimeout
 
 @app.exception_handler(OperationalError)
 async def database_operational_error_handler(request: Request, exc: OperationalError):
-    """Treat transient database disconnect/restart as service unavailability.
-
-    Never leak driver/SQL details to the client. pool_pre_ping/recycle will heal
-    future connections; callers receive a retryable response instead of a random
-    internal-server-error page.
-    """
     _ = request, exc
     return JSONResponse(
         status_code=503,
@@ -232,7 +227,7 @@ def _include_product_router(module: str) -> None:
 
 
 for router in (
-    public_ui_router, health_router, admin_ui_router, media_admin_ui_router, admin_router, operations_router,
+    public_ui_router, user_ui_router, health_router, admin_ui_router, media_admin_ui_router, admin_router, operations_router,
     safety_admin_router, account_router, auth_router, projects_router, memory_router,
     files_router, conversations_router, usage_router, diagnostics_router, documents_router,
     code_router, images_router, media_admin_router, runtime_router, development_router,
