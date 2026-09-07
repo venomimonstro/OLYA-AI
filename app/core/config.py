@@ -25,6 +25,7 @@ class Settings(BaseSettings):
 
     admin_bootstrap_token: str = "change-me"
     session_ttl_days: int = 30
+    session_max_active_per_user: int = 20
 
     file_storage_path: str = "./data/files"
     max_file_size_bytes: int = 20 * 1024 * 1024
