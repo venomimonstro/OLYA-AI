@@ -55,6 +55,12 @@ class ChatUsage(BaseModel):
     compiled_message_chars: int
     mode: str
     verification: str = "auto"
+    # Sprint 43 transport telemetry. Queue wait is separated from model TTFT so
+    # operators can distinguish capacity pressure from slow prompt processing.
+    queue_ms: int = 0
+    ttft_ms: int | None = None
+    output_tokens: int = 0
+    tokens_per_second: float | None = None
 
 
 class QualityCheck(BaseModel):

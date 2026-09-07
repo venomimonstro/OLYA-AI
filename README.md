@@ -4,7 +4,7 @@ X1 — self-hosted AI-платформа с локальным inference на Qw
 
 ## Текущая версия
 
-**0.40.0 + Sprint 42 — Qwen3.6 32-GB production profile.**
+**0.40.0 + Sprint 43 — Qwen3.6 + real token streaming/cancellation.**
 
 GitHub `main` является каноническим исходным кодом. Production-конфигурация fail-closed: дефолтные секреты, SQLite в production, сломанные обязательные routers, красный release gate, неподтверждённый GGUF или небезопасный memory budget не считаются рабочей установкой.
 
@@ -31,9 +31,9 @@ Production-модель зафиксирована единым `model-manifest.
 - Docker + Docker Compose v2;
 - желательно AVX2/AVX512.
 
-Профиль 32 GiB намеренно использует **8K physical context**, один generation slot и минимум 8 GiB host/control-plane reserve вне llama.cpp. Llama memory cap не поднимается выше 24 GiB. На 48–63 GiB manifest допускает до 12K, на 64+ GiB — до 16K после installer normalization и target-node проверки.
+Профиль 32 GiB намеренно использует **8K physical context**, один generation slot и минимум 8 GiB host/control-plane reserve вне llama.cpp. На минимальном 8K-профиле llama ограничивается подтверждённым 23-GiB envelope, а sandbox/project-runtime — 1 GiB. Старые 2-GiB sandbox limits при upgrade автоматически приводятся к безопасному 32-GiB профилю. На 48–63 GiB manifest допускает до 12K, на 64+ GiB — до 16K после installer normalization и target-node проверки.
 
-На минимальном узле sandbox child по умолчанию ограничен 1 GiB. Image worker остаётся отдельным optional profile и не должен включаться на минимальном сервере без прохождения memory-budget Doctor.
+Image worker остаётся отдельным optional profile и не должен включаться на минимальном сервере без прохождения memory-budget Doctor.
 
 Control-plane без Qwen (`--no-inference`) требует минимум 8 GiB RAM.
 
@@ -68,11 +68,28 @@ Bootstrap клонирует/обновляет `main` и передаёт уп�
 
 Если обязательный этап красный, installer завершается ошибкой и **не объявляет установку успешной**.
 
+## Настоящий streaming и Stop
+
+Sprint 43 заменяет имитацию streaming через heartbeat + один финальный JSON на реальный путь:
+
+`llama.cpp stream=true → X1 SSE → browser ReadableStream → live assistant bubble`.
+
+- пользователю показываются `delta.content` chunks по мере генерации;
+- hidden reasoning не выводится как текст ответа;
+- UI показывает queue wait, TTFT и tokens/sec;
+- кнопка `Стоп` вызывает отмену HTTP stream;
+- отмена downstream task закрывает upstream httpx stream к llama.cpp;
+- generation semaphore освобождается при cancellation;
+- отменённый запрос не сохраняется как успешно завершённый assistant message;
+- если verification исправляет уже показанный ответ, SSE `replace` синхронизирует экран с канонической серверной историей.
+
 ## Пользовательский интерфейс
 
 После установки публичный сайт находится на `/`, регистрация — `/register`, вход — `/login`, рабочее пространство пользователя — `/app`.
 
-После регистрации/входа пользователь сразу переводится в `/app`. Там доступны канонические серверные диалоги, Auto/Fast/Work/Deep, Auto/Strict/Off verification, internet research `Авто / Всегда / Выкл`, проекты и другие продуктовые контуры.
+После регистрации/входа пользователь сразу переводится в `/app`. Там доступны канонические серверные диалоги, Auto/Fast/Work/Deep, Auto/Strict/Off verification, internet research `Авто / Всегда / Выкл`, streaming-ответы со Stop, проекты и другие продуктовые контуры.
+
+Ответы по-прежнему вставляются в DOM через `textContent`, а не через небезопасный HTML. CSP использует nonce, access token браузерной сессии хранится в `sessionStorage`.
 
 ## Стабильность под нагрузкой
 

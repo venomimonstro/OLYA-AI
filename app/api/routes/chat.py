@@ -1,7 +1,10 @@
-from time import perf_counter
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import json
+from collections.abc import Awaitable, Callable
+from time import perf_counter
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -9,25 +12,26 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.inference.client import LlamaUnavailable
+from app.inference.client import LlamaGeneration, LlamaUnavailable
 from app.inference.router import choose_route
 from app.models import AnswerAudit, Conversation, Message, Project, Task, UsageEvent, User
 from app.schemas.chat import ChatMessage, ChatRequest, ChatResponse, ChatUsage, QualityReport
 from app.services.access import require_project_role
 from app.services.auth import get_current_user
+from app.services.diagnostics import detect_repeat_query, observe_usage
 from app.services.project_context import ProjectContextBuilder
 from app.services.quality import AnswerQualityEngine
-from app.services.source_context import FRESHNESS_SENTINEL, SourceContextBuilder
 from app.services.quota import QuotaExceededError, ensure_compute_available
-from app.services.safety import require_capability
 from app.services.resource_governor import ResourceBusyError
+from app.services.safety import require_capability
+from app.services.source_context import FRESHNESS_SENTINEL, SourceContextBuilder
 from app.services.tasks import TaskBudgetExceededError, ensure_task_compute_available, record_task_compute, require_task_access
 from app.services.user_resource_governor import UserConcurrencyBusyError
-from app.services.diagnostics import detect_repeat_query, observe_usage
 
 router = APIRouter(prefix="/v1", tags=["chat"])
 _quality = AnswerQualityEngine()
 _source_context = SourceContextBuilder()
+TokenSink = Callable[[str], Awaitable[None]]
 
 
 def _resolve_scope(db: Session, user: User, payload: ChatRequest) -> tuple[Project | None, Conversation, Task | None]:
@@ -84,6 +88,10 @@ def _publish_request_usage(
     duration_ms: int,
     success: bool,
     quality_status: str = "unchecked",
+    ttft_ms: int | None = None,
+    output_tokens: int = 0,
+    tokens_per_second: float | None = None,
+    cancelled: bool = False,
 ) -> None:
     request.state.x1_usage = {
         "request_id": request_id,
@@ -93,15 +101,96 @@ def _publish_request_usage(
         "duration_ms": max(0, int(duration_ms)),
         "success": bool(success),
         "quality_status": quality_status,
+        "ttft_ms": None if ttft_ms is None else max(0, int(ttft_ms)),
+        "output_tokens": max(0, int(output_tokens)),
+        "tokens_per_second": None if tokens_per_second is None else max(0.0, float(tokens_per_second)),
+        "cancelled": bool(cancelled),
     }
 
 
-@router.post("/chat", response_model=ChatResponse)
-async def chat(
+def _usage_event(
+    *,
+    user: User,
+    project: Project | None,
+    conversation: Conversation,
+    mode: str,
+    raw_chars: int,
+    compiled_chars: int,
+    output_chars: int,
+    duration_ms: int,
+    inference_ms: int,
+    queue_ms: int,
+    success: bool,
+    request_id: str,
+) -> UsageEvent:
+    return UsageEvent(
+        user_id=user.id,
+        project_id=project.id if project else None,
+        conversation_id=conversation.id,
+        mode=mode,
+        raw_chars=raw_chars,
+        compiled_chars=compiled_chars,
+        output_chars=max(0, int(output_chars)),
+        duration_ms=max(0, int(duration_ms)),
+        inference_ms=max(0, int(inference_ms)),
+        queue_ms=max(0, int(queue_ms)),
+        success=bool(success),
+        request_id=request_id,
+    )
+
+
+async def _primary_generation(
+    request: Request,
+    messages: list[ChatMessage],
+    *,
+    max_tokens: int,
+    reasoning: bool,
+    on_token: TokenSink | None,
+) -> LlamaGeneration:
+    """Use Sprint 43 streaming transport, with a narrow legacy-test fallback.
+
+    Production lifespan always installs LlamaClient, which exports generate().
+    The fallback exists only for historical/test backends that implement the old
+    chat()-only contract; keeping it prevents an internal interface migration from
+    invalidating the immutable Sprint 0-26 regression bundle.
+    """
+    llama = request.app.state.llama
+    generate = getattr(llama, "generate", None)
+    if callable(generate):
+        return await generate(
+            messages,
+            max_tokens=max_tokens,
+            reasoning=reasoning,
+            on_token=on_token,
+        )
+    chat = getattr(llama, "chat", None)
+    if not callable(chat):
+        raise LlamaUnavailable("local inference backend does not expose generate or chat")
+    started = perf_counter()
+    text = await chat(messages, max_tokens=max_tokens, reasoning=reasoning)
+    finished = perf_counter()
+    if not isinstance(text, str) or not text.strip():
+        raise LlamaUnavailable("legacy local inference backend returned invalid content")
+    cleaned = text.strip()
+    if on_token is not None:
+        await on_token(cleaned)
+    return LlamaGeneration(
+        text=cleaned,
+        ttft_ms=max(0, int((finished - started) * 1000)),
+        output_tokens=0,
+        tokens_per_second=0.0,
+        generation_ms=max(0, int((finished - started) * 1000)),
+    )
+
+
+async def _chat_impl(
     payload: ChatRequest,
     request: Request,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    user: User,
+    db: Session,
+    *,
+    on_token: TokenSink | None = None,
+    on_replace: TokenSink | None = None,
 ) -> ChatResponse:
     settings = request.app.state.settings
     require_capability(db, user.id, "chat")
@@ -194,19 +283,32 @@ async def chat(
     quality_urls = {url for url in verified_urls if url != FRESHNESS_SENTINEL}
 
     # Never hold a PostgreSQL connection while waiting for the CPU inference
-    # queue or while Qwen is generating. This transaction contains only bounded
-    # reads plus durable conversation/quota state.
+    # queue or while Qwen is generating.
     db.commit()
 
     request_id = str(uuid4())
     total_started = perf_counter()
     queue_started = perf_counter()
+    inference_started = 0.0
     inference_ms = 0
     queue_ms = 0
     text_out = ""
     success = False
     deterministic = None
     critic = None
+    primary: LlamaGeneration | None = None
+    streamed_output_chars = 0
+    streamed_chunks = 0
+    streamed_ttft_ms: int | None = None
+
+    async def relay_token(text: str) -> None:
+        nonlocal streamed_output_chars, streamed_chunks, streamed_ttft_ms
+        streamed_output_chars += len(text)
+        streamed_chunks += 1
+        if streamed_ttft_ms is None and inference_started > 0:
+            streamed_ttft_ms = max(0, int((perf_counter() - inference_started) * 1000))
+        if on_token is not None:
+            await on_token(text)
 
     try:
         async with request.app.state.user_governor.slot(user.id, quota.max_concurrent_inference):
@@ -214,7 +316,14 @@ async def chat(
                 queue_ms = int((perf_counter() - queue_started) * 1000)
                 inference_started = perf_counter()
                 try:
-                    text_out = await request.app.state.llama.chat(compiled, max_tokens=max_tokens, reasoning=route.reasoning)
+                    primary = await _primary_generation(
+                        request,
+                        compiled,
+                        max_tokens=max_tokens,
+                        reasoning=route.reasoning,
+                        on_token=relay_token if on_token is not None else None,
+                    )
+                    text_out = primary.text
                     if payload.verification != "off":
                         deterministic = _quality.deterministic(
                             text_out,
@@ -224,11 +333,18 @@ async def chat(
                         )
                         if deterministic.failed and (payload.requirements or payload.verification == "strict"):
                             try:
-                                text_out = await request.app.state.llama.chat(
+                                repaired = await request.app.state.llama.chat(
                                     _quality.repair_messages(user_text, text_out, deterministic, payload.requirements),
                                     max_tokens=max_tokens,
                                     reasoning=False,
                                 )
+                                if repaired != text_out and on_replace is not None:
+                                    # The user may already have seen the primary
+                                    # answer. A repair therefore replaces the live
+                                    # bubble explicitly instead of silently making
+                                    # the final server history disagree with UI.
+                                    await on_replace(repaired)
+                                text_out = repaired
                                 deterministic = _quality.deterministic(
                                     text_out,
                                     payload.requirements,
@@ -256,6 +372,60 @@ async def chat(
                     success = True
                 finally:
                     inference_ms = int((perf_counter() - inference_started) * 1000)
+    except asyncio.CancelledError:
+        duration_ms = int((perf_counter() - total_started) * 1000)
+        effective_ttft = primary.ttft_ms if primary is not None else streamed_ttft_ms
+        effective_tokens = primary.output_tokens if primary is not None else streamed_chunks
+        effective_tps = primary.tokens_per_second if primary is not None else (
+            round(streamed_chunks / max(0.001, (inference_ms - (effective_ttft or 0)) / 1000.0), 3)
+            if streamed_chunks and inference_ms > (effective_ttft or 0)
+            else None
+        )
+        _publish_request_usage(
+            request,
+            request_id=request_id,
+            inference_ms=inference_ms,
+            queue_ms=queue_ms,
+            duration_ms=duration_ms,
+            success=False,
+            quality_status="cancelled",
+            ttft_ms=effective_ttft,
+            output_tokens=effective_tokens,
+            tokens_per_second=effective_tps,
+            cancelled=True,
+        )
+        db.rollback()
+        # Cancellation must release the generation semaphore before doing this
+        # short accounting write. The exception reaches this block only after the
+        # async governor contexts above have already unwound.
+        with contextlib.suppress(Exception):
+            if task is not None and inference_ms > 0:
+                record_task_compute(db, task.id, max(1, (inference_ms + 999) // 1000))
+            usage_event = _usage_event(
+                user=user,
+                project=project,
+                conversation=conversation,
+                mode=route.mode,
+                raw_chars=raw_chars,
+                compiled_chars=compiled_chars,
+                output_chars=streamed_output_chars,
+                duration_ms=duration_ms,
+                inference_ms=inference_ms,
+                queue_ms=queue_ms,
+                success=False,
+                request_id=request_id,
+            )
+            db.add(usage_event)
+            db.flush()
+            observe_usage(
+                db,
+                usage_event,
+                max_queue_ms=settings.frustration_slow_queue_ms,
+                max_duration_ms=settings.frustration_slow_response_ms,
+                repeat_query=repeat_query,
+            )
+            db.commit()
+        raise
     except UserConcurrencyBusyError as exc:
         db.rollback()
         raise HTTPException(
@@ -280,18 +450,20 @@ async def chat(
             duration_ms=duration_ms,
             success=False,
             quality_status="failed",
+            ttft_ms=streamed_ttft_ms,
+            output_tokens=streamed_chunks,
         )
         db.rollback()
         if task is not None:
             record_task_compute(db, task.id, max(1, (inference_ms + 999) // 1000))
-        usage_event = UsageEvent(
-            user_id=user.id,
-            project_id=project.id if project else None,
-            conversation_id=conversation.id,
+        usage_event = _usage_event(
+            user=user,
+            project=project,
+            conversation=conversation,
             mode=route.mode,
             raw_chars=raw_chars,
             compiled_chars=compiled_chars,
-            output_chars=0,
+            output_chars=streamed_output_chars,
             duration_ms=duration_ms,
             inference_ms=inference_ms,
             queue_ms=queue_ms,
@@ -343,10 +515,10 @@ async def chat(
 
     if task is not None:
         record_task_compute(db, task.id, max(1, (inference_ms + 999) // 1000))
-    usage_event = UsageEvent(
-        user_id=user.id,
-        project_id=project.id if project else None,
-        conversation_id=conversation.id,
+    usage_event = _usage_event(
+        user=user,
+        project=project,
+        conversation=conversation,
         mode=route.mode,
         raw_chars=raw_chars,
         compiled_chars=compiled_chars,
@@ -374,6 +546,9 @@ async def chat(
         duration_ms=duration_ms,
         success=success,
         quality_status=quality_status,
+        ttft_ms=primary.ttft_ms if primary is not None else None,
+        output_tokens=primary.output_tokens if primary is not None else 0,
+        tokens_per_second=primary.tokens_per_second if primary is not None else None,
     )
     db.commit()
     return ChatResponse(
@@ -384,10 +559,28 @@ async def chat(
             compiled_message_chars=compiled_chars,
             mode=route.mode,
             verification=payload.verification,
+            queue_ms=queue_ms,
+            ttft_ms=primary.ttft_ms if primary is not None else None,
+            output_tokens=primary.output_tokens if primary is not None else 0,
+            tokens_per_second=primary.tokens_per_second if primary is not None else None,
         ),
         quality=quality_report,
         conversation_id=conversation.id,
     )
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat(
+    payload: ChatRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ChatResponse:
+    return await _chat_impl(payload, request, user, db)
+
+
+def _sse(event: str, payload: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
 
 @router.post("/chat/stream")
@@ -398,33 +591,63 @@ async def chat_stream(
     db: Session = Depends(get_db),
 ):
     async def events():
-        task = asyncio.create_task(chat(payload, request, user, db))
-        yield "event: status\ndata: " + json.dumps(
-            {"state": "accepted", "queue_waiting": int(getattr(request.app.state.governor, "waiting", 0))}
-        ) + "\n\n"
+        outbound: asyncio.Queue[tuple[str, dict]] = asyncio.Queue(maxsize=128)
+
+        async def emit_token(text: str) -> None:
+            await outbound.put(("token", {"text": text}))
+
+        async def emit_replace(text: str) -> None:
+            await outbound.put(("replace", {"text": text}))
+
+        task = asyncio.create_task(
+            _chat_impl(payload, request, user, db, on_token=emit_token, on_replace=emit_replace),
+            name="x1-chat-stream",
+        )
+        heartbeat_at = perf_counter()
+        yield _sse(
+            "status",
+            {"state": "accepted", "queue_waiting": int(getattr(request.app.state.governor, "waiting", 0))},
+        )
         try:
-            while not task.done():
-                done, _ = await asyncio.wait({task}, timeout=2.0)
-                if done:
+            while True:
+                # Polling disconnect independently of token arrival matters most
+                # during queue wait and long TTFT. It ensures browser Abort/Stop
+                # cancels the worker even before llama.cpp emits its first chunk.
+                if await request.is_disconnected():
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+                    return
+                if task.done() and outbound.empty():
                     break
-                yield "event: heartbeat\ndata: " + json.dumps(
-                    {"state": "working", "queue_waiting": int(getattr(request.app.state.governor, "waiting", 0))}
-                ) + "\n\n"
+                try:
+                    event, data = await asyncio.wait_for(outbound.get(), timeout=0.25)
+                except TimeoutError:
+                    now = perf_counter()
+                    if now - heartbeat_at >= 2.0:
+                        heartbeat_at = now
+                        yield _sse(
+                            "heartbeat",
+                            {
+                                "state": "working",
+                                "queue_waiting": int(getattr(request.app.state.governor, "waiting", 0)),
+                            },
+                        )
+                    continue
+                yield _sse(event, data)
+
             result = await task
-            yield "event: result\ndata: " + json.dumps(result.model_dump(mode="json"), ensure_ascii=False) + "\n\n"
+            yield _sse("result", result.model_dump(mode="json"))
         except asyncio.CancelledError:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
             raise
         except HTTPException as exc:
-            yield "event: error\ndata: " + json.dumps(
-                {"status_code": exc.status_code, "detail": exc.detail}, ensure_ascii=False
-            ) + "\n\n"
+            yield _sse("error", {"status_code": exc.status_code, "detail": exc.detail})
         except Exception:
-            yield "event: error\ndata: " + json.dumps(
-                {"status_code": 500, "detail": "Chat processing failed"}
-            ) + "\n\n"
+            yield _sse("error", {"status_code": 500, "detail": "Chat processing failed"})
         finally:
             if not task.done():
                 task.cancel()

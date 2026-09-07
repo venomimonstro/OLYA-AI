@@ -174,9 +174,13 @@ if values.get('X1_SEARCH_PROVIDERS','') in {'','disabled'}: setv('X1_SEARCH_PROV
 setv('X1_SEARXNG_BASE_URL','http://searxng:8080')
 setv('X1_PUBLIC_LAUNCH_ENFORCE_EXPOSURE','true')
 
+# The 8K/32-GB class profile deliberately uses the minimum validated llama cap
+# instead of consuming every technically available GiB. This leaves useful
+# headroom for PostgreSQL, API, search, page cache and cancellation cleanup.
+target_llama_memory_gb = llama_min_gib if safe_context <= 8192 else llama_memory_gb
 current_memory=memory_gb(values.get('X1_LLAMA_MEMORY_LIMIT'))
-if current_memory is None or current_memory > llama_memory_gb or current_memory < llama_min_gib:
-    setv('X1_LLAMA_MEMORY_LIMIT',f'{llama_memory_gb}g')
+if current_memory is None or current_memory > target_llama_memory_gb or current_memory < llama_min_gib:
+    setv('X1_LLAMA_MEMORY_LIMIT',f'{target_llama_memory_gb}g')
 
 # llama.cpp boots with DEEP_CONTEXT_TOKENS. Existing installations are clamped
 # down when moved to a smaller host or when a new model needs a safer envelope.
@@ -189,6 +193,17 @@ else:
 setv('X1_DEEP_CONTEXT_TOKENS',deep_context)
 setv('X1_MAX_CONTEXT_TOKENS',min(normal_context,deep_context))
 
+# Repair pre-Sprint42 installations whose 2-GiB sandbox envelope was reasonable
+# for the old model but leaves too little operational margin on a 32-GiB Qwen3.6
+# node. Larger 48/64+ hosts keep their explicitly configured higher envelope.
+if safe_context <= 8192:
+    sandbox_mb=bounded_int('X1_SANDBOX_MAX_MEMORY_MB',1024,256,1024)
+    runtime_max_mb=bounded_int('X1_PROJECT_RUNTIME_MAX_MEMORY_MB',1024,256,1024)
+    runtime_default_mb=bounded_int('X1_PROJECT_RUNTIME_DEFAULT_MEMORY_MB',min(1024,runtime_max_mb),128,runtime_max_mb)
+    setv('X1_SANDBOX_MAX_MEMORY_MB',sandbox_mb)
+    setv('X1_PROJECT_RUNTIME_MAX_MEMORY_MB',runtime_max_mb)
+    setv('X1_PROJECT_RUNTIME_DEFAULT_MEMORY_MB',runtime_default_mb)
+
 if new_env:
     setv('X1_LLAMA_THREADS',threads); setv('X1_LLAMA_THREADS_BATCH',threads)
 else:
@@ -199,7 +214,7 @@ for key,value in {'X1_HTTP_LIMIT_CONCURRENCY':'128','X1_HTTP_BACKLOG':'2048','X1
 path.write_text('\n'.join(lines).rstrip()+'\n','utf-8')
 PY
 chmod 600 .env
-info "Production configuration prepared (RAM=${ram_gib_exact}GiB, CPU=${cores}, model=${model_name}, llama cap=${llama_memory_gb}GiB, reserved=${reserve_gib}GiB, context=${safe_context})"
+info "Production configuration prepared (RAM=${ram_gib_exact}GiB, CPU=${cores}, model=${model_name}, llama available=${llama_memory_gb}GiB, reserved=${reserve_gib}GiB, context=${safe_context})"
 
 if [ "$WITH_INFERENCE" -eq 1 ]; then
   info "Downloading/verifying pinned ${model_name} GGUF (resumable + SHA-256)"
