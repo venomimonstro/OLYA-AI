@@ -195,7 +195,6 @@ def _ensure_provider_stat(db: Session, provider: str) -> None:
             db.add(candidate)
             db.flush()
     except IntegrityError:
-        # Another concurrent search initialized this provider row first.
         pass
 
 
@@ -256,8 +255,6 @@ def _store_cache_result(
             db.flush()
         return
     except IntegrityError:
-        # A concurrent identical search won the cache-key insert. Merge our
-        # successful result into that canonical row instead of surfacing 500.
         row = db.get(SearchQueryCache, key)
         if row is None:
             raise DiscoveryError("Search cache concurrency recovery failed")
@@ -304,6 +301,11 @@ async def cached_provider_search(db: Session, discovery: object, query: str, *, 
         if not active:
             active = ordered
         runtime_pool = ProviderPoolDiscovery(active)
+
+        # Cache/provider ordering reads are complete. Do not hold a PostgreSQL
+        # connection while SearXNG/Brave performs network I/O; the bounded
+        # research queue must not become a bounded DB-pool leak.
+        db.commit()
         outcomes = await runtime_pool.search_outcomes(
             query,
             count=count,
@@ -325,6 +327,7 @@ async def cached_provider_search(db: Session, discovery: object, query: str, *, 
                     merged.append(outcome.hits[idx])
         hits = dedupe_hits(merged, limit=count)
     else:
+        db.commit()
         hits = await discovery.search(query, count=count, country=country, language=language)
     elapsed = int((time.perf_counter() - start) * 1000)
     _store_cache_result(
