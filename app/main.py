@@ -101,6 +101,14 @@ async def lifespan(app: FastAPI):
         max_queue=max(0, int(settings.research_max_queue_size)),
         wait_timeout_seconds=max(0.5, float(settings.research_queue_timeout_seconds)),
     )
+    # Upload bodies are buffered only after this gate. Two active 20 MiB bodies
+    # plus a tiny waiting queue are safe inside the 2 GiB API container; HTTP
+    # concurrency itself can remain much higher for cheap auth/health/UI calls.
+    app.state.file_upload_governor = ResourceGovernor(
+        max_concurrent=2,
+        max_queue=8,
+        wait_timeout_seconds=15.0,
+    )
     app.state.user_governor = UserResourceGovernor()
     configure_render_gate(
         settings.document_max_concurrent_renders,
@@ -178,15 +186,40 @@ def _network_research_request(request: Request) -> bool:
     )
 
 
+def _file_upload_request(request: Request) -> bool:
+    if request.method.upper() != "POST":
+        return False
+    parts = [part for part in request.url.path.split("/") if part]
+    # /v1/projects/{project_id}/files only. File-search/download/delete do not
+    # allocate request bodies and must not consume this scarce lane.
+    return len(parts) == 4 and parts[0] == "v1" and parts[1] == "projects" and parts[3] == "files"
+
+
+@app.middleware("http")
+async def file_upload_admission(request: Request, call_next):
+    if not _file_upload_request(request):
+        return await call_next(request)
+    governor = getattr(request.app.state, "file_upload_governor", None)
+    if governor is None:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "File upload admission is not ready; retry shortly"},
+            headers={"Retry-After": "3"},
+        )
+    try:
+        async with governor.slot():
+            return await call_next(request)
+    except ResourceBusyError:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "File upload capacity is busy; retry shortly"},
+            headers={"Retry-After": "5"},
+        )
+
+
 @app.middleware("http")
 async def research_admission(request: Request, call_next):
-    """Queue network research before FastAPI creates a DB dependency.
-
-    Only a small number of requests are allowed to enter SearXNG/fetch at once.
-    Waiting requests therefore consume neither a PostgreSQL connection nor an
-    unbounded number of sidecar/network tasks. Overflow is a retryable response,
-    not a whole-node resource failure.
-    """
+    """Queue network research before FastAPI creates a DB dependency."""
     if not _network_research_request(request):
         return await call_next(request)
     governor = getattr(request.app.state, "research_governor", None)
