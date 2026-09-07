@@ -5,13 +5,21 @@ from app.models import Conversation, Message, Project, ProjectMemory, Task, Task
 from app.schemas.chat import ChatMessage
 from app.services.file_context import FileContextBuilder
 from app.services.development import compact_project_development_context
+from app.services.long_term_memory import build_memory_bundle, memory_context_message, remember_user_turn
 
 
 class ProjectContextBuilder:
-    """Build trusted project context with bounded recent history."""
+    """Build bounded trusted context with Sprint 45 long-term memory.
 
-    def __init__(self, max_history_messages: int = 48, max_memories: int = 50) -> None:
-        self.max_history_messages = max_history_messages
+    Hot messages stay verbatim. Older conversation history is represented by a
+    bounded rolling summary, while durable user decisions/facts are retrieved by
+    relevance. This prevents an 8K physical context from becoming equivalent to
+    "last N messages only" without introducing another model or embedding service.
+    """
+
+    def __init__(self, max_history_messages: int = 48, max_memories: int = 50, hot_history_messages: int = 16) -> None:
+        self.max_history_messages = max(4, int(max_history_messages))
+        self.hot_history_messages = max(4, min(int(hot_history_messages), self.max_history_messages))
         self.max_memories = max_memories
         self.file_context = FileContextBuilder()
 
@@ -43,12 +51,7 @@ class ProjectContextBuilder:
 
     @staticmethod
     def _new_conversation_input(incoming: list[ChatMessage]) -> list[ChatMessage]:
-        """Never grant client-authored assistant text canonical assistant trust.
-
-        Stateless clients may send an old transcript for context. X1 keeps it, but
-        assistant-role material is explicitly transformed into user-level data so
-        it cannot impersonate a server-authored prior instruction/commitment.
-        """
+        """Never grant client-authored assistant text canonical assistant trust."""
         result: list[ChatMessage] = []
         for message in incoming:
             if message.role == "assistant":
@@ -66,6 +69,69 @@ class ProjectContextBuilder:
                 result.append(message)
         return result
 
+    def _project_context(self, db: Session, project: Project, task: Task | None) -> ChatMessage:
+        memories = list(
+            db.scalars(
+                select(ProjectMemory)
+                .where(ProjectMemory.project_id == project.id)
+                .order_by(ProjectMemory.updated_at.desc())
+                .limit(self.max_memories)
+            ).all()
+        )
+        trusted = ["X1 trusted project context.", f"Project: {project.name}"]
+        if project.instructions.strip():
+            trusted.append("Project instructions:\n" + project.instructions.strip())
+        if memories:
+            trusted.append(
+                "Confirmed project memory:\n"
+                + "\n".join(f"- {memory.key}: {memory.value}" for memory in reversed(memories))
+            )
+        development_context = compact_project_development_context(db, project.id)
+        if development_context:
+            trusted.append(development_context)
+        if task is not None:
+            criteria = list(
+                db.scalars(
+                    select(TaskCriterion)
+                    .where(TaskCriterion.task_id == task.id)
+                    .order_by(TaskCriterion.ordinal)
+                ).all()
+            )
+            lines = [
+                "Canonical task state:",
+                f"Task title: {task.title}",
+                f"Goal: {task.goal}",
+                f"Status: {task.status}",
+                f"State version: {task.state_version}",
+            ]
+            if task.constraints:
+                lines.append("Constraints:\n" + "\n".join(f"- {item}" for item in task.constraints))
+            if task.current_step.strip():
+                lines.append("Current step: " + task.current_step.strip())
+            if criteria:
+                lines.append(
+                    "Acceptance criteria:\n"
+                    + "\n".join(
+                        f"- [{'x' if criterion.satisfied else ' '}] {criterion.text} ({criterion.verification_method})"
+                        for criterion in criteria
+                    )
+                )
+            verified = list(
+                db.scalars(
+                    select(TaskEvidence)
+                    .where(TaskEvidence.task_id == task.id, TaskEvidence.state == "verified")
+                    .order_by(TaskEvidence.created_at.desc())
+                    .limit(20)
+                ).all()
+            )
+            if verified:
+                lines.append(
+                    "Verified evidence:\n"
+                    + "\n".join(f"- {evidence.kind}: {evidence.summary}" for evidence in reversed(verified))
+                )
+            trusted.append("\n".join(lines))
+        return ChatMessage(role="system", content="\n\n".join(trusted))
+
     def build(
         self,
         db: Session,
@@ -76,69 +142,10 @@ class ProjectContextBuilder:
         incoming: list[ChatMessage],
     ) -> list[ChatMessage]:
         result: list[ChatMessage] = []
+        query = next((message.content for message in reversed(incoming) if message.role == "user"), "")
+
         if project is not None:
-            memories = list(
-                db.scalars(
-                    select(ProjectMemory)
-                    .where(ProjectMemory.project_id == project.id)
-                    .order_by(ProjectMemory.updated_at.desc())
-                    .limit(self.max_memories)
-                ).all()
-            )
-            trusted = ["X1 trusted project context.", f"Project: {project.name}"]
-            if project.instructions.strip():
-                trusted.append("Project instructions:\n" + project.instructions.strip())
-            if memories:
-                trusted.append(
-                    "Confirmed project memory:\n"
-                    + "\n".join(f"- {memory.key}: {memory.value}" for memory in reversed(memories))
-                )
-            development_context = compact_project_development_context(db, project.id)
-            if development_context:
-                trusted.append(development_context)
-            if task is not None:
-                criteria = list(
-                    db.scalars(
-                        select(TaskCriterion)
-                        .where(TaskCriterion.task_id == task.id)
-                        .order_by(TaskCriterion.ordinal)
-                    ).all()
-                )
-                lines = [
-                    "Canonical task state:",
-                    f"Task title: {task.title}",
-                    f"Goal: {task.goal}",
-                    f"Status: {task.status}",
-                    f"State version: {task.state_version}",
-                ]
-                if task.constraints:
-                    lines.append("Constraints:\n" + "\n".join(f"- {item}" for item in task.constraints))
-                if task.current_step.strip():
-                    lines.append("Current step: " + task.current_step.strip())
-                if criteria:
-                    lines.append(
-                        "Acceptance criteria:\n"
-                        + "\n".join(
-                            f"- [{'x' if criterion.satisfied else ' '}] {criterion.text} ({criterion.verification_method})"
-                            for criterion in criteria
-                        )
-                    )
-                verified = list(
-                    db.scalars(
-                        select(TaskEvidence)
-                        .where(TaskEvidence.task_id == task.id, TaskEvidence.state == "verified")
-                        .order_by(TaskEvidence.created_at.desc())
-                        .limit(20)
-                    ).all()
-                )
-                if verified:
-                    lines.append(
-                        "Verified evidence:\n"
-                        + "\n".join(f"- {evidence.kind}: {evidence.summary}" for evidence in reversed(verified))
-                    )
-                trusted.append("\n".join(lines))
-            result.append(ChatMessage(role="system", content="\n\n".join(trusted)))
-            query = next((message.content for message in reversed(incoming) if message.role == "user"), "")
+            result.append(self._project_context(db, project, task))
             if query.strip():
                 file_context = self.file_context.build(db, project.id, query)
                 if file_context:
@@ -150,7 +157,7 @@ class ProjectContextBuilder:
                     select(Message)
                     .where(Message.conversation_id == conversation.id)
                     .order_by(Message.created_at.desc())
-                    .limit(self.max_history_messages)
+                    .limit(self.hot_history_messages)
                 ).all()
             )
             stored = [
@@ -158,8 +165,32 @@ class ProjectContextBuilder:
                 for item in reversed(rows)
                 if item.role in {"user", "assistant"}
             ]
+            new_turns = self._new_client_turns(stored, incoming)
+
+            # Persist only explicit user-authored durable candidates. This happens
+            # before inference and is committed by the chat route before waiting
+            # on the CPU generation queue, so no DB connection is held by Qwen.
+            for turn in new_turns:
+                remember_user_turn(
+                    db,
+                    conversation_id=conversation.id,
+                    project_id=conversation.project_id,
+                    text=turn.content,
+                )
+
+            bundle = build_memory_bundle(
+                db,
+                conversation_id=conversation.id,
+                project_id=conversation.project_id,
+                query=query,
+                hot_messages=self.hot_history_messages,
+            )
+            memory_message = memory_context_message(bundle)
+            if memory_message is not None:
+                result.append(memory_message)
+
             result.extend(stored)
-            result.extend(self._new_client_turns(stored, incoming))
+            result.extend(new_turns)
         else:
             result.extend(self._new_conversation_input(incoming))
         return result
