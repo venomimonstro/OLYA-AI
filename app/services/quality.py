@@ -15,14 +15,10 @@ _PLACEHOLDER_PATTERNS = (
 )
 _URL_RE = re.compile(r"https?://[^\s<>()\]\[\]{}\"']+", re.IGNORECASE)
 _FRESHNESS_MARKERS = (
-    # Explicit freshness language.
     "сегодня", "сейчас", "на данный момент", "актуальн", "последние новости",
     "последние данные", "последняя версия", "текущая цена", "текущая стоимость",
     "текущий курс", "latest", "today", "right now", "currently", "current price",
     "current rate", "latest version", "latest news",
-    # Common requests that are inherently time-sensitive even when the user does
-    # not add the word "current". False-positive grounding is safer than giving a
-    # confident stale price/weather/schedule from model memory.
     "курс доллара", "курс евро", "курс валют", "обменный курс",
     "цена биткоин", "цена bitcoin", "стоимость биткоин", "котиров",
     "биржев", "погода", "прогноз погоды", "расписание", "в наличии",
@@ -88,15 +84,29 @@ class AnswerQualityEngine:
 
         urls = sorted(set(item.rstrip(".,;:!?)]}") for item in _URL_RE.findall(text)))
         allowed = {item.rstrip("/") for item in (verified_urls or set())}
+        cited_allowed = {item.rstrip("/") for item in urls} & allowed
         if allowed:
-            checks.append(
-                self._check(
-                    "source_grounding",
-                    "К ответу передан проверенный source context",
-                    "passed",
-                    f"Проверенных source URL: {len(allowed)}",
+            if cited_allowed:
+                checks.append(
+                    self._check(
+                        "source_grounding",
+                        "Ответ действительно ссылается на проверенный source context",
+                        "passed",
+                        f"Процитировано проверенных source URL: {len(cited_allowed)}",
+                    )
                 )
-            )
+            else:
+                checks.append(
+                    self._check(
+                        "source_grounding",
+                        "Приложенные источники должны быть явно процитированы в ответе",
+                        "unverified",
+                        "Источник был в prompt, но ни один проверенный URL не процитирован в финальном ответе",
+                    )
+                )
+                warnings.append(
+                    "К ответу были приложены источники, но финальный текст не содержит ссылку ни на один проверенный snapshot URL."
+                )
 
         if urls:
             unverified = [item for item in urls if item.rstrip("/") not in allowed]
@@ -121,26 +131,26 @@ class AnswerQualityEngine:
                 )
 
         if freshness_required:
-            if allowed:
+            if cited_allowed:
                 checks.append(
                     self._check(
                         "freshness_grounding",
-                        "Актуальные утверждения опираются на загруженные свежие источники",
+                        "Актуальные утверждения ссылаются на проверенный свежий источник",
                         "passed",
-                        f"Доступно источников: {len(allowed)}",
+                        f"Процитировано свежих source URL: {len(cited_allowed)}",
                     )
                 )
             else:
                 checks.append(
                     self._check(
                         "freshness_grounding",
-                        "Актуальные утверждения требуют свежего источника",
+                        "Актуальные утверждения требуют явно процитированного свежего источника",
                         "unverified",
-                        "К ответу не приложен проверенный research snapshot",
+                        "В финальном ответе нет ссылки на проверенный свежий research snapshot",
                     )
                 )
                 warnings.append(
-                    "Запрос зависит от актуальных данных, но свежий проверенный источник не был приложен; текущие факты не считаются подтверждёнными."
+                    "Запрос зависит от актуальных данных, но финальный ответ не процитировал проверенный свежий источник; текущие факты не считаются подтверждёнными."
                 )
 
         return DeterministicAudit(checks=checks, warnings=warnings)
@@ -208,9 +218,6 @@ class AnswerQualityEngine:
             return "failed"
         if issues:
             return "checked"
-        # A second model pass can check consistency, but it is not independent
-        # factual evidence. Reserve 'supported' for an answer whose prompt really
-        # contained a verified source snapshot.
         return "supported" if deterministic.grounded else "checked"
 
     @staticmethod
