@@ -27,6 +27,13 @@ def test_inherently_current_queries_require_fresh_grounding():
         assert needs_fresh_grounding(query), query
 
 
+def test_qwen_fast_work_disable_thinking_and_deep_separates_reasoning():
+    text = (ROOT / "app" / "inference" / "client.py").read_text("utf-8")
+    assert '"chat_template_kwargs": {"enable_thinking": bool(reasoning)}' in text
+    assert '"reasoning_format": "deepseek" if reasoning else "none"' in text
+    assert 'payload["reasoning_effort"] = "none"' in text
+
+
 def test_installer_repairs_both_normal_and_deep_context_for_old_envs():
     text = (ROOT / "scripts" / "install.sh").read_text("utf-8")
     assert "deep_context=bounded_int('X1_DEEP_CONTEXT_TOKENS'" in text
@@ -51,6 +58,24 @@ def test_file_upload_enforces_disk_and_user_quota_and_releases_db_before_slow_io
     durable_processing = text.rfind("db.commit()", body_read, parser)
     assert durable_processing != -1
     assert "queue_timeout_seconds=float(settings.file_parse_queue_timeout_seconds)" in text
+
+
+def test_file_upload_has_pre_body_global_admission_and_version_publish_lock():
+    main = (ROOT / "app" / "main.py").read_text("utf-8")
+    route = (ROOT / "app" / "api" / "routes" / "files.py").read_text("utf-8")
+    assert "app.state.file_upload_governor = ResourceGovernor" in main
+    assert "async def file_upload_admission" in main
+    assert '"File upload capacity is busy; retry shortly"' in main
+    assert "newer_current = db.scalar" in route
+    assert "ProjectFile.version > row.version" in route
+    assert route.count("with_for_update()") >= 3
+
+
+def test_search_provider_releases_db_before_network_wait():
+    text = (ROOT / "app" / "services" / "discovery.py").read_text("utf-8")
+    pool_commit = text.index("db.commit()\n        outcomes = await runtime_pool.search_outcomes")
+    direct_commit = text.index("db.commit()\n        hits = await discovery.search")
+    assert pool_commit > 0 and direct_commit > 0
 
 
 def test_restore_keeps_rollback_state_until_restored_app_is_verified():
@@ -86,3 +111,11 @@ def test_sandbox_executions_have_expiry_and_are_reaped_after_worker_restart():
     assert '"executions": reap_expired_executions()' in text
     assert "reap_expired_containers()" in text
     assert '"active_executions": executions' in text
+
+
+def test_release_gate_checks_shell_syntax_and_static_contracts():
+    text = (ROOT / "scripts" / "release_gate.py").read_text("utf-8")
+    assert 'run("shell_syntax"' in text
+    assert 'run("static_contract_audit"' in text
+    assert '"bash", "-n"' in text
+    assert "scripts.static_contract_audit" in text
