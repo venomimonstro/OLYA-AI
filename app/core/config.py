@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     research_max_bytes: int = 2_000_000
     research_max_chars: int = 500_000
     research_max_redirects: int = 3
+    research_max_concurrent_operations: int = 4
+    research_max_queue_size: int = 32
+    research_queue_timeout_seconds: float = 15.0
     research_freshness_max_age_seconds: int = 15 * 60
     research_freshness_min_independent_hosts: int = 2
     search_provider: str = "searxng"
