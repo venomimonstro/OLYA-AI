@@ -71,6 +71,13 @@ if (( ram_gb < 32 )); then safe_context=8192
 elif (( ram_gb < 48 )); then safe_context=12288
 else safe_context=16384
 fi
+# Never let llama consume the RAM needed by PostgreSQL, X1, SearXNG,
+# sandbox-worker and the host kernel/page cache. The 24 GiB ceiling is enough
+# for the supported Q4 profile while preventing a larger host from accidentally
+# turning an inference leak into a whole-node OOM event.
+llama_memory_gb=$((ram_gb - 6))
+(( llama_memory_gb > 24 )) && llama_memory_gb=24
+(( llama_memory_gb >= 20 )) || fail "Not enough RAM remains for Qwen after reserving 6 GB for the X1 control plane and operating system"
 threads=$cores; (( threads > 2 )) && threads=$((threads - 1)); (( threads > 24 )) && threads=24; (( threads < 2 )) && threads=2
 grep -qE 'avx2|avx512' /proc/cpuinfo || info "WARNING: AVX2/AVX512 not detected; local inference can be very slow"
 
@@ -87,12 +94,14 @@ runtime_secret=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
 sandbox_token=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
 host_data_root="$(realpath "$ROOT/data")"
 
-python3 - "$new_env" "$db_password" "$admin_token" "$runtime_secret" "$sandbox_token" "$host_data_root" "$safe_context" "$threads" <<'PY'
+python3 - "$new_env" "$db_password" "$admin_token" "$runtime_secret" "$sandbox_token" "$host_data_root" "$safe_context" "$threads" "$llama_memory_gb" <<'PY'
 from pathlib import Path
+import re
 import sys
+
 path=Path('.env'); text=path.read_text('utf-8')
 new_env=bool(int(sys.argv[1])); generated_db,generated_admin,generated_runtime,generated_sandbox,host_data=sys.argv[2:7]
-safe_context=int(sys.argv[7]); threads=int(sys.argv[8]); lines=text.splitlines(); values={}
+safe_context=int(sys.argv[7]); threads=int(sys.argv[8]); llama_memory_gb=int(sys.argv[9]); lines=text.splitlines(); values={}
 for line in lines:
     if line and not line.lstrip().startswith('#') and '=' in line:
         k,v=line.split('=',1); values[k]=v
@@ -111,6 +120,11 @@ def ensure_secret(key, generated, bad):
     current=values.get(key,'')
     if not current or current in bad: setv(key,generated)
 
+def memory_gb(value):
+    match=re.fullmatch(r'\s*(\d+(?:\.\d+)?)\s*([gGmM])(?:[bB])?\s*',str(value or ''))
+    if not match: return None
+    number=float(match.group(1)); return number if match.group(2).lower()=='g' else number/1024.0
+
 setv('X1_ENV','production'); setv('X1_BIND_ADDRESS','127.0.0.1'); setv('X1_HOST_DATA_ROOT',host_data)
 ensure_secret('POSTGRES_PASSWORD',generated_db,{'change-me-db'}); db=values['POSTGRES_PASSWORD']; setv('X1_DATABASE_URL',f'postgresql+psycopg://x1:{db}@db:5432/x1')
 ensure_secret('X1_ADMIN_BOOTSTRAP_TOKEN',generated_admin,{'change-me'}); ensure_secret('X1_PROJECT_RUNTIME_SECRET_KEY',generated_runtime,{'change-me-runtime-secret'}); ensure_secret('X1_PROJECT_SANDBOX_WORKER_TOKEN',generated_sandbox,{'change-me-sandbox-worker'})
@@ -121,6 +135,9 @@ setv('X1_SEARXNG_BASE_URL','http://searxng:8080')
 # Production AI access is always protected by the measured rollout gate. A full
 # launch is represented by a 100% rollout, not by disabling the guard itself.
 setv('X1_PUBLIC_LAUNCH_ENFORCE_EXPOSURE','true')
+current_memory=memory_gb(values.get('X1_LLAMA_MEMORY_LIMIT'))
+if current_memory is None or current_memory > llama_memory_gb:
+    setv('X1_LLAMA_MEMORY_LIMIT',f'{llama_memory_gb}g')
 if new_env:
     setv('X1_MAX_CONTEXT_TOKENS',min(8192,safe_context)); setv('X1_DEEP_CONTEXT_TOKENS',safe_context); setv('X1_LLAMA_THREADS',threads); setv('X1_LLAMA_THREADS_BATCH',threads)
 else:
@@ -134,7 +151,7 @@ for key,value in {'X1_HTTP_LIMIT_CONCURRENCY':'128','X1_HTTP_BACKLOG':'2048','X1
 path.write_text('\n'.join(lines).rstrip()+'\n','utf-8')
 PY
 chmod 600 .env
-info "Production configuration prepared (RAM=${ram_gb}GB, CPU=${cores}, safe initial context=${safe_context})"
+info "Production configuration prepared (RAM=${ram_gb}GB, CPU=${cores}, llama cap=${llama_memory_gb}GB, safe initial context=${safe_context})"
 
 if [ "$WITH_INFERENCE" -eq 1 ]; then info "Downloading/verifying official Qwen3-30B-A3B Q4_K_M GGUF (resumable)"; python3 scripts/download_model.py; fi
 
