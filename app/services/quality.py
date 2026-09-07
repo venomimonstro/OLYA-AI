@@ -15,10 +15,20 @@ _PLACEHOLDER_PATTERNS = (
 )
 _URL_RE = re.compile(r"https?://[^\s<>()\]\[\]{}\"']+", re.IGNORECASE)
 _FRESHNESS_MARKERS = (
+    # Explicit freshness language.
     "сегодня", "сейчас", "на данный момент", "актуальн", "последние новости",
     "последние данные", "последняя версия", "текущая цена", "текущая стоимость",
     "текущий курс", "latest", "today", "right now", "currently", "current price",
     "current rate", "latest version", "latest news",
+    # Common requests that are inherently time-sensitive even when the user does
+    # not add the word "current". False-positive grounding is safer than giving a
+    # confident stale price/weather/schedule from model memory.
+    "курс доллара", "курс евро", "курс валют", "обменный курс",
+    "цена биткоин", "цена bitcoin", "стоимость биткоин", "котиров",
+    "биржев", "погода", "прогноз погоды", "расписание", "в наличии",
+    "наличие товара", "доступность билетов", "доступные билеты",
+    "exchange rate", "bitcoin price", "crypto price", "stock price", "market quote",
+    "weather", "forecast", "schedule", "in stock", "ticket availability",
 )
 
 
