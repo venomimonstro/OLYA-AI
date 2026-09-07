@@ -73,18 +73,15 @@ def normalize_slug(value):
     slug=re.sub(r"[^a-z0-9-]+","-",value.strip().lower()).strip("-"); slug=re.sub(r"-+","-",slug)
     if len(slug)<2: raise ValueError("Organization slug is invalid")
     return slug[:120]
-
 def organization_role(db,user_id,org):
     if org.owner_id==user_id:return "owner"
     row=db.scalar(select(OrganizationMember).where(OrganizationMember.organization_id==org.id,OrganizationMember.user_id==user_id)); return row.role if row else None
-
 def require_organization_role(db,user,organization_id,minimum="member"):
     org=db.get(Organization,organization_id)
     if org is None: raise LookupError("Organization not found")
     role=organization_role(db,user.id,org)
     if role is None or ORG_ROLE_RANK.get(role,0)<ORG_ROLE_RANK[minimum]: raise LookupError("Organization not found")
     return org,role
-
 def list_organizations(db,user_id): return list(db.scalars(select(Organization).outerjoin(OrganizationMember,OrganizationMember.organization_id==Organization.id).where(or_(Organization.owner_id==user_id,OrganizationMember.user_id==user_id)).distinct().order_by(Organization.updated_at.desc())).all())
 def budget_spend(db,organization_id,month): return int(db.scalar(select(func.coalesce(func.sum(ResourceExpenseEvent.cost_microunits),0)).where(ResourceExpenseEvent.organization_id==organization_id,func.substr(func.cast(ResourceExpenseEvent.created_at,String),1,7)==month)) or 0)
 def budget_state(db,budget):
@@ -102,16 +99,41 @@ def create_api_key(db,user,settings,*,name,scopes,organization_id,rate_limit_per
     raw=secrets.token_urlsafe(40); prefix=secrets.token_hex(4); token=f"x1k_{prefix}_{raw}"
     row=ApiKey(owner_id=user.id,organization_id=organization_id,name=name.strip(),prefix=prefix,secret_hash=token_digest(token),scopes=scopes,rate_limit_per_minute=limit,expires_at=expires_at); db.add(row); db.flush(); return token,row
 def payment_payload_hash(payload): return hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()
+
+def _payment_by_identity(db,payload):
+    return db.scalar(
+        select(PaymentRecord).where(
+            PaymentRecord.provider==payload["provider"],
+            or_(
+                PaymentRecord.idempotency_key==payload["idempotency_key"],
+                PaymentRecord.provider_event_id==payload["provider_event_id"],
+            ),
+        ).limit(1)
+    )
+
 def ingest_payment(db,payload):
-    digest=payment_payload_hash(payload); existing=db.scalar(select(PaymentRecord).where(PaymentRecord.provider==payload["provider"],PaymentRecord.idempotency_key==payload["idempotency_key"]))
+    digest=payment_payload_hash(payload)
+    existing=_payment_by_identity(db,payload)
     if existing:
-        if existing.payload_hash!=digest: raise ValueError("Idempotency key already used with a different payment payload")
+        if existing.payload_hash!=digest: raise ValueError("Payment identity already exists with a different payload")
         return existing,False
-    event=db.scalar(select(PaymentRecord).where(PaymentRecord.provider==payload["provider"],PaymentRecord.provider_event_id==payload["provider_event_id"]))
-    if event:
-        if event.payload_hash!=digest: raise ValueError("Provider event already exists with a different payload")
-        return event,False
-    row=PaymentRecord(user_id=payload.get("user_id"),organization_id=payload.get("organization_id"),provider=payload["provider"],provider_event_id=payload["provider_event_id"],idempotency_key=payload["idempotency_key"],kind=payload["kind"],amount_minor=payload["amount_minor"],currency=payload["currency"].upper(),payload_hash=digest,metadata_json=payload.get("metadata") or {}); db.add(row); db.flush(); return row,True
+    row=PaymentRecord(user_id=payload.get("user_id"),organization_id=payload.get("organization_id"),provider=payload["provider"],provider_event_id=payload["provider_event_id"],idempotency_key=payload["idempotency_key"],kind=payload["kind"],amount_minor=payload["amount_minor"],currency=payload["currency"].upper(),payload_hash=digest,metadata_json=payload.get("metadata") or {})
+    try:
+        # A concurrent webhook can win either unique constraint after our SELECT.
+        # Isolate that expected conflict in a SAVEPOINT so the outer request
+        # transaction remains usable and can return the winning idempotent row.
+        with db.begin_nested():
+            db.add(row)
+            db.flush()
+    except IntegrityError:
+        winner=_payment_by_identity(db,payload)
+        if winner is None:
+            raise
+        if winner.payload_hash!=digest:
+            raise ValueError("Payment identity already exists with a different payload")
+        return winner,False
+    return row,True
+
 def payment_reconciliation(db):
     rows=db.scalars(select(PaymentRecord).order_by(PaymentRecord.created_at)).all(); totals={}; unreconciled=0
     for row in rows:
