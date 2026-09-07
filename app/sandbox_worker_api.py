@@ -29,6 +29,7 @@ _PREVIEW_LOCK = threading.Lock()
 _PREVIEW_LABEL = "x1.sandbox.preview=true"
 _EXPIRY_LABEL = "x1.sandbox.expires_at"
 _EXECUTION_LABEL = "x1.sandbox.execution=true"
+_EXECUTION_EXPIRY_GRACE_SECONDS = 30
 
 
 class ExecRequest(BaseModel):
@@ -182,16 +183,24 @@ def _base_command(payload: ExecRequest, *, read_only_workspace: bool = False) ->
     return command
 
 
-def _preview_ids() -> list[str]:
+def _labelled_ids(label: str) -> list[str]:
     if not _docker_ready():
         return []
     try:
-        result = _run(["docker", "ps", "-q", "--filter", "label=x1.sandbox.preview=true"], timeout=8)
+        result = _run(["docker", "ps", "-q", "--filter", f"label={label}"], timeout=8)
         if result.returncode != 0:
             return []
         return [item.strip() for item in result.stdout.splitlines() if item.strip()]
     except Exception:
         return []
+
+
+def _preview_ids() -> list[str]:
+    return _labelled_ids(_PREVIEW_LABEL)
+
+
+def _execution_ids() -> list[str]:
+    return _labelled_ids(_EXECUTION_LABEL)
 
 
 def _preview_metadata(container_ref: str) -> tuple[bool, int]:
@@ -238,18 +247,19 @@ def _require_owned_preview(container_ref: str, *, stop_if_expired: bool = True) 
 
 def _container_expiry(container_id: str) -> int:
     try:
-        result = _run([
-            "docker", "inspect", "-f", '{{ index .Config.Labels "x1.sandbox.expires_at" }}', container_id,
-        ], timeout=5)
+        result = _run(
+            ["docker", "inspect", "-f", '{{ index .Config.Labels "x1.sandbox.expires_at" }}', container_id],
+            timeout=5,
+        )
         return int(result.stdout.strip() or 0) if result.returncode == 0 else 0
     except Exception:
         return 0
 
 
-def reap_expired_previews() -> int:
+def _reap_expired(ids: list[str]) -> int:
     now = int(time.time())
     reaped = 0
-    for container_id in _preview_ids():
+    for container_id in ids:
         expiry = _container_expiry(container_id)
         if expiry and expiry <= now:
             try:
@@ -260,15 +270,33 @@ def reap_expired_previews() -> int:
     return reaped
 
 
+def reap_expired_previews() -> int:
+    return _reap_expired(_preview_ids())
+
+
+def reap_expired_executions() -> int:
+    return _reap_expired(_execution_ids())
+
+
+def reap_expired_containers() -> dict[str, int]:
+    return {
+        "previews": reap_expired_previews(),
+        "executions": reap_expired_executions(),
+    }
+
+
 def _reaper_loop(stop: threading.Event) -> None:
     while not stop.wait(30.0):
-        reap_expired_previews()
+        reap_expired_containers()
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Clean leftovers immediately after a worker/container restart instead of
+    # waiting for the first 30-second maintenance tick.
+    reap_expired_containers()
     stop = threading.Event()
-    thread = threading.Thread(target=_reaper_loop, args=(stop,), daemon=True, name="x1-preview-reaper")
+    thread = threading.Thread(target=_reaper_loop, args=(stop,), daemon=True, name="x1-sandbox-reaper")
     thread.start()
     try:
         yield
@@ -285,12 +313,14 @@ def health() -> dict[str, Any]:
     docker = _docker_ready()
     image = _image_ready() if docker else False
     previews = len(_preview_ids()) if docker else 0
+    executions = len(_execution_ids()) if docker else 0
     return {
         "status": "stable" if docker and image else "degraded",
         "docker": docker,
         "image": image,
         "runtime_image": RUNTIME_IMAGE,
         "active_previews": previews,
+        "active_executions": executions,
         "max_active_previews": MAX_ACTIVE_PREVIEWS,
         "max_concurrent_executions": MAX_CONCURRENT_EXECUTIONS,
     }
@@ -327,7 +357,12 @@ def execute(payload: ExecRequest, x_x1_sandbox_token: str = Header(default="", a
     _auth(x_x1_sandbox_token)
     command = _base_command(payload)
     execution_name = "x1-exec-" + secrets.token_hex(10)
-    command[3:3] = ["--name", execution_name, "--label", _EXECUTION_LABEL]
+    execution_expiry = int(time.time()) + int(payload.timeout_seconds) + _EXECUTION_EXPIRY_GRACE_SECONDS
+    command[3:3] = [
+        "--name", execution_name,
+        "--label", _EXECUTION_LABEL,
+        "--label", f"{_EXPIRY_LABEL}={execution_expiry}",
+    ]
     command += payload.argv
     if not _EXECUTION_GATE.acquire(timeout=2.0):
         raise HTTPException(status_code=429, detail="Sandbox execution capacity is busy")
@@ -351,6 +386,7 @@ def execute(payload: ExecRequest, x_x1_sandbox_token: str = Header(default="", a
                 "sandbox_level": "remote-docker",
                 "network_policy": payload.network_policy,
                 "effective_network_policy": "deny",
+                "expires_at_epoch": execution_expiry,
             }
         except subprocess.TimeoutExpired as exc:
             # Killing only the Docker CLI is insufficient: the container may
@@ -368,6 +404,7 @@ def execute(payload: ExecRequest, x_x1_sandbox_token: str = Header(default="", a
                 "sandbox_level": "remote-docker",
                 "network_policy": payload.network_policy,
                 "effective_network_policy": "deny",
+                "expires_at_epoch": execution_expiry,
             }
         except (OSError, ValueError) as exc:
             try:
