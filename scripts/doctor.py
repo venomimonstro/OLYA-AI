@@ -12,6 +12,7 @@ from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = ROOT / "models" / "Qwen3-30B-A3B-Q4_K_M.gguf"
+_GIB = 1024**3
 
 
 def result(name: str, status: str, detail: str) -> dict:
@@ -68,6 +69,64 @@ def _host_memory_gib() -> float:
         return 0.0
 
 
+def _active_container_memory_budget(env_text: str, host_gib: float) -> tuple[bool, dict]:
+    ps = cmd(["docker", "compose", "ps", "-q"], timeout=20)
+    if ps is None or ps.returncode != 0:
+        return False, {"error": "cannot_list_active_compose_containers"}
+    ids = [line.strip() for line in ps.stdout.splitlines() if line.strip()]
+    total_bytes = 0
+    unbounded: list[str] = []
+    containers: list[dict] = []
+    for container_id in ids:
+        inspected = cmd(
+            ["docker", "inspect", "--format", "{{.Name}} {{.HostConfig.Memory}}", container_id],
+            timeout=10,
+        )
+        if inspected is None or inspected.returncode != 0:
+            unbounded.append(container_id[:12])
+            continue
+        parts = inspected.stdout.strip().split()
+        if len(parts) != 2:
+            unbounded.append(container_id[:12])
+            continue
+        name = parts[0].lstrip("/")
+        try:
+            memory = int(parts[1])
+        except ValueError:
+            memory = 0
+        containers.append({"name": name, "limit_gib": round(memory / _GIB, 3) if memory else 0})
+        if memory <= 0:
+            unbounded.append(name)
+        else:
+            total_bytes += memory
+
+    # Compose cannot see the dynamically-created sandbox child. Reserve its
+    # configured maximum whenever the remote sandbox boundary is enabled, plus a
+    # non-containerized kernel/page-cache reserve. This catches enabling the 4 GiB
+    # image worker on a minimum 32 GB Qwen host before the OOM killer does.
+    sandbox_mb_raw = _env_value(env_text, "X1_SANDBOX_MAX_MEMORY_MB") or "2048"
+    try:
+        sandbox_gib = max(0.0, int(sandbox_mb_raw) / 1024.0)
+    except ValueError:
+        sandbox_gib = 2.0
+    if (_env_value(env_text, "X1_PROJECT_SANDBOX_BACKEND") or "remote").lower() != "remote":
+        sandbox_gib = 0.0
+    os_reserve_gib = 1.0
+    configured_gib = total_bytes / _GIB
+    required_gib = configured_gib + sandbox_gib + os_reserve_gib
+    ok = not unbounded and host_gib > 0 and required_gib <= host_gib
+    return ok, {
+        "host_gib": round(host_gib, 2),
+        "active_compose_limit_gib": round(configured_gib, 2),
+        "sandbox_child_reserve_gib": round(sandbox_gib, 2),
+        "host_os_reserve_gib": os_reserve_gib,
+        "required_worst_case_gib": round(required_gib, 2),
+        "headroom_gib": round(host_gib - required_gib, 2),
+        "unbounded_or_unreadable": unbounded,
+        "containers": containers,
+    }
+
+
 def main() -> int:
     checks = [
         result("python", "stable" if sys.version_info >= (3, 12) else "failed", sys.version.split()[0]),
@@ -89,10 +148,10 @@ def main() -> int:
         checks.append(result("secrets", "failed" if unsafe else "stable", "unsafe defaults: " + ",".join(unsafe) if unsafe else "non-default"))
         checks.append(result("environment", "stable" if "X1_ENV=production" in env_text else "degraded", "production" if "X1_ENV=production" in env_text else "X1_ENV is not production"))
 
+    host_gib = _host_memory_gib()
     inference_expected = "X1_LLAMA_BASE_URL=http://llama:8080" in env_text
     if inference_expected:
         checks.append(result("qwen_model", "stable" if MODEL.is_file() and MODEL.stat().st_size > 17_000_000_000 else "failed", f"{MODEL} ({MODEL.stat().st_size if MODEL.exists() else 0} bytes)"))
-        host_gib = _host_memory_gib()
         llama_gib = _memory_gib(_env_value(env_text, "X1_LLAMA_MEMORY_LIMIT"))
         max_safe = max(0.0, host_gib - 8.0)
         memory_ok = bool(host_gib >= 29.5 and llama_gib is not None and llama_gib <= min(24.0, max_safe) + 0.05)
@@ -120,6 +179,13 @@ def main() -> int:
             checks.append(result("sandbox_privilege_boundary", "stable" if worker_has_socket and not app_has_socket else "failed", "Docker socket isolated to sandbox worker" if worker_has_socket and not app_has_socket else "Docker socket boundary is incorrect"))
         else:
             checks.append(result("compose", "failed", ((compose.stderr if compose else "cannot run") or "invalid")[-800:]))
+
+        memory_ok, memory_detail = _active_container_memory_budget(env_text, host_gib)
+        checks.append(result(
+            "active_container_memory_budget",
+            "stable" if memory_ok else "failed",
+            json.dumps(memory_detail, ensure_ascii=False),
+        ))
 
         current = cmd(["docker", "compose", "exec", "-T", "app", "alembic", "current"])
         heads = cmd(["docker", "compose", "exec", "-T", "app", "alembic", "heads"])
