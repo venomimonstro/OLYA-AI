@@ -47,7 +47,7 @@ from app.services.context import ContextCompiler
 from app.services.discovery import BraveSearchDiscovery, DisabledDiscovery, ProviderPoolDiscovery
 from app.services.documents import configure_render_gate
 from app.services.http_limits import RequestBodyLimitMiddleware
-from app.services.resource_governor import ResourceGovernor
+from app.services.resource_governor import ResourceBusyError, ResourceGovernor
 from app.services.user_resource_governor import UserResourceGovernor
 from app.services.research import ResearchFetcher
 from app.services.searxng_discovery import SearxngDiscovery
@@ -166,6 +166,45 @@ app = FastAPI(
 )
 app.add_middleware(RequestBodyLimitMiddleware, max_bytes=32 * 1024 * 1024)
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=3)
+
+
+def _network_research_request(request: Request) -> bool:
+    if request.method.upper() != "POST":
+        return False
+    path = request.url.path.rstrip("/")
+    return (
+        path == "/v1/research/sources"
+        or (path.startswith("/v1/research/runs/") and path.endswith(("/discover", "/collect")))
+    )
+
+
+@app.middleware("http")
+async def research_admission(request: Request, call_next):
+    """Queue network research before FastAPI creates a DB dependency.
+
+    Only a small number of requests are allowed to enter SearXNG/fetch at once.
+    Waiting requests therefore consume neither a PostgreSQL connection nor an
+    unbounded number of sidecar/network tasks. Overflow is a retryable response,
+    not a whole-node resource failure.
+    """
+    if not _network_research_request(request):
+        return await call_next(request)
+    governor = getattr(request.app.state, "research_governor", None)
+    if governor is None:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Research admission is not ready; retry shortly"},
+            headers={"Retry-After": "3"},
+        )
+    try:
+        async with governor.slot():
+            return await call_next(request)
+    except ResourceBusyError:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Internet research is at safe capacity; retry shortly"},
+            headers={"Retry-After": "5"},
+        )
 
 
 @app.middleware("http")
