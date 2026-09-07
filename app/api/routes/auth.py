@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -69,7 +69,12 @@ def logout(request: Request, user: User = Depends(get_current_user), db: Session
 @router.post("/logout-all", status_code=status.HTTP_204_NO_CONTENT)
 def logout_all(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> None:
     now = datetime.now(timezone.utc)
-    sessions = db.scalars(select(AuthSession).where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))).all()
-    for session in sessions:
-        session.revoked_at = now
+    # Constant-memory bulk revocation. Do not materialize every historical
+    # session row in Python; an account with a long login history must remain a
+    # cheap operation even before maintenance removes old rows.
+    db.execute(
+        update(AuthSession)
+        .where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
     db.commit()
