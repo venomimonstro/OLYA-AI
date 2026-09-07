@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.schemas.chat import AnswerRequirement, ChatMessage
-
+from app.services.scope_lock import audit_scope, get_scope_contract, scope_contract_text
 
 _PLACEHOLDER_PATTERNS = (
     re.compile(r"\b(?:TODO|TBD|FIXME|XXX)\b", re.IGNORECASE),
@@ -15,16 +15,13 @@ _PLACEHOLDER_PATTERNS = (
 )
 _URL_RE = re.compile(r"https?://[^\s<>()\]\[\]{}\"']+", re.IGNORECASE)
 _FRESHNESS_MARKERS = (
-    "сегодня", "сейчас", "на данный момент", "актуальн", "последние новости",
-    "последние данные", "последняя версия", "текущая цена", "текущая стоимость",
-    "текущий курс", "latest", "today", "right now", "currently", "current price",
-    "current rate", "latest version", "latest news",
-    "курс доллара", "курс евро", "курс валют", "обменный курс",
-    "цена биткоин", "цена bitcoin", "стоимость биткоин", "котиров",
-    "биржев", "погода", "прогноз погоды", "расписание", "в наличии",
-    "наличие товара", "доступность билетов", "доступные билеты",
-    "exchange rate", "bitcoin price", "crypto price", "stock price", "market quote",
-    "weather", "forecast", "schedule", "in stock", "ticket availability",
+    "сегодня", "сейчас", "на данный момент", "актуальн", "последние новости", "последние данные",
+    "последняя версия", "текущая цена", "текущая стоимость", "текущий курс", "latest", "today",
+    "right now", "currently", "current price", "current rate", "latest version", "latest news",
+    "курс доллара", "курс евро", "курс валют", "обменный курс", "цена биткоин", "цена bitcoin",
+    "стоимость биткоин", "котиров", "биржев", "погода", "прогноз погоды", "расписание", "в наличии",
+    "наличие товара", "доступность билетов", "доступные билеты", "exchange rate", "bitcoin price",
+    "crypto price", "stock price", "market quote", "weather", "forecast", "schedule", "in stock", "ticket availability",
 )
 
 
@@ -52,132 +49,71 @@ class DeterministicAudit:
 
 
 class AnswerQualityEngine:
-    """Cheap quality gates that never ask the model to verify facts it generated."""
+    """Cheap deterministic gates plus conditional critic/repair."""
 
-    def deterministic(
-        self,
-        text: str,
-        requirements: list[AnswerRequirement],
-        verified_urls: set[str] | None = None,
-        *,
-        freshness_required: bool = False,
-    ) -> DeterministicAudit:
+    def deterministic(self, text: str, requirements: list[AnswerRequirement], verified_urls: set[str] | None = None, *, freshness_required: bool = False) -> DeterministicAudit:
         checks: list[dict[str, Any]] = []
         warnings: list[str] = []
-
-        if not text.strip():
-            checks.append(self._check("non_empty", "Ответ не пустой", "failed", "Модель вернула пустой ответ"))
-        else:
-            checks.append(self._check("non_empty", "Ответ не пустой", "passed"))
+        checks.append(self._check("non_empty", "Ответ не пустой", "passed" if text.strip() else "failed", "" if text.strip() else "Модель вернула пустой ответ"))
 
         placeholder = next((pattern.search(text) for pattern in _PLACEHOLDER_PATTERNS if pattern.search(text)), None)
-        if placeholder:
-            checks.append(self._check("no_placeholders", "Нет служебных заглушек", "failed", placeholder.group(0)))
-        else:
-            checks.append(self._check("no_placeholders", "Нет служебных заглушек", "passed"))
+        checks.append(self._check("no_placeholders", "Нет служебных заглушек", "failed" if placeholder else "passed", placeholder.group(0) if placeholder else ""))
 
         for index, requirement in enumerate(requirements, start=1):
-            key = f"requirement_{index}_{requirement.kind}"
-            label = requirement.label or self._default_label(requirement)
             status, detail = self._evaluate_requirement(text, requirement)
-            checks.append(self._check(key, label, status, detail))
+            checks.append(self._check(f"requirement_{index}_{requirement.kind}", requirement.label or self._default_label(requirement), status, detail))
+
+        scope_checks, scope_warnings = audit_scope(text)
+        checks.extend(scope_checks)
+        warnings.extend(scope_warnings)
+        # Auto verification historically repairs only when payload.requirements is
+        # truthy. Scope Lock is itself an explicit user requirement, so add a
+        # harmless internal sentinel to the same list. This makes a failed scope
+        # gate enter the existing single repair pass without extra inference on a
+        # successful answer. The sentinel is added after normal requirement checks.
+        if get_scope_contract().active and not requirements:
+            requirements.append(AnswerRequirement(kind="min_chars", value=1, label="Внутренний Scope Lock активен"))
 
         urls = sorted(set(item.rstrip(".,;:!?)]}") for item in _URL_RE.findall(text)))
         allowed = {item.rstrip("/") for item in (verified_urls or set())}
         cited_allowed = {item.rstrip("/") for item in urls} & allowed
         if allowed:
             if cited_allowed:
-                checks.append(
-                    self._check(
-                        "source_grounding",
-                        "Ответ действительно ссылается на проверенный source context",
-                        "passed",
-                        f"Процитировано проверенных source URL: {len(cited_allowed)}",
-                    )
-                )
+                checks.append(self._check("source_grounding", "Ответ действительно ссылается на проверенный source context", "passed", f"Процитировано проверенных source URL: {len(cited_allowed)}"))
             else:
-                checks.append(
-                    self._check(
-                        "source_grounding",
-                        "Приложенные источники должны быть явно процитированы в ответе",
-                        "unverified",
-                        "Источник был в prompt, но ни один проверенный URL не процитирован в финальном ответе",
-                    )
-                )
-                warnings.append(
-                    "К ответу были приложены источники, но финальный текст не содержит ссылку ни на один проверенный snapshot URL."
-                )
-
+                checks.append(self._check("source_grounding", "Приложенные источники должны быть явно процитированы в ответе", "unverified", "Источник был в prompt, но ни один проверенный URL не процитирован в финальном ответе"))
+                warnings.append("К ответу были приложены источники, но финальный текст не содержит ссылку ни на один проверенный snapshot URL.")
         if urls:
             unverified = [item for item in urls if item.rstrip("/") not in allowed]
             if unverified:
-                checks.append(
-                    self._check(
-                        "external_urls",
-                        "Все внешние ссылки происходят из загруженных источников",
-                        "unverified",
-                        f"Неподтверждённых ссылок: {len(unverified)}",
-                    )
-                )
+                checks.append(self._check("external_urls", "Все внешние ссылки происходят из загруженных источников", "unverified", f"Неподтверждённых ссылок: {len(unverified)}"))
                 warnings.append("Ответ содержит URL, которых нет среди проверенных снимков источников.")
             else:
-                checks.append(
-                    self._check(
-                        "external_urls",
-                        "Все внешние ссылки происходят из загруженных источников",
-                        "passed",
-                        f"Подтверждено ссылок: {len(urls)}",
-                    )
-                )
-
+                checks.append(self._check("external_urls", "Все внешние ссылки происходят из загруженных источников", "passed", f"Подтверждено ссылок: {len(urls)}"))
         if freshness_required:
             if cited_allowed:
-                checks.append(
-                    self._check(
-                        "freshness_grounding",
-                        "Актуальные утверждения ссылаются на проверенный свежий источник",
-                        "passed",
-                        f"Процитировано свежих source URL: {len(cited_allowed)}",
-                    )
-                )
+                checks.append(self._check("freshness_grounding", "Актуальные утверждения ссылаются на проверенный свежий источник", "passed", f"Процитировано свежих source URL: {len(cited_allowed)}"))
             else:
-                checks.append(
-                    self._check(
-                        "freshness_grounding",
-                        "Актуальные утверждения требуют явно процитированного свежего источника",
-                        "unverified",
-                        "В финальном ответе нет ссылки на проверенный свежий research snapshot",
-                    )
-                )
-                warnings.append(
-                    "Запрос зависит от актуальных данных, но финальный ответ не процитировал проверенный свежий источник; текущие факты не считаются подтверждёнными."
-                )
-
+                checks.append(self._check("freshness_grounding", "Актуальные утверждения требуют явно процитированного свежего источника", "unverified", "В финальном ответе нет ссылки на проверенный свежий research snapshot"))
+                warnings.append("Запрос зависит от актуальных данных, но финальный ответ не процитировал проверенный свежий источник; текущие факты не считаются подтверждёнными.")
         return DeterministicAudit(checks=checks, warnings=warnings)
 
     def critic_messages(self, user_request: str, answer: str, requirements: list[AnswerRequirement]) -> list[ChatMessage]:
         requirement_lines = "\n".join(f"- {item.label or self._default_label(item)}" for item in requirements) or "- Явных формальных требований нет"
+        scope_lines = scope_contract_text() or "- Нет отдельного Scope Lock"
         return [
-            ChatMessage(
-                role="system",
-                content=(
-                    "Ты внутренний критик X1. Не переписывай ответ и не утверждай, что факты проверены. "
-                    "Найди только явные противоречия запросу, пропущенные требования, внутренние противоречия "
-                    "и места, где ответ делает неподтверждённое утверждение. Верни только JSON: "
-                    '{"issues":[{"severity":"critical|major|minor","message":"..."}],"summary":"..."}. '
-                    "Если явных проблем нет, issues должен быть пустым массивом."
-                ),
-            ),
-            ChatMessage(role="user", content=f"ЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n{user_request}\n\nФОРМАЛЬНЫЕ ТРЕБОВАНИЯ:\n{requirement_lines}\n\nОТВЕТ X1:\n{answer}"),
+            ChatMessage(role="system", content=("Ты внутренний критик X1. Не переписывай ответ и не утверждай, что факты проверены. Найди только явные противоречия запросу, нарушения Scope Lock, пропущенные требования, внутренние противоречия и неподтверждённые утверждения. Верни только JSON: " + '{"issues":[{"severity":"critical|major|minor","message":"..."}],"summary":"..."}. Если явных проблем нет, issues должен быть пустым массивом.')),
+            ChatMessage(role="user", content=f"ЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n{user_request}\n\nФОРМАЛЬНЫЕ ТРЕБОВАНИЯ:\n{requirement_lines}\n\n{scope_lines}\n\nОТВЕТ X1:\n{answer}"),
         ]
 
     def repair_messages(self, user_request: str, answer: str, deterministic: DeterministicAudit, requirements: list[AnswerRequirement]) -> list[ChatMessage]:
         failures = [item for item in deterministic.checks if item["status"] == "failed"]
         failure_lines = "\n".join(f"- {item['label']}: {item.get('detail', '')}" for item in failures)
         requirement_lines = "\n".join(f"- {item.label or self._default_label(item)}" for item in requirements) or "- Нет дополнительных формальных требований"
+        scope_lines = scope_contract_text() or "- Нет отдельного Scope Lock"
         return [
-            ChatMessage(role="system", content="Ты редактор X1. Исправь только перечисленные дефекты ответа. Не добавляй новые факты без необходимости, не меняй уже правильные части и не обсуждай проверку. Верни только исправленный финальный ответ."),
-            ChatMessage(role="user", content=f"ИСХОДНЫЙ ЗАПРОС:\n{user_request}\n\nТРЕБОВАНИЯ:\n{requirement_lines}\n\nНАЙДЕННЫЕ ДЕФЕКТЫ:\n{failure_lines}\n\nТЕКУЩИЙ ОТВЕТ:\n{answer}"),
+            ChatMessage(role="system", content="Ты редактор X1. Исправь только перечисленные дефекты ответа. Строго соблюдай Scope Lock. Не добавляй новые факты без необходимости, не меняй уже правильные части и не обсуждай проверку. Верни только исправленный финальный ответ."),
+            ChatMessage(role="user", content=f"ИСХОДНЫЙ ЗАПРОС:\n{user_request}\n\nТРЕБОВАНИЯ:\n{requirement_lines}\n\n{scope_lines}\n\nНАЙДЕННЫЕ ДЕФЕКТЫ:\n{failure_lines}\n\nТЕКУЩИЙ ОТВЕТ:\n{answer}"),
         ]
 
     def parse_critic(self, raw: str) -> dict[str, Any]:
@@ -227,29 +163,18 @@ class AnswerQualityEngine:
     @staticmethod
     def _default_label(requirement: AnswerRequirement) -> str:
         value = requirement.value
-        labels = {
-            "contains": f"Ответ содержит: {value}",
-            "not_contains": f"Ответ не содержит: {value}",
-            "max_chars": f"Ответ не длиннее {value} символов",
-            "min_chars": f"Ответ не короче {value} символов",
-            "valid_json": "Ответ является корректным JSON",
-        }
-        return labels[requirement.kind]
+        return {"contains": f"Ответ содержит: {value}", "not_contains": f"Ответ не содержит: {value}", "max_chars": f"Ответ не длиннее {value} символов", "min_chars": f"Ответ не короче {value} символов", "valid_json": "Ответ является корректным JSON"}[requirement.kind]
 
     @staticmethod
     def _evaluate_requirement(text: str, requirement: AnswerRequirement) -> tuple[str, str]:
         if requirement.kind == "contains":
-            needle = str(requirement.value).casefold()
-            return ("passed", "") if needle in text.casefold() else ("failed", f"Не найдено: {requirement.value}")
+            needle = str(requirement.value).casefold(); return (("passed", "") if needle in text.casefold() else ("failed", f"Не найдено: {requirement.value}"))
         if requirement.kind == "not_contains":
-            needle = str(requirement.value).casefold()
-            return ("passed", "") if needle not in text.casefold() else ("failed", f"Найден запрещённый фрагмент: {requirement.value}")
+            needle = str(requirement.value).casefold(); return (("passed", "") if needle not in text.casefold() else ("failed", f"Найден запрещённый фрагмент: {requirement.value}"))
         if requirement.kind == "max_chars":
-            limit = int(requirement.value)
-            return ("passed", "") if len(text) <= limit else ("failed", f"{len(text)} > {limit}")
+            limit = int(requirement.value); return (("passed", "") if len(text) <= limit else ("failed", f"{len(text)} > {limit}"))
         if requirement.kind == "min_chars":
-            limit = int(requirement.value)
-            return ("passed", "") if len(text) >= limit else ("failed", f"{len(text)} < {limit}")
+            limit = int(requirement.value); return (("passed", "") if len(text) >= limit else ("failed", f"{len(text)} < {limit}"))
         if requirement.kind == "valid_json":
             try:
                 json.loads(text)

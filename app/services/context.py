@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.schemas.chat import ChatMessage
+from app.services.scope_lock import compile_scope_contract, scope_guard_message
 
 
 _COMPACT_MARKER = "\n[…older content compacted by X1…]\n"
@@ -46,7 +47,18 @@ class ContextCompiler:
             for message in messages
             if message.role == "system"
         ][-2:]
+
+        # Sprint 44: compile explicit user constraints on every request. The
+        # ContextVar is request/task-local, so concurrent users cannot leak scope
+        # contracts into one another. Calling the compiler with no user message
+        # deliberately resets the contract to inactive.
+        latest_user = next((message.content for message in reversed(messages) if message.role == "user"), "")
+        scope_contract = compile_scope_contract(latest_user)
+        scope_guard = scope_guard_message(scope_contract)
+
         systems = [ChatMessage(role="system", content=_CORE_SYSTEM_POLICY), *supplied_systems]
+        if scope_guard is not None:
+            systems.append(scope_guard)
         system_chars = sum(len(message.content) for message in systems)
         budget = max(0, budget_total - system_chars)
 
