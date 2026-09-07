@@ -96,6 +96,11 @@ async def lifespan(app: FastAPI):
         max_queue=settings.max_queue_size,
         wait_timeout_seconds=settings.inference_queue_timeout_seconds,
     )
+    app.state.research_governor = ResourceGovernor(
+        max_concurrent=max(1, int(settings.research_max_concurrent_operations)),
+        max_queue=max(0, int(settings.research_max_queue_size)),
+        wait_timeout_seconds=max(0.5, float(settings.research_queue_timeout_seconds)),
+    )
     app.state.user_governor = UserResourceGovernor()
     configure_render_gate(
         settings.document_max_concurrent_renders,
