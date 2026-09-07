@@ -64,7 +64,7 @@ if [ "$WITH_INFERENCE" -eq 1 ]; then
   (( ram_gb >= 30 )) || fail "Qwen3-30B-A3B Q4_K_M production profile requires at least 30 GiB detected RAM (use a 32 GB+ server); found ${ram_gb} GiB"
   (( disk_gb >= 60 )) || fail "At least 60 GB free disk is required for model + containers + backups; found ${disk_gb} GB"
 else
-  (( ram_gb >= 6 )) || fail "At least 6 GB RAM is required for the control plane"
+  (( ram_gb >= 8 )) || fail "At least 8 GiB detected RAM is required for the full X1 control plane and one bounded sandbox execution"
   (( disk_gb >= 15 )) || fail "At least 15 GB free disk is required"
 fi
 if (( ram_gb < 32 )); then safe_context=8192
