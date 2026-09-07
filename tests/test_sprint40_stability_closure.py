@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import tomllib
+from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy import func, select
+
 from app.main import app
+from app.models import AuthSession
 from app.schemas.chat import ChatResponse, ChatUsage
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,7 +47,6 @@ def test_auth_onboarding_enters_real_user_workspace():
         "Поиск не дал проверяемых источников",
     ):
         assert marker in workspace
-    # Model/source text is inserted as text, never interpreted as arbitrary HTML.
     assert "b.textContent=text" in workspace
     assert ".innerHTML" not in workspace
 
@@ -82,3 +85,37 @@ def test_installer_and_doctor_reserve_host_memory_outside_llama():
     assert "host_memory_budget" in doctor
     assert "required_non_llama_reserve_gib" in doctor
     assert "X1_LLAMA_MEMORY_LIMIT=22g" in env
+
+
+def test_auth_session_growth_is_bounded_and_logout_all_revokes_everything(client, db_session):
+    email = "session-cap@example.invalid"
+    password = "session-cap-password-123"
+    created = client.post("/v1/auth/register", json={"email": email, "password": password, "display_name": "Sessions"})
+    assert created.status_code == 201, created.text
+    latest_token = created.json()["access_token"]
+
+    # Create substantially more live tokens than the default allowed window.
+    for _ in range(24):
+        login = client.post("/v1/auth/login", json={"email": email, "password": password})
+        assert login.status_code == 200, login.text
+        latest_token = login.json()["access_token"]
+
+    now = datetime.now(timezone.utc)
+    active = int(
+        db_session.scalar(
+            select(func.count(AuthSession.id)).where(
+                AuthSession.revoked_at.is_(None),
+                AuthSession.expires_at > now,
+            )
+        )
+        or 0
+    )
+    assert active <= 20
+
+    logout = client.post("/v1/auth/logout-all", headers={"Authorization": f"Bearer {latest_token}"})
+    assert logout.status_code == 204, logout.text
+    db_session.expire_all()
+    remaining = int(
+        db_session.scalar(select(func.count(AuthSession.id)).where(AuthSession.revoked_at.is_(None))) or 0
+    )
+    assert remaining == 0
