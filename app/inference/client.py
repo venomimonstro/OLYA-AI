@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 import httpx
 
 from app.schemas.chat import ChatMessage
+from app.services.tool_reliability import ToolCall
 
 
 class LlamaUnavailable(RuntimeError):
@@ -20,6 +22,14 @@ class LlamaGeneration:
     ttft_ms: int
     output_tokens: int
     tokens_per_second: float
+    generation_ms: int
+
+
+@dataclass(frozen=True)
+class LlamaToolTurn:
+    text: str
+    tool_calls: tuple[ToolCall, ...]
+    output_tokens: int
     generation_ms: int
 
 
@@ -48,9 +58,6 @@ class LlamaClient:
 
     @staticmethod
     def _sampling(reasoning: bool) -> dict:
-        # Qwen3.6 is sensitive to over-constrained sampling. These are kept
-        # explicit so a future model migration cannot silently inherit an
-        # unsuitable generation profile.
         if reasoning:
             return {
                 "temperature": 1.0,
@@ -92,8 +99,6 @@ class LlamaClient:
             text = cls._content_text(delta.get("content"))
             if text:
                 return text
-        # Defensive fallback for servers that ignore stream=true but still send
-        # an OpenAI-compatible message object on the same connection.
         message = choice.get("message")
         if isinstance(message, dict):
             return cls._content_text(message.get("content"))
@@ -126,9 +131,6 @@ class LlamaClient:
             "max_tokens": max_tokens,
             "stream": True,
             **self._sampling(reasoning),
-            # Qwen3.6 thinks by default. X1 explicitly owns this switch so Fast
-            # and simple Work requests do not burn CPU/output budget on hidden
-            # reasoning, while analytical Work/Deep can opt in.
             "chat_template_kwargs": {"enable_thinking": bool(reasoning)},
             "reasoning_format": "deepseek" if reasoning else "none",
         }
@@ -192,10 +194,6 @@ class LlamaClient:
                     pieces.append(text)
                     observed_chunks += 1
                     if on_token is not None:
-                        # Awaiting the sink provides bounded backpressure. If the
-                        # downstream request is cancelled, CancelledError escapes
-                        # this block and the httpx stream context closes the
-                        # upstream llama.cpp connection immediately.
                         await on_token(text)
         except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
             raise LlamaUnavailable("local llama.cpp inference is unavailable or returned invalid data") from exc
@@ -217,6 +215,121 @@ class LlamaClient:
             output_tokens=max(0, int(output_tokens)),
             tokens_per_second=max(0.0, round(tokens_per_second, 3)),
             generation_ms=max(0, int((finished - started) * 1000)),
+        )
+
+    @staticmethod
+    def _validate_tool_schemas(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not tools or len(tools) > 32:
+            raise ValueError("Tool schema count must be between 1 and 32")
+        names: set[str] = set()
+        clean: list[dict[str, Any]] = []
+        for item in tools:
+            if not isinstance(item, dict) or item.get("type") != "function":
+                raise ValueError("Only function tools are supported")
+            function = item.get("function")
+            if not isinstance(function, dict):
+                raise ValueError("Invalid function tool schema")
+            name = function.get("name")
+            if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{1,63}", name):
+                raise ValueError("Invalid function tool name")
+            if name in names:
+                raise ValueError("Duplicate function tool name")
+            parameters = function.get("parameters")
+            if not isinstance(parameters, dict) or parameters.get("type") != "object":
+                raise ValueError("Tool parameters must be a JSON object schema")
+            names.add(name)
+            clean.append(item)
+        return clean
+
+    @staticmethod
+    def _parse_tool_calls(data: dict[str, Any]) -> tuple[str, tuple[ToolCall, ...]]:
+        choices = data.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+            raise LlamaUnavailable("local tool turn returned invalid choices")
+        message = choices[0].get("message")
+        if not isinstance(message, dict):
+            raise LlamaUnavailable("local tool turn returned no assistant message")
+        text = LlamaClient._content_text(message.get("content")).strip()
+        raw_calls = message.get("tool_calls") or []
+        if not isinstance(raw_calls, list) or len(raw_calls) > 8:
+            raise LlamaUnavailable("local tool turn returned invalid tool_calls")
+        calls: list[ToolCall] = []
+        seen_ids: set[str] = set()
+        for index, raw in enumerate(raw_calls):
+            if not isinstance(raw, dict) or raw.get("type", "function") != "function":
+                raise LlamaUnavailable("local tool turn returned malformed tool call")
+            call_id = raw.get("id") or f"call_model_{index}"
+            if not isinstance(call_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", call_id):
+                raise LlamaUnavailable("local tool turn returned invalid tool call id")
+            if call_id in seen_ids:
+                raise LlamaUnavailable("local tool turn reused a tool call id")
+            seen_ids.add(call_id)
+            function = raw.get("function")
+            if not isinstance(function, dict):
+                raise LlamaUnavailable("local tool turn returned malformed function call")
+            name = function.get("name")
+            arguments = function.get("arguments")
+            if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_.-]{1,63}", name):
+                raise LlamaUnavailable("local tool turn returned invalid tool name")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError as exc:
+                    raise LlamaUnavailable("local tool turn returned invalid JSON arguments") from exc
+            if not isinstance(arguments, dict):
+                raise LlamaUnavailable("local tool arguments must be a JSON object")
+            calls.append(ToolCall(name=name, arguments=arguments, call_id=call_id))
+        if not text and not calls:
+            raise LlamaUnavailable("local tool turn returned neither text nor tool calls")
+        return text, tuple(calls)
+
+    async def tool_turn(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]],
+        max_tokens: int = 900,
+        reasoning: bool = False,
+    ) -> LlamaToolTurn:
+        """Run one bounded native tool-selection turn.
+
+        Tool execution is deliberately separate and must pass ToolSession. We use
+        auto selection and disable parallel calls so side effects remain ordered
+        and auditable. The executor, not the model, is the authorization boundary.
+        """
+        clean_tools = self._validate_tool_schemas(tools)
+        if not messages or len(messages) > 80:
+            raise ValueError("Invalid tool conversation length")
+        payload = {
+            "model": "local",
+            "messages": messages,
+            "tools": clean_tools,
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "max_tokens": max(64, min(int(max_tokens), 2048)),
+            "stream": False,
+            **self._sampling(reasoning),
+            "chat_template_kwargs": {"enable_thinking": bool(reasoning)},
+            "reasoning_format": "deepseek" if reasoning else "none",
+        }
+        if not reasoning:
+            payload["reasoning_effort"] = "none"
+        started = perf_counter()
+        try:
+            response = await self._client.post(f"{self.base_url}/v1/chat/completions", json=payload)
+            response.raise_for_status()
+            data = response.json()
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            raise LlamaUnavailable("local llama.cpp tool turn is unavailable or invalid") from exc
+        if not isinstance(data, dict):
+            raise LlamaUnavailable("local tool turn returned invalid payload")
+        text, calls = self._parse_tool_calls(data)
+        output_tokens, _ = self._telemetry(data)
+        return LlamaToolTurn(
+            text=text,
+            tool_calls=calls,
+            output_tokens=output_tokens,
+            generation_ms=max(0, int((perf_counter() - started) * 1000)),
         )
 
     async def chat(
