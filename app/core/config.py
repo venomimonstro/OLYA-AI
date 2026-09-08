@@ -158,6 +158,24 @@ class Settings(BaseSettings):
     image_vision_qa_url: str = ""
     image_vision_qa_timeout_seconds: int = 45
 
+    # Image Editing / identity-preserving editing. The inpaint and identity
+    # checkpoints are deliberately separate from text-to-image so an incapable
+    # checkpoint can never be silently used for a high-fidelity edit.
+    image_edit_backend: str = "disabled"
+    image_edit_model_name: str = ""
+    image_edit_model_path: str = ""
+    image_edit_identity_model_name: str = ""
+    image_edit_identity_model_path: str = ""
+    image_edit_max_source_bytes: int = 20 * 1024 * 1024
+    image_edit_max_source_dimension: int = 4096
+    image_edit_max_source_pixels: int = 16 * 1024 * 1024
+    image_edit_max_local_mask_ratio: float = 0.55
+    image_edit_mask_padding_ratio: float = 0.10
+    image_edit_mask_feather_px: int = 10
+    image_edit_min_plan_confidence: float = 0.65
+    image_edit_qa_max_repairs: int = 2
+    image_edit_require_vision_qa: bool = True
+
     monthly_server_cost_rub: float = 4000.0
     chat_history_messages: int = 48
     chat_message_page_size: int = 100
