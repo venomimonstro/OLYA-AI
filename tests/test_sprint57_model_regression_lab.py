@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from scripts.model_regression_lab import aggregate_results, compare, evaluate_checks, load_corpus
@@ -91,6 +90,15 @@ def test_full_regression_suite_validates_corpus_before_pytest():
     text = (ROOT / "scripts" / "run_full_regression.py").read_text("utf-8")
     assert "scripts.model_regression_lab" in text
     assert "--validate-only" in text
+
+
+def test_runtime_component_acceptance_runs_model_regression_as_required_gate():
+    text = (ROOT / "scripts" / "component_acceptance.py").read_text("utf-8")
+    assert "_run_model_regression" in text
+    assert "scripts.model_regression_lab" in text
+    assert "model_prompt_regression" in text
+    assert "model-regression-baseline.json" in text
+    assert "if not regression_ok" in text
 
 
 def test_regression_snapshot_fingerprints_model_and_prompt_runtime():
