@@ -12,7 +12,9 @@ class RequestBodyLimitMiddleware:
 
     Content-Length is rejected immediately when present. Chunked/HTTP2 bodies
     are counted while ASGI receive frames arrive, so omitting Content-Length
-    cannot bypass the memory-safety boundary.
+    cannot bypass the memory-safety boundary. Duplicate Content-Length headers
+    must agree exactly; conflicting or negative framing is rejected before the
+    request reaches the application to avoid proxy/application ambiguity.
     """
 
     def __init__(self, app: ASGIApp, max_bytes: int) -> None:
@@ -24,15 +26,24 @@ class RequestBodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        headers = {key.lower(): value for key, value in scope.get("headers") or []}
-        raw_length = headers.get(b"content-length", b"")
-        if raw_length:
+        raw_lengths = [value.strip() for key, value in scope.get("headers") or [] if key.lower() == b"content-length"]
+        if raw_lengths:
+            parsed_lengths: list[int] = []
             try:
-                length = int(raw_length)
+                for raw in raw_lengths:
+                    if not raw or b"," in raw:
+                        raise ValueError
+                    value = int(raw)
+                    if value < 0:
+                        raise ValueError
+                    parsed_lengths.append(value)
             except ValueError:
                 await self._reject(send, b"Invalid Content-Length")
                 return
-            if length > self.max_bytes:
+            if len(set(parsed_lengths)) != 1:
+                await self._reject(send, b"Conflicting Content-Length")
+                return
+            if parsed_lengths[0] > self.max_bytes:
                 await self._reject(send, b"Request body too large")
                 return
 
