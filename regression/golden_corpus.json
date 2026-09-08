@@ -1,0 +1,148 @@
+{
+  "format": "x1-model-regression-corpus-v1",
+  "version": 1,
+  "cases": [
+    {
+      "id": "factual-arithmetic-ru",
+      "category": "factual",
+      "critical": true,
+      "reasoning": false,
+      "max_tokens": 96,
+      "messages": [{"role": "user", "content": "Ответь только числом: сколько будет 17 * 19?"}],
+      "checks": [{"type": "regex", "pattern": "^323$"}],
+      "max_output_chars": 16
+    },
+    {
+      "id": "factual-capital",
+      "category": "factual",
+      "critical": true,
+      "reasoning": false,
+      "max_tokens": 96,
+      "messages": [{"role": "user", "content": "Назови столицу Австралии одним словом, без пояснений."}],
+      "checks": [{"type": "contains_all", "values": ["Канбер"]}],
+      "max_output_chars": 80
+    },
+    {
+      "id": "writing-russian-natural",
+      "category": "writing",
+      "critical": false,
+      "reasoning": false,
+      "max_tokens": 260,
+      "messages": [{"role": "user", "content": "Напиши короткое деловое сообщение на русском клиенту: встречу нужно перенести с четверга на пятницу из-за изменения графика. Без канцелярита и без английских слов."}],
+      "checks": [{"type": "contains_all", "values": ["пятниц"]}, {"type": "not_contains", "values": ["Thursday", "Friday", "schedule"]}, {"type": "cyrillic_ratio", "minimum": 0.65}],
+      "max_output_chars": 900
+    },
+    {
+      "id": "scope-no-expansion",
+      "category": "scope",
+      "critical": true,
+      "reasoning": false,
+      "max_tokens": 160,
+      "messages": [{"role": "system", "content": "Строго выполни формат пользователя. Не добавляй пояснений."}, {"role": "user", "content": "Исправь только пунктуацию, не меняя слова: Привет Ольга как дела"}],
+      "checks": [{"type": "contains_all", "values": ["Привет", "Ольга", "как", "дела"]}, {"type": "not_contains", "values": ["Конечно", "Исправленный", "вариант"]}],
+      "max_output_chars": 80
+    },
+    {
+      "id": "json-contract",
+      "category": "scope",
+      "critical": true,
+      "reasoning": false,
+      "max_tokens": 180,
+      "messages": [{"role": "system", "content": "Верни только валидный JSON без markdown."}, {"role": "user", "content": "Верни объект с полями city=Москва и active=true."}],
+      "checks": [{"type": "json_object", "required_keys": ["city", "active"]}, {"type": "contains_all", "values": ["Москва"]}],
+      "max_output_chars": 240
+    },
+    {
+      "id": "code-python-function",
+      "category": "code",
+      "critical": true,
+      "reasoning": false,
+      "max_tokens": 260,
+      "messages": [{"role": "user", "content": "Напиши только Python-функцию is_even(n), которая возвращает True для чётного целого числа и False для нечётного. Без пояснений."}],
+      "checks": [{"type": "contains_all", "values": ["def is_even", "%", "2"]}, {"type": "not_contains", "values": ["объяснение", "Конечно"]}],
+      "max_output_chars": 500
+    },
+    {
+      "id": "code-no-shell-hallucination",
+      "category": "code",
+      "critical": false,
+      "reasoning": false,
+      "max_tokens": 220,
+      "messages": [{"role": "user", "content": "Объясни в двух предложениях, почему параметризованные SQL-запросы снижают риск SQL injection. Никаких команд shell."}],
+      "checks": [{"type": "contains_all", "values": ["SQL"]}, {"type": "not_contains", "values": ["rm -rf", "sudo ", "curl "]}],
+      "max_output_chars": 700
+    },
+    {
+      "id": "rag-grounding",
+      "category": "rag",
+      "critical": true,
+      "reasoning": false,
+      "max_tokens": 180,
+      "messages": [{"role": "system", "content": "Используй только данные из CONTEXT. Если ответа нет, так и скажи."}, {"role": "user", "content": "CONTEXT: Кодовое имя проекта — Альтаир. Бюджет проекта — 740 рублей.\nВопрос: какой бюджет проекта?"}],
+      "checks": [{"type": "contains_all", "values": ["740"]}, {"type": "not_contains", "values": ["не знаю", "нет информации"]}],
+      "max_output_chars": 240
+    },
+    {
+      "id": "rag-missing-evidence",
+      "category": "rag",
+      "critical": true,
+      "reasoning": false,
+      "max_tokens": 180,
+      "messages": [{"role": "system", "content": "Используй только данные из CONTEXT. Не выдумывай отсутствующие факты."}, {"role": "user", "content": "CONTEXT: Компания открылась в 2024 году.\nВопрос: как зовут директора?"}],
+      "checks": [{"type": "regex", "pattern": "(?i)(нет|не указан|неизвест|отсутств)"}],
+      "max_output_chars": 350
+    },
+    {
+      "id": "long-chat-recall",
+      "category": "long_chat",
+      "critical": false,
+      "reasoning": false,
+      "max_tokens": 120,
+      "messages": [{"role": "user", "content": "Запомни для этой беседы: контрольное слово — сапфир."}, {"role": "assistant", "content": "Принято."}, {"role": "user", "content": "Мы обсуждали несколько второстепенных вещей."}, {"role": "assistant", "content": "Хорошо."}, {"role": "user", "content": "Какое было контрольное слово? Ответь одним словом."}],
+      "checks": [{"type": "contains_all", "values": ["сапфир"]}],
+      "max_output_chars": 80
+    },
+    {
+      "id": "russian-language",
+      "category": "russian_language",
+      "critical": true,
+      "reasoning": false,
+      "max_tokens": 180,
+      "messages": [{"role": "user", "content": "Объясни простыми русскими словами в двух предложениях, что такое кеширование."}],
+      "checks": [{"type": "cyrillic_ratio", "minimum": 0.70}, {"type": "not_contains", "values": ["Sure", "Basically", "In summary"]}],
+      "max_output_chars": 700
+    },
+    {
+      "id": "reasoning-simple-logic",
+      "category": "factual",
+      "critical": false,
+      "reasoning": true,
+      "max_tokens": 180,
+      "messages": [{"role": "user", "content": "У Анны 3 коробки, в каждой по 4 карандаша. Она отдала 5 карандашей. Сколько осталось? В финале напиши только: Ответ: N"}],
+      "checks": [{"type": "contains_all", "values": ["Ответ: 7"]}],
+      "max_output_chars": 700
+    },
+    {
+      "id": "tool-exact-call",
+      "category": "tools",
+      "critical": true,
+      "reasoning": false,
+      "max_tokens": 160,
+      "messages": [{"role": "system", "content": "Для чтения файла используй предоставленный tool."}, {"role": "user", "content": "Прочитай файл README.md."}],
+      "tools": [{"type": "function", "function": {"name": "workspace.read", "description": "Read a UTF-8 workspace file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": false}}}],
+      "expected_tool": "workspace.read",
+      "expected_arguments": {"path": "README.md"}
+    },
+    {
+      "id": "tool-no-hallucinated-name",
+      "category": "tools",
+      "critical": true,
+      "reasoning": false,
+      "max_tokens": 160,
+      "messages": [{"role": "system", "content": "Используй только предоставленные tools."}, {"role": "user", "content": "Покажи git status проекта."}],
+      "tools": [{"type": "function", "function": {"name": "git.status", "description": "Read git status", "parameters": {"type": "object", "properties": {}, "additionalProperties": false}}}],
+      "expected_tool": "git.status",
+      "expected_arguments": {}
+    }
+  ]
+}
