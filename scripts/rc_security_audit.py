@@ -25,6 +25,10 @@ def main() -> int:
     workspace = read("app/services/code_workspace.py")
     db = read("app/db.py")
     launch = read("app/services/public_launch_scheduler.py")
+    auth = read("app/services/auth.py")
+    legacy_code = read("app/api/routes/code.py")
+    jobs = read("app/services/jobs.py")
+    safety = read("app/services/safety.py")
 
     check("docker_socket_single_boundary", compose.count("/var/run/docker.sock:/var/run/docker.sock") == 1)
     sandbox_block = compose.split("  sandbox-worker:", 1)[1].split("  document-worker:", 1)[0]
@@ -33,6 +37,7 @@ def main() -> int:
     check("runtime_proxy_owns_socket", "docker.sock" in proxy_block and "X1_DOCKER_RUNTIME_PROXY_TOKEN" in proxy_block)
     check("runtime_proxy_has_readonly_data_mirror", "./data:/x1-host-data:ro" in proxy_block and "X1_DOCKER_PROXY_DATA_MIRROR_ROOT" in proxy_block)
     check("sandbox_worker_has_no_docker_cli", "docker.io" not in worker_dockerfile and "subprocess" not in worker)
+    check("sandbox_worker_non_root", "USER x1" in worker_dockerfile or "USER 10001" in worker_dockerfile)
     check("proxy_allowlist_grammar", "_RUN_STANDALONE" in proxy and "_RUN_VALUE_FLAGS" in proxy and "Docker run option is not allowed" in proxy)
     check("proxy_requires_pull_never", "Sandbox image pulls must be disabled" in proxy and "--pull=never" in proxy)
     check("proxy_resource_ceiling", all(marker in proxy for marker in ("MAX_MEMORY_MB", "MAX_CPU", "MAX_PIDS", "exceeds proxy envelope")))
@@ -53,6 +58,13 @@ def main() -> int:
     check("archive_entry_limit", "Archive contains too many entries" in workspace)
     check("host_command_fail_closed", "Command requires an isolated sandbox backend" in workspace and "shell=False" in workspace)
 
+    check("public_rollout_gates_code_runtime_git", all(marker in auth for marker in ("/v1/code", "/v1/project-runtimes", "/v1/git")))
+    check("public_rollout_gates_project_file_upload", "parts[3] == \"files\"" in auth and "request.method.upper() == \"POST\"" in auth)
+    check("legacy_agent_invalidates_stale_verification", '"verification_valid": False' in legacy_code and "Verification is missing or stale" in legacy_code)
+    check("legacy_agent_requires_verification_for_changed_code", "Changed code requires a server-recorded verification command" in legacy_code)
+    check("durable_job_idempotency_savepoint", "with db.begin_nested()" in jobs and "except IntegrityError" in jobs)
+    check("safety_service_is_reviewable_source", "b85decode" not in safety and "exec(compile" not in safety)
+
     check("db_pool_bounded", all(marker in db for marker in ("pool_size", "max_overflow", "pool_timeout", "pool_pre_ping")))
     check("db_statement_deadline", "statement_timeout" in db)
     check("db_lock_deadline", "lock_timeout" in db)
@@ -62,7 +74,7 @@ def main() -> int:
     check("canary_auto_rollback_present", "public_launch_auto_rollback" in launch and "rollback_rollout" in launch)
 
     failed = [item["name"] for item in checks if item["status"] != "passed"]
-    payload = {"format": "x1-rc-security-audit-v2", "status": "passed" if not failed else "failed", "critical_failures": failed, "checks": checks}
+    payload = {"format": "x1-rc-security-audit-v3", "status": "passed" if not failed else "failed", "critical_failures": failed, "checks": checks}
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if payload["status"] == "passed" else 2
 
