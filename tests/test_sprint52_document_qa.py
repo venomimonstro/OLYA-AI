@@ -61,7 +61,7 @@ def test_non_repairable_issue_does_not_mutate_docx(tmp_path: Path):
 def test_qa_route_commits_before_render_and_rechecks_revision():
     source = Path("app/api/routes/documents.py").read_text(encoding="utf-8")
     commit_at = source.index("db.commit()\n\n    events")
-    render_at = source.index("render_document_artifacts(")
+    render_at = source.index("render_document_artifacts(", commit_at)
     assert commit_at < render_at
     for marker in (
         "Document advanced to a newer revision while QA was running",
