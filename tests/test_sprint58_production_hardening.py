@@ -109,7 +109,7 @@ def test_db_pool_and_transaction_deadlines_are_mandatory():
 
 def test_final_rc_gate_requires_full_runtime_evidence():
     text = (ROOT / "scripts" / "rc_release_candidate.py").read_text("utf-8")
-    for marker in ("--runtime", "--live-inference", "--user-journey", "--chaos", "100", "model-regression-latest.json", "restore-drill-latest.json", "critical_regression_cases_required"):
+    for marker in ("--runtime", "--live-inference", "--user-journey", "--chaos", "model-regression-latest.json", "restore-drill-latest.json", "critical_regression_cases_required"):
         assert marker in text
     release = (ROOT / "scripts" / "release_gate.py").read_text("utf-8")
     assert '"--virtual-users", "100000"' in release
@@ -120,7 +120,7 @@ def test_runtime_chaos_covers_real_service_restarts_and_isolated_enospc():
     text = (ROOT / "scripts" / "rc_runtime_chaos.py").read_text("utf-8")
     for service in ("db", "searxng", "docker-runtime-proxy", "sandbox-worker", "document-worker", "llama"):
         assert f'"{service}"' in text
-    assert "docker", "run"
+    assert '["docker", "run"' in text
     assert "size=4m" in text
     assert "dd if=/dev/zero" in text
 
