@@ -94,13 +94,41 @@ def create_session(db: Session, user: User) -> tuple[str, AuthSession]:
     return token, record
 
 
-def _expensive_public_path(path: str) -> bool:
-    return path.startswith(("/v1/chat", "/v1/images", "/v1/documents", "/v1/research", "/v1/project-sandboxes", "/v1/development", "/v1/engineering", "/v1/execution"))
+def _expensive_public_request(request: Request) -> bool:
+    """Identify public operations that can consume scarce CPU/RAM/disk/network.
+
+    Project CRUD remains available so a newly registered account can enter the
+    product, but compute/storage-heavy development surfaces stay behind the same
+    progressive rollout gate as chat and research. File upload is special-cased
+    because its URL lives under otherwise-cheap project CRUD.
+    """
+    path = request.url.path.rstrip("/")
+    if path.startswith(
+        (
+            "/v1/chat",
+            "/v1/images",
+            "/v1/documents",
+            "/v1/research",
+            "/v1/project-sandboxes",
+            "/v1/development",
+            "/v1/engineering",
+            "/v1/execution",
+            "/v1/code",
+            "/v1/project-runtimes",
+            "/v1/git",
+        )
+    ):
+        return True
+    if request.method.upper() == "POST":
+        parts = [part for part in path.split("/") if part]
+        if len(parts) == 4 and parts[0] == "v1" and parts[1] == "projects" and parts[3] == "files":
+            return True
+    return False
 
 
 def _enforce_public_exposure(request: Request, db: Session, user: User) -> None:
     settings = getattr(request.app.state, "settings", get_settings())
-    if not _expensive_public_path(request.url.path) or bool(getattr(user, "is_admin", False)):
+    if not _expensive_public_request(request) or bool(getattr(user, "is_admin", False)):
         return
     from app.services.progressive_launch import user_has_open_breaker
     if user_has_open_breaker(db, user.id):
