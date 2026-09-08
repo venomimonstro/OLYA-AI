@@ -24,6 +24,14 @@ def host_ram_gib() -> float:
     return 0.0
 
 
+def _report_passed(data: dict) -> tuple[bool, str]:
+    if data.get("format") == "x1-model-regression-report-v1":
+        comparison = data.get("comparison") or {}
+        critical = (data.get("aggregate") or {}).get("critical_failed") or []
+        return bool(comparison.get("passed")) and not critical, "comparison.passed + critical_failed=[]"
+    return data.get("status") == "passed", "status=passed"
+
+
 def require_report(path: Path, expected_format: str | None = None) -> dict:
     if not path.is_file():
         return {"status": "failed", "reason": "missing", "path": str(path)}
@@ -33,7 +41,14 @@ def require_report(path: Path, expected_format: str | None = None) -> dict:
         return {"status": "failed", "reason": type(exc).__name__, "path": str(path)}
     if expected_format and data.get("format") != expected_format:
         return {"status": "failed", "reason": "format_mismatch", "path": str(path), "format": data.get("format")}
-    return {"status": "passed" if data.get("status") == "passed" else "failed", "path": str(path), "payload_status": data.get("status"), "format": data.get("format")}
+    passed, rule = _report_passed(data)
+    item = {"status": "passed" if passed else "failed", "path": str(path), "format": data.get("format"), "success_rule": rule}
+    if data.get("format") == "x1-model-regression-report-v1":
+        item["critical_failed"] = (data.get("aggregate") or {}).get("critical_failed") or []
+        item["comparison_passed"] = bool((data.get("comparison") or {}).get("passed"))
+    else:
+        item["payload_status"] = data.get("status")
+    return item
 
 
 def main() -> int:
@@ -58,7 +73,7 @@ def main() -> int:
 
     evidence = [
         ("release_gate_evidence", ROOT / "backups" / "release-gate-latest.json", "x1-release-gate-v4"),
-        ("model_regression_evidence", ROOT / "backups" / "model-regression-latest.json", "x1-model-regression-v1"),
+        ("model_regression_evidence", ROOT / "backups" / "model-regression-latest.json", "x1-model-regression-report-v1"),
         ("restore_drill_evidence", ROOT / "backups" / "restore-drill-latest.json", None),
         ("runtime_chaos_evidence", ROOT / "backups" / "rc-chaos-runtime-latest.json", "x1-rc-chaos-v1"),
     ]
