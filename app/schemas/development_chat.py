@@ -29,6 +29,7 @@ class DevelopmentChatState(BaseModel):
     git: dict | None = None
     preview: dict | None = None
     approval_required: dict | None = None
+    autonomous: dict | None = None
     last_action: str
     last_summary: str
     state_version: int
