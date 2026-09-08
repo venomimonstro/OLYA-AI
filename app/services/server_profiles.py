@@ -90,6 +90,18 @@ def _threads(cores: int, *, low: bool = False) -> int:
     return max(2, min(value, 8)) if low else value
 
 
+def _base(name: str, ram_gib: float, cpu_cores: int, safe_context: int, llama_memory: int) -> dict:
+    return {
+        "profile": name,
+        "host_ram_gib": float(ram_gib),
+        "cpu_cores": max(1, int(cpu_cores)),
+        "safe_context_ceiling": int(safe_context),
+        "llama_memory_gib": int(llama_memory),
+        "max_concurrent_generations": 1,
+        "images_default_enabled": False,
+    }
+
+
 def profile_for_host(profile: str, ram_gib: float, cpu_cores: int) -> ServerProfileEnvelope:
     name = str(profile or "optimal").strip().lower()
     if name not in PROFILE_NAMES:
@@ -105,38 +117,54 @@ def profile_for_host(profile: str, ram_gib: float, cpu_cores: int) -> ServerProf
         )
 
     if name == "super_low":
-        return ServerProfileEnvelope(
-            name, ram_gib, cpu_cores, safe_context, min(4096, safe_context), LLAMA_MIN_MEMORY_GIB,
-            _threads(cpu_cores, low=True), 1, 12, 45, 4, 2, 1536, 1024, 512, 256, 512,
-            512, 512, 1, 1, 8, 2, 8, 1, 6, 1, 2, 1, 4, False,
-        )
-    if name == "optimal":
-        return ServerProfileEnvelope(
-            name, ram_gib, cpu_cores, safe_context, min(8192, safe_context), LLAMA_MIN_MEMORY_GIB,
-            _threads(cpu_cores), 1, 32, 90, 8, 4, 2048, 1536, 768, 384, 768,
-            1024, 1024, 1, 4, 32, 4, 32, 4, 24, 2, 8, 2, 8, False,
-        )
+        return ServerProfileEnvelope(**_base(name, ram_gib, cpu_cores, safe_context, LLAMA_MIN_MEMORY_GIB),
+            context_tokens=min(4096, safe_context), llama_threads=_threads(cpu_cores, low=True),
+            inference_queue=12, inference_queue_timeout_seconds=45,
+            database_pool_size=4, database_max_overflow=2,
+            app_memory_mb=1536, db_memory_mb=1024, searx_memory_mb=512,
+            sandbox_worker_memory_mb=256, document_worker_memory_mb=512,
+            sandbox_max_memory_mb=512, project_runtime_max_memory_mb=512,
+            document_concurrency=1, research_concurrency=1, research_queue=8,
+            chat_http_active=2, chat_http_queue=8,
+            research_http_active=1, research_http_queue=6,
+            image_http_active=1, image_http_queue=2,
+            sandbox_http_active=1, sandbox_http_queue=4)
 
-    # Maximum expands only inside the boot envelope of the actual host. Qwen
-    # remains one generation slot: extra RAM is used for context/control-plane
-    # headroom instead of creating a second CPU-heavy model generation.
-    large = ram_gib >= 63.0
+    if name == "optimal":
+        return ServerProfileEnvelope(**_base(name, ram_gib, cpu_cores, safe_context, LLAMA_MIN_MEMORY_GIB),
+            context_tokens=min(8192, safe_context), llama_threads=_threads(cpu_cores),
+            inference_queue=32, inference_queue_timeout_seconds=90,
+            database_pool_size=8, database_max_overflow=4,
+            app_memory_mb=2048, db_memory_mb=1536, searx_memory_mb=768,
+            sandbox_worker_memory_mb=384, document_worker_memory_mb=768,
+            sandbox_max_memory_mb=1024, project_runtime_max_memory_mb=1024,
+            document_concurrency=1, research_concurrency=4, research_queue=32,
+            chat_http_active=4, chat_http_queue=32,
+            research_http_active=4, research_http_queue=24,
+            image_http_active=2, image_http_queue=8,
+            sandbox_http_active=2, sandbox_http_queue=8)
+
     medium = ram_gib >= 47.0
-    return ServerProfileEnvelope(
-        name, ram_gib, cpu_cores, safe_context, safe_context, llama_memory,
-        _threads(cpu_cores), 1, 48 if medium else 32, 120,
-        12 if large else 10 if medium else 8, 6 if large else 4,
-        3072 if medium else 2048, 2048 if medium else 1536, 1024 if medium else 768,
-        512 if medium else 384, 1024 if medium else 768,
-        2048 if large else 1536 if medium else 1024,
-        2048 if large else 1536 if medium else 1024,
-        2 if medium else 1, 8 if large else 6 if medium else 4, 48 if medium else 32,
-        6 if medium else 4, 48 if medium else 32,
-        6 if medium else 4, 32 if medium else 24,
-        3 if medium else 2, 12 if medium else 8,
-        3 if medium else 2, 12 if medium else 8,
-        False,
-    )
+    large = ram_gib >= 63.0
+    return ServerProfileEnvelope(**_base(name, ram_gib, cpu_cores, safe_context, llama_memory),
+        context_tokens=safe_context, llama_threads=_threads(cpu_cores),
+        inference_queue=48 if medium else 32, inference_queue_timeout_seconds=120,
+        database_pool_size=12 if large else 10 if medium else 8,
+        database_max_overflow=6 if large else 4,
+        app_memory_mb=3072 if medium else 2048,
+        db_memory_mb=2048 if medium else 1536,
+        searx_memory_mb=1024 if medium else 768,
+        sandbox_worker_memory_mb=512 if medium else 384,
+        document_worker_memory_mb=1024 if medium else 768,
+        sandbox_max_memory_mb=2048 if large else 1536 if medium else 1024,
+        project_runtime_max_memory_mb=2048 if large else 1536 if medium else 1024,
+        document_concurrency=2 if medium else 1,
+        research_concurrency=8 if large else 6 if medium else 4,
+        research_queue=48 if medium else 32,
+        chat_http_active=6 if medium else 4, chat_http_queue=48 if medium else 32,
+        research_http_active=6 if medium else 4, research_http_queue=32 if medium else 24,
+        image_http_active=3 if medium else 2, image_http_queue=12 if medium else 8,
+        sandbox_http_active=3 if medium else 2, sandbox_http_queue=12 if medium else 8)
 
 
 def profile_payload(profile: str, ram_gib: float, cpu_cores: int) -> dict:
