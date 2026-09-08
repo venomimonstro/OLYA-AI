@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lease image.generate jobs and execute the configured local backend."""
+"""Lease local image generation/edit jobs and execute configured backends."""
 from __future__ import annotations
 
 import argparse
@@ -8,9 +8,13 @@ import socket
 import threading
 import time
 
+from sqlalchemy import select
+
 from app.core.config import get_settings
 from app.db import SessionLocal
-from app.models import ImageGeneration, utcnow
+from app.models import ImageEditRequest, ImageGeneration, utcnow
+from app.services.image_editing import DiffusersImageEditBackend, LocalImageEditVision
+from app.services.image_edit_runtime import execute_edit_generation
 from app.services.image_runtime import DisabledImageBackend, LocalDiffusersBackend, MockImageBackend, execute_generation
 from app.services.image_vision import LocalVisionQA
 from app.services.jobs import JobLeaseLostError, complete_job, fail_job, heartbeat_job, lease_next_job, start_job
@@ -40,12 +44,39 @@ def _lease_heartbeat(job_id: str, worker_id: str, token: str, lease_seconds: int
             continue
 
 
+def _mark_terminal_failure(db, generation_id: str | None, *, job_kind: str, error: str) -> None:
+    if not generation_id:
+        return
+    generation = db.get(ImageGeneration, generation_id)
+    if generation is not None:
+        generation.status = "failed"
+        generation.qa_status = "failed"
+        generation.error_message = error[:2000]
+        generation.finished_at = utcnow()
+    if job_kind == "image.edit":
+        edit = db.scalar(select(ImageEditRequest).where(ImageEditRequest.generation_id == generation_id))
+        if edit is not None:
+            edit.status = "failed"
+            edit.error_message = error[:2000]
+            edit.qa_summary = {**(edit.qa_summary or {}), "passed": False, "worker_failure": type(error).__name__, "reason": error[:500]}
+            edit.updated_at = utcnow()
+
+
 def run(*, persistent: bool = False) -> None:
     settings = get_settings()
     worker_id = f"image-{socket.gethostname()}-{os.getpid()}"
-    backend = backend_for(settings.image_backend, model_path=settings.image_model_path, model_name=settings.image_model_name)
+    generation_backend = backend_for(settings.image_backend, model_path=settings.image_model_path, model_name=settings.image_model_name)
     semantic_qa = (
         LocalVisionQA(settings.image_vision_qa_url, settings.image_vision_qa_timeout_seconds)
+        if settings.image_vision_qa_url
+        else None
+    )
+    edit_backend = DiffusersImageEditBackend(
+        inpaint_model_path=settings.image_edit_model_path,
+        identity_model_path=settings.image_edit_identity_model_path,
+    )
+    edit_vision = (
+        LocalImageEditVision(settings.image_vision_qa_url, settings.image_vision_qa_timeout_seconds)
         if settings.image_vision_qa_url
         else None
     )
@@ -57,7 +88,7 @@ def run(*, persistent: bool = False) -> None:
                 db,
                 worker_id=worker_id,
                 lease_seconds=settings.job_lease_seconds,
-                kinds={"image.generate"},
+                kinds={"image.generate", "image.edit"},
             )
             if job is None:
                 db.rollback()
@@ -94,30 +125,55 @@ def run(*, persistent: bool = False) -> None:
                         job.id,
                         worker_id=worker_id,
                         lease_token=token,
-                        result_payload={"skipped": True},
+                        result_payload={"skipped": True, "job_kind": job.kind},
                     )
                     db.commit()
                     continue
 
-                execute_generation(
-                    db,
-                    generation,
-                    backend=backend,
-                    storage_root=settings.image_storage_path,
-                    max_perceptual_error=settings.image_perceptual_error_max,
-                    preview_max_side=settings.image_preview_max_side,
-                    max_repairs=settings.image_qa_max_repairs,
-                    semantic_qa=semantic_qa,
-                )
+                if job.kind == "image.edit":
+                    result_payload = execute_edit_generation(
+                        db,
+                        generation,
+                        backend=edit_backend,
+                        storage_root=settings.image_storage_path,
+                        vision=edit_vision,
+                        qa_max_repairs=settings.image_edit_qa_max_repairs,
+                        preview_max_side=settings.image_preview_max_side,
+                        mask_padding_ratio=settings.image_edit_mask_padding_ratio,
+                        mask_feather_px=settings.image_edit_mask_feather_px,
+                        max_local_mask_ratio=settings.image_edit_max_local_mask_ratio,
+                        min_plan_confidence=settings.image_edit_min_plan_confidence,
+                        require_vision_qa=settings.image_edit_require_vision_qa,
+                    )
+                else:
+                    execute_generation(
+                        db,
+                        generation,
+                        backend=generation_backend,
+                        storage_root=settings.image_storage_path,
+                        max_perceptual_error=settings.image_perceptual_error_max,
+                        preview_max_side=settings.image_preview_max_side,
+                        max_repairs=settings.image_qa_max_repairs,
+                        semantic_qa=semantic_qa,
+                    )
+                    result_payload = {
+                        "delivered": generation.status == "ready" and generation.qa_status == "passed",
+                        "generation_id": generation.id,
+                        "blob_id": generation.blob_id,
+                    }
+
                 if heartbeat_lost.is_set():
                     db.rollback()
-                    raise JobLeaseLostError("Image job lease was lost during generation")
+                    raise JobLeaseLostError("Image job lease was lost during execution")
+                # A quality-gate rejection is a completed durable job, not a worker
+                # crash. The ImageGeneration/ImageEditRequest rows retain failed QA
+                # state and no content endpoint can deliver a failed image.
                 complete_job(
                     db,
                     job.id,
                     worker_id=worker_id,
                     lease_token=token,
-                    result_payload={"generation_id": generation.id, "blob_id": generation.blob_id},
+                    result_payload={"job_kind": job.kind, **result_payload},
                 )
                 db.commit()
             except Exception as exc:  # durable worker boundary
@@ -142,12 +198,8 @@ def run(*, persistent: bool = False) -> None:
                         except JobLeaseLostError:
                             failure_db.rollback()
                             continue
-                        if leased.status == "failed" and generation_id:
-                            failed_generation = failure_db.get(ImageGeneration, generation_id)
-                            if failed_generation is not None:
-                                failed_generation.status = "failed"
-                                failed_generation.error_message = str(exc)[:2000]
-                                failed_generation.finished_at = utcnow()
+                        if leased.status == "failed":
+                            _mark_terminal_failure(failure_db, generation_id, job_kind=leased.kind, error=str(exc))
                         failure_db.commit()
             finally:
                 heartbeat_stop.set()
@@ -156,7 +208,7 @@ def run(*, persistent: bool = False) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="X1 local image generation worker")
+    parser = argparse.ArgumentParser(description="X1 local image generation/edit worker")
     parser.add_argument("--persistent", action="store_true", help="Stay alive when the image queue is empty")
     args = parser.parse_args()
     run(persistent=args.persistent)
