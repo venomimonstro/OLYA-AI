@@ -1,0 +1,16 @@
+FROM python:3.12.14-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /proxy
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir fastapi==0.141.1 uvicorn==0.52.4 pydantic==2.13.5
+
+COPY app/docker_runtime_proxy.py /proxy/docker_runtime_proxy.py
+
+CMD ["uvicorn", "docker_runtime_proxy:app", "--host", "0.0.0.0", "--port", "8092", "--workers", "1", "--limit-concurrency", "8", "--backlog", "16", "--timeout-keep-alive", "2"]
