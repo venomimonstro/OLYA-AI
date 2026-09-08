@@ -4,6 +4,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import BackgroundJob, User, UserQuota
@@ -44,7 +45,24 @@ def enqueue_job(
         kind=kind.strip(), payload=payload or {}, user_id=user_id, project_id=project_id, task_id=task_id,
         priority=priority, max_attempts=max_attempts, idempotency_key=idempotency_key, available_at=available_at or utcnow(),
     )
-    db.add(job); db.flush(); return job
+    if not idempotency_key:
+        db.add(job)
+        db.flush()
+        return job
+
+    # The pre-check above is only an optimization. Two concurrent requests can
+    # both miss it, so isolate the unique-key race in a SAVEPOINT. Never poison
+    # the caller's outer transaction merely because another request won first.
+    try:
+        with db.begin_nested():
+            db.add(job)
+            db.flush()
+        return job
+    except IntegrityError:
+        winner = db.scalar(select(BackgroundJob).where(BackgroundJob.idempotency_key == idempotency_key))
+        if winner is None:
+            raise
+        return winner
 
 
 def _ready_clause(now: datetime):
