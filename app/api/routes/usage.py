@@ -83,7 +83,7 @@ def current_budget(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    result = budget_snapshot(db, user, request.app.state.settings)
+    result = budget_snapshot(db, user, request.app.state.settings, include_details=True)
     db.commit()
     return result
 
@@ -112,6 +112,7 @@ def budget_preview(
         settings,
         projected_mode=route.mode,
         projected_verification_extra=verification.extra_inference_budget,
+        include_details=False,
     )
     result["route"] = {
         "requested_mode": payload.mode,
