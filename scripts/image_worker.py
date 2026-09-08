@@ -18,6 +18,7 @@ from app.services.image_edit_runtime import execute_edit_generation
 from app.services.image_runtime import DisabledImageBackend, LocalDiffusersBackend, MockImageBackend, execute_generation
 from app.services.image_vision import LocalVisionQA
 from app.services.jobs import JobLeaseLostError, complete_job, fail_job, heartbeat_job, lease_next_job, start_job
+from app.services.qwen_image_edit_backend import QwenImageEditBackend
 
 
 def backend_for(name: str, *, model_path: str = "", model_name: str = ""):
@@ -26,6 +27,24 @@ def backend_for(name: str, *, model_path: str = "", model_name: str = ""):
     if name == "diffusers":
         return LocalDiffusersBackend(model_path, model_name)
     return DisabledImageBackend()
+
+
+def edit_backend_for(settings):
+    name = str(settings.image_edit_backend or "disabled").strip().lower()
+    if name == "qwen-image-edit":
+        return QwenImageEditBackend(
+            model_path=settings.image_edit_model_path,
+            identity_model_path=settings.image_edit_identity_model_path or settings.image_edit_model_path,
+            require_cuda=settings.image_edit_require_cuda,
+        )
+    if name == "diffusers":
+        return DiffusersImageEditBackend(
+            inpaint_model_path=settings.image_edit_model_path,
+            identity_model_path=settings.image_edit_identity_model_path,
+        )
+    # Keep the worker able to serve ordinary image.generate jobs when editing is
+    # disabled. Any image.edit admission is already rejected by the HTTP layer.
+    return DiffusersImageEditBackend(inpaint_model_path="", identity_model_path="")
 
 
 def _lease_heartbeat(job_id: str, worker_id: str, token: str, lease_seconds: int, stop: threading.Event, lost: threading.Event) -> None:
@@ -58,7 +77,7 @@ def _mark_terminal_failure(db, generation_id: str | None, *, job_kind: str, erro
         if edit is not None:
             edit.status = "failed"
             edit.error_message = error[:2000]
-            edit.qa_summary = {**(edit.qa_summary or {}), "passed": False, "worker_failure": type(error).__name__, "reason": error[:500]}
+            edit.qa_summary = {**(edit.qa_summary or {}), "passed": False, "worker_failure": True, "reason": error[:500]}
             edit.updated_at = utcnow()
 
 
@@ -71,10 +90,7 @@ def run(*, persistent: bool = False) -> None:
         if settings.image_vision_qa_url
         else None
     )
-    edit_backend = DiffusersImageEditBackend(
-        inpaint_model_path=settings.image_edit_model_path,
-        identity_model_path=settings.image_edit_identity_model_path,
-    )
+    edit_backend = edit_backend_for(settings)
     edit_vision = (
         LocalImageEditVision(settings.image_vision_qa_url, settings.image_vision_qa_timeout_seconds)
         if settings.image_vision_qa_url
