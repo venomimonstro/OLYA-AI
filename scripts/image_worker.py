@@ -32,10 +32,14 @@ def backend_for(name: str, *, model_path: str = "", model_name: str = ""):
 def edit_backend_for(settings):
     name = str(settings.image_edit_backend or "disabled").strip().lower()
     if name == "qwen-image-edit":
+        # The current 32-GiB CPU production profile must not attempt to load a
+        # 20B-class image editor beside the 23-GiB llama process. Qwen Image Edit
+        # is therefore an explicit CUDA-worker capability; CPU deployments can
+        # use a smaller, separately qualified diffusers edit checkpoint instead.
         return QwenImageEditBackend(
             model_path=settings.image_edit_model_path,
             identity_model_path=settings.image_edit_identity_model_path or settings.image_edit_model_path,
-            require_cuda=settings.image_edit_require_cuda,
+            require_cuda=True,
         )
     if name == "diffusers":
         return DiffusersImageEditBackend(
