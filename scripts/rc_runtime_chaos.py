@@ -65,21 +65,14 @@ def restart_and_recover(service: str, health_url: str = "http://127.0.0.1:8000/h
     if not component_ok:
         return {"service": service, "status": "failed", "phase": "component_recovery", "stderr": component_detail, "duration_seconds": round(time.monotonic() - started, 2)}
     app_ok = wait_http(health_url, 180)
-    return {
-        "service": service,
-        "status": "passed" if app_ok else "failed",
-        "phase": "app_recovery" if not app_ok else "recovered",
-        "component_recovered": component_ok,
-        "app_recovered": app_ok,
-        "duration_seconds": round(time.monotonic() - started, 2),
-    }
+    return {"service": service, "status": "passed" if app_ok else "failed", "phase": "app_recovery" if not app_ok else "recovered", "component_recovered": component_ok, "app_recovered": app_ok, "duration_seconds": round(time.monotonic() - started, 2)}
 
 
 def disk_full_isolated_probe() -> dict:
     command = [
-        "docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop=ALL",
+        "docker", "run", "--rm", "--pull=never", "--network", "none", "--read-only", "--cap-drop=ALL",
         "--security-opt", "no-new-privileges", "--tmpfs", "/probe:rw,noexec,nosuid,nodev,size=4m",
-        "alpine:3.22", "sh", "-c", "dd if=/dev/zero of=/probe/fill bs=1M count=16 >/dev/null 2>&1; test $? -ne 0",
+        "x1-sandbox:0.39", "sh", "-c", "dd if=/dev/zero of=/probe/fill bs=1M count=16 >/dev/null 2>&1; test $? -ne 0",
     ]
     result = run(command, 60)
     return {"name": "isolated_disk_full", "status": "passed" if result.returncode == 0 else "failed", "exit_code": result.returncode, "stderr": result.stderr[-1000:]}
