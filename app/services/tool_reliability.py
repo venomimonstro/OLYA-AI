@@ -46,6 +46,10 @@ class ToolExecutionError(ToolReliabilityError):
     code = "tool_execution_failed"
 
 
+class ToolReplayBlockedError(ToolReliabilityError):
+    code = "tool_replay_blocked"
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -180,6 +184,7 @@ class ToolSession:
     _recent_tools: deque[str] = field(default_factory=lambda: deque(maxlen=24))
     _cache: dict[str, ToolResult] = field(default_factory=dict)
     _call_ids: dict[str, str] = field(default_factory=dict)
+    _blocked_fingerprints: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.max_calls = max(1, min(int(self.max_calls), 64))
@@ -212,9 +217,9 @@ class ToolSession:
         if prior_fp is not None and prior_fp != fingerprint:
             raise ToolValidationError("tool_call_id was reused with different arguments")
 
-        # Count requests, not just physical executions. Identical replays are
-        # idempotently served from cache, but repeated requests still prove the
-        # agent is not making progress and eventually trip the loop guard.
+        if fingerprint in self._blocked_fingerprints:
+            raise ToolReplayBlockedError("Previous side-effect outcome is uncertain; replay is blocked")
+
         self._fingerprints[fingerprint] += 1
         if self._fingerprints[fingerprint] > self.max_same_call:
             raise ToolLoopError("The same tool call was repeated too many times")
@@ -278,24 +283,25 @@ class ToolSession:
                     fingerprint=fingerprint,
                     truncated=truncated,
                 )
-                # Fingerprint cache applies equally to read and successful write
-                # tools. A model retry with a new call id therefore cannot replay
-                # an already completed side effect.
                 self._cache[fingerprint] = result
                 return result
             except asyncio.TimeoutError as exc:
                 last_error = exc
-                if spec.effect == "write" or attempts >= max_attempts:
-                    raise ToolTimeoutError(
-                        "Tool timed out; side-effecting calls are not replayed automatically"
-                        if spec.effect == "write"
-                        else "Tool timed out after bounded retries"
-                    ) from exc
+                if spec.effect == "write":
+                    self._blocked_fingerprints.add(fingerprint)
+                    raise ToolTimeoutError("Tool timed out; side-effecting call outcome is uncertain and replay is blocked") from exc
+                if attempts >= max_attempts:
+                    raise ToolTimeoutError("Tool timed out after bounded retries") from exc
             except ToolReliabilityError:
                 raise
             except Exception as exc:
                 last_error = exc
-                if spec.effect == "write" or attempts >= max_attempts:
+                if spec.effect == "write":
+                    self._blocked_fingerprints.add(fingerprint)
+                    raise ToolExecutionError(
+                        f"Tool execution failed with uncertain side-effect outcome: {exc.__class__.__name__}"
+                    ) from exc
+                if attempts >= max_attempts:
                     raise ToolExecutionError(f"Tool execution failed: {exc.__class__.__name__}") from exc
                 await asyncio.sleep(min(0.25 * attempts, 0.75))
 
