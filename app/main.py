@@ -49,6 +49,7 @@ from app.services.context import ContextCompiler
 from app.services.discovery import BraveSearchDiscovery, DisabledDiscovery, ProviderPoolDiscovery
 from app.services.documents import configure_render_gate
 from app.services.http_limits import RequestBodyLimitMiddleware
+from app.services.overload import FairOverloadLane, OverloadRejected, principal_from_authorization
 from app.services.resource_governor import ResourceBusyError, ResourceGovernor
 from app.services.user_resource_governor import UserResourceGovernor
 from app.services.research import ResearchFetcher
@@ -84,6 +85,18 @@ def _production_configuration_errors(settings) -> list[str]:
     return errors
 
 
+def _lane(settings, name: str, active: int, queue: int, timeout: float) -> FairOverloadLane:
+    return FairOverloadLane(
+        name,
+        max_concurrent=active,
+        max_queue=queue,
+        queue_timeout_seconds=timeout,
+        max_queued_per_principal=settings.overload_max_queued_per_principal,
+        breaker_failures=settings.overload_breaker_failures,
+        breaker_cooldown_seconds=settings.overload_breaker_cooldown_seconds,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -100,9 +113,14 @@ async def lifespan(app: FastAPI):
     app.state.llama = LlamaClient(settings.llama_base_url, settings.request_timeout_seconds)
     app.state.context = ContextCompiler(max_chars=settings.deep_context_tokens * 6)
     app.state.governor = ResourceGovernor(max_concurrent=settings.max_concurrent_generations, max_queue=settings.max_queue_size, wait_timeout_seconds=settings.inference_queue_timeout_seconds)
-    app.state.research_governor = ResourceGovernor(max_concurrent=max(1, int(settings.research_max_concurrent_operations)), max_queue=max(0, int(settings.research_max_queue_size)), wait_timeout_seconds=max(0.5, float(settings.research_queue_timeout_seconds)))
     app.state.file_upload_governor = ResourceGovernor(max_concurrent=2, max_queue=8, wait_timeout_seconds=15.0)
     app.state.user_governor = UserResourceGovernor()
+    app.state.overload_lanes = {
+        "chat": _lane(settings, "chat", settings.overload_chat_max_active_http, settings.overload_chat_max_queue, settings.overload_chat_queue_timeout_seconds),
+        "research": _lane(settings, "research", settings.overload_research_max_active_http, settings.overload_research_max_queue, settings.overload_research_queue_timeout_seconds),
+        "images": _lane(settings, "images", settings.overload_image_max_active_http, settings.overload_image_max_queue, settings.overload_image_queue_timeout_seconds),
+        "sandbox": _lane(settings, "sandbox", settings.overload_sandbox_max_active_http, settings.overload_sandbox_max_queue, settings.overload_sandbox_queue_timeout_seconds),
+    }
     configure_render_gate(settings.document_max_concurrent_renders, settings.document_render_queue_timeout_seconds)
     app.state.research = ResearchFetcher(timeout_seconds=settings.research_timeout_seconds, max_bytes=settings.research_max_bytes, max_chars=settings.research_max_chars, max_redirects=settings.research_max_redirects)
     configured = [item.strip().lower() for item in (settings.search_providers or settings.search_provider).split(",") if item.strip()]
@@ -156,6 +174,21 @@ def _network_research_request(request: Request) -> bool:
     return path == "/v1/research/sources" or (path.startswith("/v1/research/runs/") and path.endswith(("/discover", "/collect")))
 
 
+def _overload_lane_name(request: Request) -> str | None:
+    if request.method.upper() != "POST":
+        return None
+    path = request.url.path.rstrip("/")
+    if path in {"/v1/chat", "/v1/chat/stream"}:
+        return "chat"
+    if _network_research_request(request):
+        return "research"
+    if path == "/v1/images/generations":
+        return "images"
+    if path.startswith("/v1/project-sandboxes/") and path.endswith("/execute"):
+        return "sandbox"
+    return None
+
+
 def _file_upload_request(request: Request) -> bool:
     if request.method.upper() != "POST":
         return False
@@ -178,17 +211,47 @@ async def file_upload_admission(request: Request, call_next):
 
 
 @app.middleware("http")
-async def research_admission(request: Request, call_next):
-    if not _network_research_request(request):
+async def graceful_overload_admission(request: Request, call_next):
+    lane_name = _overload_lane_name(request)
+    if lane_name is None:
         return await call_next(request)
-    governor = getattr(request.app.state, "research_governor", None)
-    if governor is None:
-        return JSONResponse(status_code=503, content={"detail": "Research admission is not ready; retry shortly"}, headers={"Retry-After": "3"})
+    lanes = getattr(request.app.state, "overload_lanes", None) or {}
+    lane = lanes.get(lane_name)
+    if lane is None:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": {"code": "admission_not_ready", "subsystem": lane_name, "retry_after": 3}},
+            headers={"Retry-After": "3"},
+        )
+    principal = principal_from_authorization(request.headers.get("authorization"))
     try:
-        async with governor.slot():
-            return await call_next(request)
-    except ResourceBusyError:
-        return JSONResponse(status_code=503, content={"detail": "Internet research is at safe capacity; retry shortly"}, headers={"Retry-After": "5"})
+        async with lane.slot(principal):
+            try:
+                response = await call_next(request)
+            except Exception:
+                await lane.record_outcome(failed=True)
+                raise
+            # Capacity/quota/user errors do not indicate a broken dependency.
+            breaker_failure = response.status_code in {500, 502, 504} or (response.status_code == 503 and lane_name != "chat")
+            await lane.record_outcome(failed=breaker_failure)
+            snap = lane.snapshot()
+            response.headers["X-X1-Overload-Lane"] = lane_name
+            response.headers["X-X1-Queue-Waiting"] = str(snap.waiting)
+            return response
+    except OverloadRejected as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "code": "graceful_overload",
+                    "subsystem": lane_name,
+                    "reason": exc.reason,
+                    "retry_after": exc.retry_after,
+                    "resumable": lane_name in {"research", "images", "sandbox"},
+                }
+            },
+            headers={"Retry-After": str(exc.retry_after), "X-X1-Overload-Lane": lane_name},
+        )
 
 
 @app.middleware("http")
