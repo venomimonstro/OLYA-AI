@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import FrustrationEvent, Message, UsageEvent
+from app.models import AnswerAudit, ComputeBreakdownEvent, FrustrationEvent, Message, UsageEvent
+from app.services.budget_transparency import record_compute_breakdown
 
 
 def _fingerprint(kind: str, user_id: str, conversation_id: str | None, request_id: str | None) -> str:
@@ -49,8 +50,61 @@ def detect_repeat_query(db: Session, conversation_id: str | None, current_text: 
     return bool(current and any(normalize_query(m.content) == current for m in recent))
 
 
+def _record_breakdown_from_usage(db: Session, usage: UsageEvent) -> None:
+    if not usage.request_id:
+        return
+    for pending in db.new:
+        if isinstance(pending, ComputeBreakdownEvent) and pending.request_id == usage.request_id:
+            return
+    if db.scalar(select(ComputeBreakdownEvent.id).where(ComputeBreakdownEvent.request_id == usage.request_id)):
+        return
+
+    total_ms = max(0, int(usage.inference_ms or 0))
+    extra = 0
+    critic_used = False
+    repair_applied = False
+    audit = db.scalar(select(AnswerAudit).where(AnswerAudit.request_id == usage.request_id))
+    if audit is not None and isinstance(audit.critic, dict):
+        cv = audit.critic.get("conditional_verification") or {}
+        extra = max(0, min(2, int(cv.get("extra_inferences") or 0)))
+        critic_used = bool(cv.get("critic_used"))
+        repair_applied = bool(cv.get("repair_applied"))
+
+    # Sprint 48 historically persisted total inference time but not a stopwatch for
+    # every sub-call. Preserve the exact total and attribute sub-calls by equal
+    # call-equivalent shares. New analytics explicitly labels this as estimated.
+    calls = 1 + extra
+    share = total_ms // max(1, calls)
+    critic_ms = share if critic_used and extra > 0 else 0
+    repair_ms = share if repair_applied and extra > int(critic_used) else 0
+    if repair_applied and extra == 1 and not critic_used:
+        repair_ms = share
+    primary_ms = max(0, total_ms - critic_ms - repair_ms)
+
+    record_compute_breakdown(
+        db,
+        request_id=usage.request_id,
+        user_id=usage.user_id,
+        project_id=usage.project_id,
+        conversation_id=usage.conversation_id,
+        mode=usage.mode,
+        primary_ms=primary_ms,
+        critic_ms=critic_ms,
+        repair_ms=repair_ms,
+        total_inference_ms=total_ms,
+        success=bool(usage.success),
+        verification_extra_inferences=extra,
+        metadata={
+            "attribution_method": "call_equivalent_estimate" if extra else "exact_total_primary_only",
+            "critic_used": critic_used,
+            "repair_applied": repair_applied,
+        },
+    )
+
+
 def observe_usage(db: Session, usage: UsageEvent, *, max_queue_ms: int = 5000, max_duration_ms: int = 120000,
                   repeat_query: bool = False) -> None:
+    _record_breakdown_from_usage(db, usage)
     common = dict(user_id=usage.user_id, project_id=usage.project_id, conversation_id=usage.conversation_id, request_id=usage.request_id)
     if not usage.success:
         add_event(db, **common, kind="inference_failure", severity="critical", metrics={"inference_ms": usage.inference_ms, "queue_ms": usage.queue_ms})
