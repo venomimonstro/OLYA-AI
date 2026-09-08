@@ -45,29 +45,14 @@ def _auth(value: str) -> None:
 
 
 def _raw(argv: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=timeout,
-        shell=False,
-    )
+    return subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, shell=False)
 
 
 def _managed(ref: str) -> bool:
     if not (_MANAGED_NAME.fullmatch(ref) or _HEX_ID.fullmatch(ref)):
         return False
     try:
-        result = _raw(
-            [
-                "docker", "inspect", "-f",
-                '{{ index .Config.Labels "x1.sandbox.preview" }}|{{ index .Config.Labels "x1.sandbox.execution" }}|{{ .Config.Image }}',
-                ref,
-            ],
-            5,
-        )
+        result = _raw(["docker", "inspect", "-f", '{{ index .Config.Labels "x1.sandbox.preview" }}|{{ index .Config.Labels "x1.sandbox.execution" }}|{{ .Config.Image }}', ref], 5)
     except (OSError, subprocess.SubprocessError):
         return False
     if result.returncode != 0:
@@ -95,30 +80,32 @@ def _mount_fields(spec: str) -> tuple[dict[str, str], set[str]]:
     return values, flags
 
 
+def _mount_source_target(spec: str) -> tuple[Path, str, set[str]]:
+    values, flags = _mount_fields(spec)
+    source = values.get("src") or values.get("source") or ""
+    target = values.get("dst") or values.get("target") or ""
+    return Path(source), target, flags
+
+
 def _safe_mount(spec: str) -> bool:
     try:
         values, flags = _mount_fields(spec)
     except HTTPException:
         return False
-    if set(values) - {"type", "src", "source", "dst", "target"}:
+    if set(values) - {"type", "src", "source", "dst", "target"} or flags - {"ro", "rw"}:
         return False
-    if flags - {"ro", "rw"}:
-        return False
-    if values.get("type") != "bind":
-        return False
-    if ("src" in values) == ("source" in values):
-        return False
-    if ("dst" in values) == ("target" in values):
+    if values.get("type") != "bind" or ("src" in values) == ("source" in values) or ("dst" in values) == ("target" in values):
         return False
     source = values.get("src") or values.get("source") or ""
     target = values.get("dst") or values.get("target") or ""
-    if target not in {"/workspace", "/x1-runtime"}:
+    if target not in {"/workspace", "/workspace/.git", "/x1-runtime"}:
         return False
     if len({"ro", "rw"} & flags) != 1:
         return False
     if target == "/x1-runtime" and "rw" not in flags:
         return False
-
+    if target == "/workspace/.git" and "ro" not in flags:
+        return False
     try:
         source_path = Path(source)
         if not source_path.is_absolute():
@@ -127,15 +114,12 @@ def _safe_mount(spec: str) -> bool:
         relative = source_path.relative_to(HOST_DATA_ROOT)
     except (OSError, ValueError):
         return False
-
-    expected_namespace = "code_workspaces" if target == "/workspace" else "project_runtimes"
-    if len(relative.parts) < 2 or relative.parts[0] != expected_namespace:
+    expected_namespace = "project_runtimes" if target == "/x1-runtime" else "code_workspaces"
+    min_parts = 3 if target == "/workspace/.git" else 2
+    if len(relative.parts) < min_parts or relative.parts[0] != expected_namespace:
         return False
-
-    # The proxy has a read-only mirror of the host data directory. This is
-    # deliberate: a lexical host path check cannot detect a host-side symlink
-    # created inside a workspace. Require the requested source to already exist
-    # in the mirror and resolve inside the exact namespace before Docker sees it.
+    if target == "/workspace/.git" and relative.parts[-1] != ".git":
+        return False
     mirror_namespace = (MIRROR_DATA_ROOT / expected_namespace).resolve(strict=False)
     mirror_source = MIRROR_DATA_ROOT.joinpath(*relative.parts)
     try:
@@ -219,31 +203,26 @@ def _validate_run(argv: list[str]) -> None:
     if image_index < 3 or image_index == len(argv) - 1:
         raise HTTPException(status_code=422, detail="Sandbox runtime command is incomplete")
     _validate_run_option_grammar(argv, image_index)
-
-    if argv[:image_index].count("--pull=never") != 1:
+    prefix = argv[:image_index]
+    if prefix.count("--pull=never") != 1:
         raise HTTPException(status_code=422, detail="Sandbox image pulls must be disabled")
-    if argv[:image_index].count("--read-only") != 1 or argv[:image_index].count("--cap-drop=ALL") != 1:
+    if prefix.count("--read-only") != 1 or prefix.count("--cap-drop=ALL") != 1:
         raise HTTPException(status_code=422, detail="Sandbox rootfs/capability hardening flags missing")
-
-    network = _single_value(argv, "--network", image_index)
-    if network != "none":
+    if prefix.count("--rm") > 1 or prefix.count("-d") > 1:
+        raise HTTPException(status_code=422, detail="Duplicate sandbox mode flag")
+    if _single_value(argv, "--network", image_index) != "none":
         raise HTTPException(status_code=422, detail="Sandbox Docker network must be none")
-    security_opt = _single_value(argv, "--security-opt", image_index)
-    if security_opt != "no-new-privileges":
+    if _single_value(argv, "--security-opt", image_index) != "no-new-privileges":
         raise HTTPException(status_code=422, detail="Sandbox no-new-privileges required")
-    user = _single_value(argv, "--user", image_index)
-    if user != "10001:10001":
+    if _single_value(argv, "--user", image_index) != "10001:10001":
         raise HTTPException(status_code=422, detail="Sandbox container user mismatch")
-    workdir = _single_value(argv, "--workdir", image_index)
-    if workdir != "/workspace":
+    if _single_value(argv, "--workdir", image_index) != "/workspace":
         raise HTTPException(status_code=422, detail="Sandbox workdir must be /workspace")
-    tmpfs = _single_value(argv, "--tmpfs", image_index)
-    if tmpfs != "/tmp:rw,noexec,nosuid,nodev,size=256m":
+    if _single_value(argv, "--tmpfs", image_index) != "/tmp:rw,noexec,nosuid,nodev,size=256m":
         raise HTTPException(status_code=422, detail="Sandbox tmpfs hardening mismatch")
     name = _single_value(argv, "--name", image_index)
     if not _MANAGED_NAME.fullmatch(name):
         raise HTTPException(status_code=422, detail="Managed sandbox container name required")
-
     labels = [argv[index + 1] for index, value in enumerate(argv[:image_index - 1]) if value == "--label"]
     primary_labels = [label for label in labels if label in _MANAGED_LABELS]
     expiry_labels = [label for label in labels if _EXPIRY_LABEL_RE.fullmatch(label)]
@@ -251,24 +230,29 @@ def _validate_run(argv: list[str]) -> None:
         raise HTTPException(status_code=422, detail="Sandbox labels must contain exactly one managed label and one expiry label")
     primary = primary_labels[0]
     if primary == "x1.sandbox.execution=true":
-        if not name.startswith("x1-exec-") or argv[:image_index].count("--rm") != 1 or "-d" in argv[:image_index]:
+        if not name.startswith("x1-exec-") or prefix.count("--rm") != 1 or "-d" in prefix:
             raise HTTPException(status_code=422, detail="Execution container mode/name mismatch")
     else:
-        if not name.startswith("x1-preview-") or argv[:image_index].count("-d") != 1 or "--rm" in argv[:image_index]:
+        # sandbox-worker historically uses -d --rm for previews. --rm is safe
+        # here (the child is still label/name constrained) and prevents stopped
+        # preview containers from leaking disk until the reaper runs.
+        if not name.startswith("x1-preview-") or prefix.count("-d") != 1:
             raise HTTPException(status_code=422, detail="Preview container mode/name mismatch")
 
     mounts = [argv[index + 1] for index, value in enumerate(argv[:image_index - 1]) if value == "--mount"]
-    if len(mounts) != 2 or not all(_safe_mount(item) for item in mounts):
+    if len(mounts) not in {2, 3} or not all(_safe_mount(item) for item in mounts):
         raise HTTPException(status_code=422, detail="Sandbox mounts are outside approved host data namespaces")
-    targets = set()
-    for spec in mounts:
-        values, _ = _mount_fields(spec)
-        targets.add(values.get("dst") or values.get("target"))
-    if targets != {"/workspace", "/x1-runtime"}:
-        raise HTTPException(status_code=422, detail="Sandbox requires one workspace and one runtime mount")
+    parsed = [_mount_source_target(spec) for spec in mounts]
+    targets = {target for _, target, _ in parsed}
+    if not {"/workspace", "/x1-runtime"}.issubset(targets) or targets - {"/workspace", "/x1-runtime", "/workspace/.git"}:
+        raise HTTPException(status_code=422, detail="Sandbox requires workspace/runtime mounts and optional Git protection")
+    if len(targets) != len(parsed):
+        raise HTTPException(status_code=422, detail="Duplicate sandbox mount target")
+    by_target = {target: source.resolve(strict=False) for source, target, _ in parsed}
+    if "/workspace/.git" in by_target and by_target["/workspace/.git"] != by_target["/workspace"] / ".git":
+        raise HTTPException(status_code=422, detail="Git metadata mount must belong to the selected workspace")
     if any("docker.sock" in item for item in argv):
         raise HTTPException(status_code=422, detail="Docker socket may not be mounted into sandbox")
-
     _validate_resource_limits(argv, image_index)
     _validate_env(argv, image_index)
 
@@ -288,26 +272,23 @@ def _validate(argv: list[str]) -> None:
             raise HTTPException(status_code=422, detail="Only configured image inspection is allowed")
         return
     if command == "ps":
-        if len(argv) != 5 or argv[:4] != ["docker", "ps", "-q", "--filter"] or argv[4] not in {
-            "label=x1.sandbox.preview=true", "label=x1.sandbox.execution=true"
-        }:
+        if len(argv) != 5 or argv[:4] != ["docker", "ps", "-q", "--filter"] or argv[4] not in {"label=x1.sandbox.preview=true", "label=x1.sandbox.execution=true"}:
             raise HTTPException(status_code=422, detail="Only managed sandbox listing is allowed")
         return
     if command == "run":
         _validate_run(argv)
         return
-    if command in {"inspect", "rm", "exec"}:
-        refs = [item for item in argv[2:] if _MANAGED_NAME.fullmatch(item) or _HEX_ID.fullmatch(item)]
-        if len(refs) != 1 or not _managed(refs[0]):
+    if command == "rm":
+        if len(argv) != 4 or argv[2] != "-f" or not _managed(argv[3]):
             raise HTTPException(status_code=404, detail="Managed sandbox container not found")
-        ref = refs[0]
-        if command == "rm" and argv != ["docker", "rm", "-f", ref]:
-            raise HTTPException(status_code=422, detail="Only forced removal of managed sandbox containers is allowed")
-        if command == "exec" and (len(argv) < 4 or argv[2] != ref or argv[3].startswith("--")):
+        return
+    if command == "exec":
+        if len(argv) < 4 or not _managed(argv[2]) or argv[3].startswith("--"):
             raise HTTPException(status_code=422, detail="Invalid managed sandbox exec")
-        if command == "inspect":
-            if len(argv) != 5 or argv[2] != "-f" or argv[3] not in _ALLOWED_INSPECT_FORMATS or argv[4] != ref:
-                raise HTTPException(status_code=422, detail="Only approved inspection of managed sandbox containers is allowed")
+        return
+    if command == "inspect":
+        if len(argv) != 5 or argv[2] != "-f" or argv[3] not in _ALLOWED_INSPECT_FORMATS or not _managed(argv[4]):
+            raise HTTPException(status_code=422, detail="Only approved inspection of managed sandbox containers is allowed")
         return
     raise HTTPException(status_code=422, detail="Docker command is not exposed by runtime proxy")
 
@@ -326,27 +307,14 @@ def health() -> dict[str, Any]:
 
 
 @app.post("/command")
-def command(
-    payload: CommandRequest,
-    x_x1_docker_proxy_token: str = Header(default="", alias="X-X1-Docker-Proxy-Token"),
-) -> dict[str, Any]:
+def command(payload: CommandRequest, x_x1_docker_proxy_token: str = Header(default="", alias="X-X1-Docker-Proxy-Token")) -> dict[str, Any]:
     _auth(x_x1_docker_proxy_token)
     _validate(payload.argv)
     timeout = min(MAX_TIMEOUT, int(payload.timeout_seconds))
     try:
         completed = _raw(payload.argv, timeout)
-        return {
-            "exit_code": completed.returncode,
-            "stdout": completed.stdout[-30000:],
-            "stderr": completed.stderr[-30000:],
-            "timed_out": False,
-        }
+        return {"exit_code": completed.returncode, "stdout": completed.stdout[-30000:], "stderr": completed.stderr[-30000:], "timed_out": False}
     except subprocess.TimeoutExpired as exc:
-        return {
-            "exit_code": None,
-            "stdout": (exc.stdout or "")[-30000:] if isinstance(exc.stdout, str) else "",
-            "stderr": (exc.stderr or "")[-30000:] if isinstance(exc.stderr, str) else "",
-            "timed_out": True,
-        }
+        return {"exit_code": None, "stdout": (exc.stdout or "")[-30000:] if isinstance(exc.stdout, str) else "", "stderr": (exc.stderr or "")[-30000:] if isinstance(exc.stderr, str) else "", "timed_out": True}
     except OSError as exc:
         raise HTTPException(status_code=503, detail="Docker runtime unavailable") from exc
