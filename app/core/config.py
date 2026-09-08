@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     data_root: str = "./data"
+    server_optimization_profile: str = "optimal"
     database_url: str = "sqlite+pysqlite:///./data/x1.db"
     database_pool_size: int = 8
     database_max_overflow: int = 4
@@ -214,50 +215,31 @@ class Settings(BaseSettings):
 
     public_launch_breaker_min_requests: int = 50
     public_launch_canary_min_requests: int = 30
-    public_launch_max_failure_rate: float = 0.03
-    public_launch_max_requests_per_user_hour: int = 120
-    public_launch_global_budget_microunits: int = 0
-    public_launch_enforce_exposure: bool = True
+    public_launch_canary_max_failure_rate: float = 0.03
+    public_launch_canary_max_p95_queue_ms: int = 5000
+    public_launch_canary_max_p95_duration_ms: int = 120000
+    public_launch_canary_max_frustration_rate: float = 0.05
+    public_launch_canary_max_quality_failure_rate: float = 0.05
     public_launch_watchdog_enabled: bool = True
+    public_launch_enforce_exposure: bool = False
+    public_launch_default_cohort: str = "public"
     public_launch_watchdog_interval_seconds: float = 300.0
-    public_launch_auto_rollback: bool = True
 
-    plan_ratio_free: float = 0.25
-    plan_ratio_x1: float = 1.0
-    plan_ratio_pro: float = 2.0
-    plan_ratio_max: float = 4.0
-    plan_ratio_business: float = 8.0
-    plan_share_fast: float = 0.20
-    plan_share_work: float = 0.35
-    plan_share_deep: float = 0.25
-    plan_share_api: float = 0.10
-    plan_share_image: float = 0.05
-    plan_share_sandbox: float = 0.05
+    bind_address: str = "127.0.0.1"
+    http_limit_concurrency: int = 128
+    http_backlog: int = 2048
+    http_keepalive_seconds: int = 5
+
+    llama_model_file: str = "Qwen3.6-35B-A3B-Q4_K_M.gguf"
+    llama_memory_limit: str = "23g"
+    llama_threads: int = 8
+    llama_threads_batch: int = 8
 
     @property
-    def is_sqlite(self) -> bool:
-        return str(self.database_url).lower().startswith("sqlite")
-
-    @property
-    def database_host(self) -> str:
-        try:
-            return urlsplit(str(self.database_url).replace("postgresql+psycopg", "postgresql", 1)).hostname or ""
-        except ValueError:
-            return ""
-
-    def ensure_storage_paths(self) -> None:
-        for value in (
-            self.data_root,
-            self.file_storage_path,
-            self.document_storage_path,
-            self.code_workspace_storage_path,
-            self.project_runtime_storage_path,
-            self.image_storage_path,
-            self.backup_storage_path,
-        ):
-            Path(value).mkdir(parents=True, exist_ok=True)
+    def parsed_database_url(self):
+        return urlsplit(self.database_url)
 
 
-@lru_cache(maxsize=1)
+@lru_cache
 def get_settings() -> Settings:
     return Settings()
