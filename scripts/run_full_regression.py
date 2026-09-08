@@ -101,14 +101,18 @@ def main() -> int:
     args = parser.parse_args()
     try:
         restore_legacy_suite()
-        corpus = subprocess.run(
-            [sys.executable, "-m", "scripts.model_regression_lab", "--validate-only"],
-            cwd=ROOT,
-            stdin=subprocess.DEVNULL,
-            shell=False,
-        )
-        if corpus.returncode != 0:
-            return corpus.returncode
+        for module, extra in (
+            ("scripts.model_regression_lab", ["--validate-only"]),
+            ("scripts.rc_security_audit", []),
+        ):
+            gate = subprocess.run(
+                [sys.executable, "-m", module, *extra],
+                cwd=ROOT,
+                stdin=subprocess.DEVNULL,
+                shell=False,
+            )
+            if gate.returncode != 0:
+                return gate.returncode
         command = [sys.executable, "-m", "pytest", "-q", "tests", *args.pytest_args]
         return subprocess.run(command, cwd=ROOT, stdin=subprocess.DEVNULL, shell=False).returncode
     finally:
