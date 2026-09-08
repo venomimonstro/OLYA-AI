@@ -8,7 +8,7 @@ import re
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Literal, TypeVar
+from typing import Any, Awaitable, Callable, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -67,8 +67,6 @@ class ToolSpec:
         if self.max_retries < 0 or self.max_retries > 3:
             raise ValueError("Invalid retry count")
         if self.effect == "write" and self.max_retries:
-            # Automatic replay of side effects after a timeout is unsafe because
-            # the first invocation may have succeeded before its response was lost.
             raise ValueError("Write tools cannot have automatic retries")
 
     def openai_schema(self) -> dict[str, Any]:
@@ -118,7 +116,7 @@ class ToolResult:
 
 
 class StrictToolArgs(BaseModel):
-    """Convenient base for tool argument schemas: unknown fields fail closed."""
+    """Tool arguments fail closed on unknown fields."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -140,8 +138,6 @@ def _bounded_output(value: Any, max_chars: int) -> tuple[Any, bool]:
     serialized = _canonical(value)
     if len(serialized) <= max_chars:
         return value, False
-    # Keep result structurally valid for the model instead of returning a broken
-    # partial JSON object.
     return {
         "truncated": True,
         "preview": serialized[:max_chars],
@@ -185,6 +181,13 @@ class ToolSession:
     _cache: dict[str, ToolResult] = field(default_factory=dict)
     _call_ids: dict[str, str] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        self.max_calls = max(1, min(int(self.max_calls), 64))
+        self.max_same_call = max(1, min(int(self.max_same_call), 4))
+        self.max_consecutive_same_tool = max(2, min(int(self.max_consecutive_same_tool), 8))
+        self.history_size = max(8, min(int(self.history_size), 64))
+        self._recent_tools = deque(maxlen=self.history_size)
+
     def _admit(self, call: ToolCall, spec: ToolSpec, fingerprint: str) -> ToolResult | None:
         if not call.call_id or len(call.call_id) > 128 or not re.fullmatch(r"[A-Za-z0-9_.:-]+", call.call_id):
             raise ToolValidationError("Invalid tool_call_id")
@@ -217,6 +220,14 @@ class ToolSession:
                 raise ToolLoopError("The agent is repeatedly calling the same tool without progress")
         return None
 
+    async def _invoke(self, spec: ToolSpec, args: BaseModel) -> Any:
+        if inspect.iscoroutinefunction(spec.handler):
+            return await asyncio.wait_for(spec.handler(args), timeout=spec.timeout_seconds)
+        # Run blocking local handlers away from the event loop. wait_for bounds
+        # the caller's wait; handlers themselves must still use bounded OS/network
+        # primitives because Python cannot force-kill an arbitrary worker thread.
+        return await asyncio.wait_for(asyncio.to_thread(spec.handler, args), timeout=spec.timeout_seconds)
+
     async def execute(self, call: ToolCall) -> ToolResult:
         spec = self.registry.get(call.name)
         if not isinstance(call.arguments, dict):
@@ -224,8 +235,6 @@ class ToolSession:
         try:
             args = spec.args_model.model_validate(call.arguments)
         except ValidationError as exc:
-            # Never feed the entire internal validation traceback back to the
-            # model; bounded errors are enough for one corrected call.
             details = exc.errors(include_url=False)[:8]
             raise ToolValidationError(f"Arguments failed schema validation: {details}") from exc
 
@@ -248,17 +257,7 @@ class ToolSession:
         while attempts < max_attempts:
             attempts += 1
             try:
-                value = spec.handler(args)
-                if inspect.isawaitable(value):
-                    value = await asyncio.wait_for(value, timeout=spec.timeout_seconds)
-                else:
-                    # Sync handlers are expected to be bounded local operations.
-                    # They execute in a thread so the async agent loop remains responsive.
-                    # A handler that can block indefinitely must itself provide a bounded
-                    # primitive; Python cannot safely kill an arbitrary worker thread.
-                    async def finished() -> Any:
-                        return value
-                    value = await asyncio.wait_for(finished(), timeout=spec.timeout_seconds)
+                value = await self._invoke(spec, args)
                 bounded, truncated = _bounded_output(value, spec.result_max_chars)
                 result = ToolResult(
                     call_id=call.call_id,
@@ -271,9 +270,6 @@ class ToolSession:
                     fingerprint=fingerprint,
                     truncated=truncated,
                 )
-                # Read calls and successful write calls are both idempotent within
-                # this session by fingerprint/call-id. This prevents the model from
-                # applying the same write twice after receiving a delayed result.
                 self._cache[fingerprint] = result
                 return result
             except asyncio.TimeoutError as exc:
@@ -286,7 +282,7 @@ class ToolSession:
                     ) from exc
             except ToolReliabilityError:
                 raise
-            except Exception as exc:  # handler boundary: fail closed and bounded
+            except Exception as exc:
                 last_error = exc
                 if spec.effect == "write" or attempts >= max_attempts:
                     raise ToolExecutionError(f"Tool execution failed: {exc.__class__.__name__}") from exc
