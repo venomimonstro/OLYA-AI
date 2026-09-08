@@ -1,13 +1,17 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.inference.router import choose_route
 from app.models import UsageEvent, User
 from app.services.auth import get_current_user
+from app.services.budget_transparency import budget_snapshot
+from app.services.conditional_verification import plan_verification
+from app.services.freshness import classify_freshness
 from app.services.quota import compute_seconds_used, get_or_create_quota
 
 router = APIRouter(prefix="/v1/usage", tags=["usage"])
@@ -25,6 +29,13 @@ class UsageSummary(BaseModel):
     monthly_compute_seconds_used: int
     monthly_compute_seconds_limit: int
     plan: str
+
+
+class BudgetPreviewRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=200_000)
+    mode: str = "auto"
+    verification: str = "auto"
+    research_source_count: int = Field(default=0, ge=0, le=10)
 
 
 @router.get("/summary", response_model=UsageSummary)
@@ -64,3 +75,50 @@ def usage_summary(
         monthly_compute_seconds_limit=quota.monthly_compute_seconds_limit,
         plan=quota.plan,
     )
+
+
+@router.get("/budget")
+def current_budget(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    result = budget_snapshot(db, user, request.app.state.settings)
+    db.commit()
+    return result
+
+
+@router.post("/budget-preview")
+def budget_preview(
+    payload: BudgetPreviewRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    settings = request.app.state.settings
+    route = choose_route(payload.message, payload.mode, settings.max_context_tokens, settings.deep_context_tokens)
+    freshness = classify_freshness(payload.message).required
+    verification = plan_verification(
+        verification=payload.verification,
+        user_text=payload.message,
+        route_mode=route.mode,
+        requirements=[],
+        freshness_required=freshness,
+        verified_source_count=payload.research_source_count,
+    )
+    result = budget_snapshot(
+        db,
+        user,
+        settings,
+        projected_mode=route.mode,
+        projected_verification_extra=verification.extra_inference_budget,
+    )
+    result["route"] = {
+        "requested_mode": payload.mode,
+        "selected_mode": route.mode,
+        "reasoning": bool(route.reasoning),
+        "verification_risk_score": verification.risk_score,
+        "freshness_required": freshness,
+    }
+    db.commit()
+    return result
