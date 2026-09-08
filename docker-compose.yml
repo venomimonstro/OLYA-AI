@@ -39,6 +39,39 @@ services:
         limits:
           memory: ${X1_SEARX_MEMORY_LIMIT_MB:-768}M
 
+  docker-runtime-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.docker-runtime-proxy
+    restart: unless-stopped
+    mem_limit: 192m
+    environment:
+      X1_DOCKER_RUNTIME_PROXY_TOKEN: ${X1_DOCKER_RUNTIME_PROXY_TOKEN:?Set X1_DOCKER_RUNTIME_PROXY_TOKEN in .env}
+      X1_HOST_DATA_ROOT: ${X1_HOST_DATA_ROOT:?Set X1_HOST_DATA_ROOT in .env}
+      X1_SANDBOX_RUNTIME_IMAGE: ${X1_PROJECT_SANDBOX_IMAGE:-x1-sandbox:0.39}
+      X1_DOCKER_PROXY_MAX_TIMEOUT_SECONDS: 1830
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    expose:
+      - "8092"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8092/health', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+
   sandbox-worker:
     build:
       context: .
@@ -47,6 +80,8 @@ services:
     mem_limit: ${X1_SANDBOX_WORKER_MEMORY_LIMIT_MB:-384}m
     environment:
       X1_SANDBOX_WORKER_TOKEN: ${X1_PROJECT_SANDBOX_WORKER_TOKEN:?Set X1_PROJECT_SANDBOX_WORKER_TOKEN in .env}
+      X1_DOCKER_RUNTIME_PROXY_URL: http://docker-runtime-proxy:8092
+      X1_DOCKER_RUNTIME_PROXY_TOKEN: ${X1_DOCKER_RUNTIME_PROXY_TOKEN:?Set X1_DOCKER_RUNTIME_PROXY_TOKEN in .env}
       X1_HOST_DATA_ROOT: ${X1_HOST_DATA_ROOT:?Set X1_HOST_DATA_ROOT in .env}
       X1_SANDBOX_MIRROR_DATA_ROOT: /app/data
       X1_SANDBOX_RUNTIME_IMAGE: ${X1_PROJECT_SANDBOX_IMAGE:-x1-sandbox:0.39}
@@ -57,10 +92,12 @@ services:
       X1_SANDBOX_MAX_PIDS: ${X1_SANDBOX_MAX_PIDS:-128}
       X1_SANDBOX_PREVIEW_TTL_SECONDS: ${X1_SANDBOX_PREVIEW_TTL_SECONDS:-900}
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/app/data
     expose:
       - "8090"
+    depends_on:
+      docker-runtime-proxy:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=3).read()"]
       interval: 15s
