@@ -37,34 +37,19 @@ def _sha(value: Any) -> str:
 
 def _contract(plan: DevelopmentPlan) -> tuple[str, dict, str]:
     goal = str(plan.title or "").strip()
-    constraints = {
-        "constraints": plan.constraints or {},
-        "architecture": plan.architecture or {},
-    }
+    constraints = {"constraints": plan.constraints or {}, "architecture": plan.architecture or {}}
     if not goal:
         raise AutonomousDevelopmentError("Development plan has no immutable goal/title")
     return goal, constraints, _sha({"goal": goal, "constraints": constraints})
 
 
-def ensure_ledger(
-    db: Session,
-    session: DevelopmentChatSession,
-    *,
-    subagent_budget: int = 8,
-    max_parallel_subagents: int = 1,
-) -> AutonomousDevelopmentLedger:
+def ensure_ledger(db: Session, session: DevelopmentChatSession, *, subagent_budget: int = 8, max_parallel_subagents: int = 1) -> AutonomousDevelopmentLedger:
     plan = db.get(DevelopmentPlan, session.plan_id)
     if plan is None:
         raise AutonomousDevelopmentError("Development plan not found")
-    ledger = db.scalar(
-        select(AutonomousDevelopmentLedger).where(
-            AutonomousDevelopmentLedger.development_session_id == session.id
-        )
-    )
+    ledger = db.scalar(select(AutonomousDevelopmentLedger).where(AutonomousDevelopmentLedger.development_session_id == session.id))
     goal, constraints, contract_sha = _contract(plan)
     if ledger is not None:
-        # The original goal/constraints are intentionally immutable. A changed
-        # plan is surfaced as drift rather than silently rewriting autonomous state.
         return ledger
     ledger = AutonomousDevelopmentLedger(
         development_session_id=session.id,
@@ -112,21 +97,9 @@ def _live_state(db: Session, ledger: AutonomousDevelopmentLedger) -> dict[str, A
     if plan is None:
         raise AutonomousDevelopmentError("Development plan disappeared")
     goal, constraints, current_contract_sha = _contract(plan)
-    sprints = list(
-        db.scalars(
-            select(DevelopmentSprint)
-            .where(DevelopmentSprint.plan_id == ledger.plan_id)
-            .order_by(DevelopmentSprint.ordinal)
-        ).all()
-    )
+    sprints = list(db.scalars(select(DevelopmentSprint).where(DevelopmentSprint.plan_id == ledger.plan_id).order_by(DevelopmentSprint.ordinal)).all())
     sprint_ids = [row.id for row in sprints]
-    items = list(
-        db.scalars(
-            select(DevelopmentWorkItem)
-            .where(DevelopmentWorkItem.sprint_id.in_(sprint_ids))
-            .order_by(DevelopmentWorkItem.sprint_id, DevelopmentWorkItem.ordinal)
-        ).all()
-    ) if sprint_ids else []
+    items = list(db.scalars(select(DevelopmentWorkItem).where(DevelopmentWorkItem.sprint_id.in_(sprint_ids)).order_by(DevelopmentWorkItem.sprint_id, DevelopmentWorkItem.ordinal)).all()) if sprint_ids else []
     sprint_by_id = {row.id: row for row in sprints}
 
     completed: list[dict[str, Any]] = []
@@ -144,49 +117,19 @@ def _live_state(db: Session, ledger: AutonomousDevelopmentLedger) -> dict[str, A
         else:
             pending.append(row)
 
-    decisions = list(
-        db.scalars(
-            select(ArchitectureDecision)
-            .where(
-                ArchitectureDecision.plan_id == ledger.plan_id,
-                ArchitectureDecision.status == "active",
-            )
-            .order_by(ArchitectureDecision.created_at)
-        ).all()
-    )
+    decisions = list(db.scalars(select(ArchitectureDecision).where(ArchitectureDecision.plan_id == ledger.plan_id, ArchitectureDecision.status == "active").order_by(ArchitectureDecision.created_at)).all())
     decision_rows = [
-        {
-            "id": row.id,
-            "key": row.key,
-            "decision": row.decision,
-            "rationale": row.rationale,
-            "status": row.status,
-        }
+        {"id": row.id, "key": row.key, "decision": row.decision, "rationale": row.rationale, "status": row.status}
         for row in decisions[-100:]
     ]
 
-    active_run = db.scalar(
-        select(EngineeringRun)
-        .where(
-            EngineeringRun.plan_id == ledger.plan_id,
-            EngineeringRun.status.in_(["running", "approved", "blocked"]),
-        )
-        .order_by(EngineeringRun.updated_at.desc())
-    )
+    active_run = db.scalar(select(EngineeringRun).where(EngineeringRun.plan_id == ledger.plan_id, EngineeringRun.status.in_(["running", "approved", "blocked"])).order_by(EngineeringRun.updated_at.desc()))
     execution = None
     if active_run is not None:
-        execution = db.scalar(
-            select(EngineeringExecution)
-            .where(EngineeringExecution.engineering_run_id == active_run.id)
-            .order_by(EngineeringExecution.updated_at.desc())
-        )
+        execution = db.scalar(select(EngineeringExecution).where(EngineeringExecution.engineering_run_id == active_run.id).order_by(EngineeringExecution.updated_at.desc()))
 
     return {
-        "plan": {
-            "id": plan.id,
-            "status": plan.status,
-            "current_sprint_ordinal": plan.current_sprint_ordinal,
-        },
+        "plan": {"id": plan.id, "status": plan.status, "current_sprint_ordinal": plan.current_sprint_ordinal},
         "contract": {
             "sha256": ledger.contract_sha256,
             "drift_detected": current_contract_sha != ledger.contract_sha256,
@@ -194,15 +137,7 @@ def _live_state(db: Session, ledger: AutonomousDevelopmentLedger) -> dict[str, A
             "current_goal_preview": goal[:500],
             "current_constraints_sha256": _sha(constraints),
         },
-        "sprints": [
-            {
-                "id": row.id,
-                "ordinal": row.ordinal,
-                "title": row.title,
-                "status": row.status,
-            }
-            for row in sprints
-        ],
+        "sprints": [{"id": row.id, "ordinal": row.ordinal, "title": row.title, "status": row.status} for row in sprints],
         "engineering": None if active_run is None else {
             "run_id": active_run.id,
             "work_item_id": active_run.work_item_id,
@@ -218,11 +153,7 @@ def _live_state(db: Session, ledger: AutonomousDevelopmentLedger) -> dict[str, A
             "state_version": execution.state_version,
             "failure_reason": execution.failure_reason,
         },
-        "counts": {
-            "completed": len(completed),
-            "pending": len(pending),
-            "failed": len(failed),
-        },
+        "counts": {"completed": len(completed), "pending": len(pending), "failed": len(failed)},
         "subagents": {
             "budget": ledger.subagent_budget,
             "calls_used": ledger.subagent_calls_used,
@@ -253,26 +184,17 @@ def _checkpoint_payload(ledger: AutonomousDevelopmentLedger, state: dict[str, An
     }
 
 
-def sync_ledger(
-    db: Session,
-    session: DevelopmentChatSession,
-    *,
-    checkpoint_kind: str = "state",
-    force_checkpoint: bool = False,
-) -> AutonomousDevelopmentLedger:
+def sync_ledger(db: Session, session: DevelopmentChatSession, *, checkpoint_kind: str = "state", force_checkpoint: bool = False) -> AutonomousDevelopmentLedger:
     ledger = ensure_ledger(db, session)
     state = _live_state(db, ledger)
     state_sha = _sha(state)
     previous_sha = _sha(ledger.current_state or {}) if ledger.current_state else ""
-
     ledger.current_state = state
     ledger.decisions = list(state["decisions"])
     ledger.completed_work = list(state["completed_work"])
     ledger.pending_work = list(state["pending_work"])
     ledger.failed_work = list(state["failed_work"])
-    ledger.status = "completed" if state["plan"]["status"] == "completed" else (
-        "blocked" if state["failed_work"] and not state["pending_work"] else "active"
-    )
+    ledger.status = "completed" if state["plan"]["status"] == "completed" else ("blocked" if state["failed_work"] and not state["pending_work"] else "active")
     ledger.last_heartbeat_at = utcnow()
     ledger.updated_at = utcnow()
 
@@ -298,20 +220,11 @@ def latest_checkpoint(db: Session, ledger: AutonomousDevelopmentLedger) -> Auton
         row = db.get(AutonomousDevelopmentCheckpoint, ledger.checkpoint_ref)
         if row is not None:
             return row
-    return db.scalar(
-        select(AutonomousDevelopmentCheckpoint)
-        .where(AutonomousDevelopmentCheckpoint.ledger_id == ledger.id)
-        .order_by(AutonomousDevelopmentCheckpoint.revision.desc())
-    )
+    return db.scalar(select(AutonomousDevelopmentCheckpoint).where(AutonomousDevelopmentCheckpoint.ledger_id == ledger.id).order_by(AutonomousDevelopmentCheckpoint.revision.desc()))
 
 
-def resume_payload(db: Session, session: DevelopmentChatSession) -> dict[str, Any]:
-    ledger = sync_ledger(db, session, checkpoint_kind="resume")
-    checkpoint = latest_checkpoint(db, ledger)
-    now = utcnow()
-    heartbeat = ledger.last_heartbeat_at
-    stale = bool(heartbeat and heartbeat < now - timedelta(minutes=10))
-    payload = {
+def _resume_dict(ledger: AutonomousDevelopmentLedger, checkpoint: AutonomousDevelopmentCheckpoint | None, *, heartbeat_was_stale: bool) -> dict[str, Any]:
+    return {
         "schema": "x1.autonomous-development-state.v1",
         "ledger_id": ledger.id,
         "revision": ledger.revision,
@@ -332,13 +245,17 @@ def resume_payload(db: Session, session: DevelopmentChatSession) -> dict[str, An
             "active": ledger.active_subagents,
             "max_parallel": ledger.max_parallel_subagents,
         },
-        "recovery": {
-            "heartbeat_was_stale": stale,
-            "resume_from_checkpoint": bool(checkpoint),
-        },
+        "recovery": {"heartbeat_was_stale": heartbeat_was_stale, "resume_from_checkpoint": bool(checkpoint)},
     }
-    # This compact JSON is safe to inject into a new model turn after context
-    # compaction; it is server state, not a prose summary generated by the model.
+
+
+def resume_payload(db: Session, session: DevelopmentChatSession) -> dict[str, Any]:
+    existing = db.scalar(select(AutonomousDevelopmentLedger).where(AutonomousDevelopmentLedger.development_session_id == session.id))
+    previous_heartbeat = existing.last_heartbeat_at if existing is not None else None
+    stale = bool(previous_heartbeat and previous_heartbeat < utcnow() - timedelta(minutes=10))
+    ledger = sync_ledger(db, session, checkpoint_kind="resume")
+    checkpoint = latest_checkpoint(db, ledger)
+    payload = _resume_dict(ledger, checkpoint, heartbeat_was_stale=stale)
     payload["prompt_context"] = _canonical(payload)
     return payload
 
@@ -349,28 +266,33 @@ def compact_resume_context(db: Session, session: DevelopmentChatSession, *, max_
     if len(full) <= max_chars:
         return full
     compact = {
-        "schema": payload["schema"],
-        "ledger_id": payload["ledger_id"],
-        "revision": payload["revision"],
-        "checkpoint_id": payload["checkpoint_id"],
-        "contract_sha256": payload["contract_sha256"],
-        "immutable_goal": payload["immutable_goal"],
-        "immutable_constraints": payload["immutable_constraints"],
-        "status": payload["status"],
-        "decisions": payload["decisions"][-30:],
-        "completed": payload["completed"][-50:],
-        "pending": payload["pending"][:80],
-        "failed": payload["failed"][-30:],
-        "subagent_budget": payload["subagent_budget"],
+        "schema": payload["schema"], "ledger_id": payload["ledger_id"], "revision": payload["revision"],
+        "checkpoint_id": payload["checkpoint_id"], "contract_sha256": payload["contract_sha256"],
+        "immutable_goal": payload["immutable_goal"], "immutable_constraints": payload["immutable_constraints"],
+        "status": payload["status"], "decisions": payload["decisions"][-30:], "completed": payload["completed"][-50:],
+        "pending": payload["pending"][:80], "failed": payload["failed"][-30:], "subagent_budget": payload["subagent_budget"],
         "recovery": payload["recovery"],
     }
-    text = _canonical(compact)
-    return text[:max_chars]
+    return _canonical(compact)[:max_chars]
+
+
+def compact_plan_resume_context(db: Session, plan_id: str, *, max_chars: int = 18_000) -> str:
+    ledger = db.scalar(select(AutonomousDevelopmentLedger).where(AutonomousDevelopmentLedger.plan_id == plan_id).order_by(AutonomousDevelopmentLedger.updated_at.desc()))
+    if ledger is None:
+        return ""
+    checkpoint = latest_checkpoint(db, ledger)
+    payload = _resume_dict(ledger, checkpoint, heartbeat_was_stale=False)
+    compact = {
+        "schema": payload["schema"], "ledger_id": payload["ledger_id"], "revision": payload["revision"],
+        "checkpoint_id": payload["checkpoint_id"], "contract_sha256": payload["contract_sha256"],
+        "immutable_goal": payload["immutable_goal"], "immutable_constraints": payload["immutable_constraints"],
+        "status": payload["status"], "decisions": payload["decisions"][-30:], "completed": payload["completed"][-50:],
+        "pending": payload["pending"][:80], "failed": payload["failed"][-30:], "subagent_budget": payload["subagent_budget"],
+    }
+    return _canonical(compact)[:max_chars]
 
 
 def consume_subagent_slot(db: Session, ledger: AutonomousDevelopmentLedger) -> None:
-    # Callers should hold the normal DB transaction while changing these counters.
-    # This is intentionally conservative on the 32-GB host: default max_parallel=1.
     if ledger.subagent_calls_used >= ledger.subagent_budget:
         raise AutonomousDevelopmentError("Autonomous subagent budget exhausted")
     if ledger.active_subagents >= ledger.max_parallel_subagents:
@@ -400,14 +322,7 @@ def subagent_slot(db: Session, ledger: AutonomousDevelopmentLedger) -> Iterator[
 
 def recover_abandoned_slots(db: Session, *, stale_minutes: int = 10) -> int:
     cutoff = utcnow() - timedelta(minutes=max(1, int(stale_minutes)))
-    rows = list(
-        db.scalars(
-            select(AutonomousDevelopmentLedger).where(
-                AutonomousDevelopmentLedger.active_subagents > 0,
-                AutonomousDevelopmentLedger.last_heartbeat_at < cutoff,
-            )
-        ).all()
-    )
+    rows = list(db.scalars(select(AutonomousDevelopmentLedger).where(AutonomousDevelopmentLedger.active_subagents > 0, AutonomousDevelopmentLedger.last_heartbeat_at < cutoff)).all())
     for ledger in rows:
         ledger.active_subagents = 0
         ledger.last_heartbeat_at = utcnow()
