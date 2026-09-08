@@ -1,0 +1,24 @@
+FROM python:3.12.14-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /worker
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       libreoffice-writer poppler-utils fonts-dejavu-core ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir fastapi==0.141.1 uvicorn==0.52.4 pydantic==2.13.5
+
+RUN groupadd --gid 10001 x1 \
+    && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/x1 x1 \
+    && mkdir -p /app/data /home/x1 \
+    && chown -R x1:x1 /app/data /home/x1 /worker
+
+COPY --chown=x1:x1 app/document_worker_api.py /worker/document_worker_api.py
+
+USER x1
+
+CMD ["uvicorn", "document_worker_api:app", "--host", "0.0.0.0", "--port", "8091", "--workers", "1", "--limit-concurrency", "4", "--backlog", "8", "--timeout-keep-alive", "2"]
