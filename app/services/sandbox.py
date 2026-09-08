@@ -123,21 +123,21 @@ def _base_run_args(info: SandboxBackendInfo, *, image: str, workspace: Path, scr
     return argv
 
 
-def run_in_container(*, preferred_backend: str, image: str, workspace: Path, scratch: Path, argv: list[str], timeout_seconds: int, cpu_limit: float, memory_mb: int, process_limit: int, network_policy: str, env: dict[str,str]|None=None) -> dict:
+def run_in_container(*, preferred_backend: str, image: str, workspace: Path, scratch: Path, argv: list[str], timeout_seconds: int, cpu_limit: float, memory_mb: int, process_limit: int, network_policy: str, env: dict[str,str]|None=None, read_only_workspace: bool=False) -> dict:
     if not argv or any("\x00" in value for value in argv):
         raise SandboxError("Invalid sandbox command")
     if preferred_backend == "remote":
-        return _remote_request("/execute", payload={"image":image,"workspace_rel":_data_relative(workspace),"scratch_rel":_data_relative(scratch),"argv":argv,"timeout_seconds":max(1,int(timeout_seconds)),"cpu_limit":max(.1,float(cpu_limit)),"memory_mb":max(128,int(memory_mb)),"process_limit":max(16,int(process_limit)),"network_policy":network_policy,"env":env or {}}, timeout=max(15.0,float(timeout_seconds)+10))
-    info=detect_container_backend(preferred_backend); command=_base_run_args(info,image=image,workspace=workspace,scratch=scratch,cpu_limit=cpu_limit,memory_mb=memory_mb,process_limit=process_limit,network_policy=network_policy)
+        return _remote_request("/execute", payload={"image":image,"workspace_rel":_data_relative(workspace),"scratch_rel":_data_relative(scratch),"argv":argv,"timeout_seconds":max(1,int(timeout_seconds)),"cpu_limit":max(.1,float(cpu_limit)),"memory_mb":max(128,int(memory_mb)),"process_limit":max(16,int(process_limit)),"network_policy":network_policy,"env":env or {},"read_only_workspace":bool(read_only_workspace)}, timeout=max(15.0,float(timeout_seconds)+10))
+    info=detect_container_backend(preferred_backend); command=_base_run_args(info,image=image,workspace=workspace,scratch=scratch,cpu_limit=cpu_limit,memory_mb=memory_mb,process_limit=process_limit,network_policy=network_policy,read_only_workspace=read_only_workspace)
     for key,value in sorted((env or {}).items()):
         if not key.replace("_","").isalnum() or key.upper()!=key: raise SandboxError("Invalid sandbox environment variable name")
         command += ["--env",f"{key}={value}"]
     command += argv
     try:
         completed=subprocess.run(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=max(1,int(timeout_seconds)),shell=False)
-        return {"argv":argv,"exit_code":completed.returncode,"stdout":completed.stdout[-30000:],"stderr":completed.stderr[-30000:],"timed_out":False,"sandbox_level":info.backend,"network_policy":network_policy,"effective_network_policy":"deny"}
+        return {"argv":argv,"exit_code":completed.returncode,"stdout":completed.stdout[-30000:],"stderr":completed.stderr[-30000:],"timed_out":False,"sandbox_level":info.backend,"network_policy":network_policy,"effective_network_policy":"deny","read_only_workspace":bool(read_only_workspace)}
     except subprocess.TimeoutExpired as exc:
-        return {"argv":argv,"exit_code":None,"stdout":(exc.stdout or "")[-30000:] if isinstance(exc.stdout,str) else "","stderr":(exc.stderr or "")[-30000:] if isinstance(exc.stderr,str) else "","timed_out":True,"sandbox_level":info.backend,"network_policy":network_policy,"effective_network_policy":"deny"}
+        return {"argv":argv,"exit_code":None,"stdout":(exc.stdout or "")[-30000:] if isinstance(exc.stdout,str) else "","stderr":(exc.stderr or "")[-30000:] if isinstance(exc.stderr,str) else "","timed_out":True,"sandbox_level":info.backend,"network_policy":network_policy,"effective_network_policy":"deny","read_only_workspace":bool(read_only_workspace)}
 
 
 def sanitize_health_spec(spec: dict|None) -> dict:
