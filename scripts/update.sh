@@ -22,6 +22,7 @@ if command -v flock >/dev/null 2>&1; then flock -n 9 || fail "another X1 update 
 [ -z "$(git status --porcelain --untracked-files=no)" ] || fail "tracked working tree has local changes; refusing automatic update"
 OLD_HEAD="$(git rev-parse HEAD)"
 RUNNING_SERVICES="$(docker compose ps --services --filter status=running 2>/dev/null || true)"
+was_running() { printf '%s\n' "$RUNNING_SERVICES" | grep -qx "$1"; }
 
 quiesce_sandbox_containers() {
   local ids
@@ -81,7 +82,11 @@ rollback() {
   fi
   docker compose build app sandbox-worker >/dev/null 2>&1 || true
   docker compose --profile inference up -d db searxng sandbox-worker llama app >/dev/null 2>&1 || true
-  if printf '%s\n' "$RUNNING_SERVICES" | grep -qx image-worker; then docker compose --profile images up -d image-worker >/dev/null 2>&1 || true; fi
+  # Restore optional workers exactly when they were running before the update.
+  # document-worker is not an app dependency, so omitting this left document QA
+  # broken after an otherwise successful rollback.
+  if was_running document-worker; then docker compose up -d document-worker >/dev/null 2>&1 || true; fi
+  if was_running image-worker; then docker compose --profile images up -d image-worker >/dev/null 2>&1 || true; fi
   cleanup_helpers
   printf '[X1 update] Previous revision and environment restored: %s\n' "$OLD_HEAD" >&2
   exit 2
@@ -106,7 +111,7 @@ info "Fast-forwarding code to $TARGET_HEAD"
 git merge --ff-only origin/main
 info "Installing/migrating/verifying the new revision"
 bash scripts/install.sh "$@"
-if printf '%s\n' "$RUNNING_SERVICES" | grep -qx image-worker; then docker compose --profile images up -d image-worker; fi
+if was_running image-worker; then docker compose --profile images up -d image-worker; fi
 
 trap - ERR INT TERM
 cleanup_helpers
