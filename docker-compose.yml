@@ -209,7 +209,7 @@ services:
       args:
         X1_EXTRAS: "image"
     restart: unless-stopped
-    mem_limit: 4096m
+    mem_limit: ${X1_IMAGE_WORKER_MEMORY_LIMIT_MB:-4096}m
     env_file: .env
     environment:
       X1_DATABASE_AUTO_CREATE_SCHEMA: "false"
@@ -225,7 +225,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4096M
+          memory: ${X1_IMAGE_WORKER_MEMORY_LIMIT_MB:-4096}M
 
   llama:
     profiles: ["inference"]
@@ -237,6 +237,8 @@ services:
     command:
       - -m
       - /models/${X1_LLAMA_MODEL_FILE:-Qwen3.6-35B-A3B-Q4_K_M.gguf}
+      - --mmproj
+      - /models/${X1_LLAMA_MMPROJ_FILE:-mmproj-Qwen3.6-35B-A3B-Q8_0.gguf}
       - --host
       - 0.0.0.0
       - --port
