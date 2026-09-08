@@ -2,7 +2,7 @@ services:
   db:
     image: postgres:17.11-alpine3.24@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
     restart: unless-stopped
-    mem_limit: 1536m
+    mem_limit: ${X1_DB_MEMORY_LIMIT_MB:-1536}m
     environment:
       POSTGRES_DB: x1
       POSTGRES_USER: x1
@@ -17,12 +17,12 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1536M
+          memory: ${X1_DB_MEMORY_LIMIT_MB:-1536}M
 
   searxng:
     image: ghcr.io/searxng/searxng:2026.9.4-15b0c8ef3@sha256:4112d4864885b7ef2fe678b18839633ebbcd3272271ac67ca671e19ae193d773
     restart: unless-stopped
-    mem_limit: 768m
+    mem_limit: ${X1_SEARX_MEMORY_LIMIT_MB:-768}m
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
       - x1_searx_cache:/var/cache/searxng
@@ -37,14 +37,14 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
+          memory: ${X1_SEARX_MEMORY_LIMIT_MB:-768}M
 
   sandbox-worker:
     build:
       context: .
       dockerfile: Dockerfile.sandbox-worker
     restart: unless-stopped
-    mem_limit: 384m
+    mem_limit: ${X1_SANDBOX_WORKER_MEMORY_LIMIT_MB:-384}m
     environment:
       X1_SANDBOX_WORKER_TOKEN: ${X1_PROJECT_SANDBOX_WORKER_TOKEN:?Set X1_PROJECT_SANDBOX_WORKER_TOKEN in .env}
       X1_HOST_DATA_ROOT: ${X1_HOST_DATA_ROOT:?Set X1_HOST_DATA_ROOT in .env}
@@ -70,14 +70,14 @@ services:
     deploy:
       resources:
         limits:
-          memory: 384M
+          memory: ${X1_SANDBOX_WORKER_MEMORY_LIMIT_MB:-384}M
 
   document-worker:
     build:
       context: .
       dockerfile: Dockerfile.document-worker
     restart: unless-stopped
-    mem_limit: 768m
+    mem_limit: ${X1_DOCUMENT_WORKER_MEMORY_LIMIT_MB:-768}m
     environment:
       X1_DOCUMENT_RENDER_WORKER_TOKEN: ${X1_DOCUMENT_RENDER_WORKER_TOKEN:?Set X1_DOCUMENT_RENDER_WORKER_TOKEN in .env}
       X1_DATA_ROOT: /app/data
@@ -97,7 +97,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
+          memory: ${X1_DOCUMENT_WORKER_MEMORY_LIMIT_MB:-768}M
 
   app:
     build:
@@ -105,7 +105,7 @@ services:
       args:
         X1_EXTRAS: ""
     restart: unless-stopped
-    mem_limit: 2048m
+    mem_limit: ${X1_APP_MEMORY_LIMIT_MB:-2048}m
     env_file: .env
     environment:
       X1_DATABASE_AUTO_CREATE_SCHEMA: "false"
@@ -138,7 +138,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2048M
+          memory: ${X1_APP_MEMORY_LIMIT_MB:-2048}M
 
   gate:
     profiles: ["gate"]
@@ -202,7 +202,7 @@ services:
       - -c
       - "${X1_DEEP_CONTEXT_TOKENS:-8192}"
       - -np
-      - "1"
+      - "${X1_MAX_CONCURRENT_GENERATIONS:-1}"
       - -t
       - "${X1_LLAMA_THREADS:-8}"
       - -tb
@@ -218,7 +218,11 @@ services:
       interval: 20s
       timeout: 8s
       retries: 15
-      start_period: 90s
+      start_period: 120s
+    deploy:
+      resources:
+        limits:
+          memory: ${X1_LLAMA_MEMORY_LIMIT:-23g}
 
 volumes:
   x1_pgdata:
