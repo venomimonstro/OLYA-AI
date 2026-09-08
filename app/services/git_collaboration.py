@@ -17,6 +17,8 @@ class GitError(RuntimeError):
 
 _MAX_OUTPUT_CHARS = 200_000
 _MAX_SCAN_BYTES = 5 * 1024 * 1024
+_MAX_PENDING_HISTORY_COMMITS = 256
+_MAX_PENDING_HISTORY_FILES = 4000
 _GITHUB_OWNER = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 _GITHUB_REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -330,7 +332,7 @@ def push_candidate_paths(root: Path, branch: str, token: str) -> tuple[str, list
     before = remote_head(repo, target, token)
     if before:
         _run_git(repo, ["fetch", "--no-tags", "origin", f"refs/heads/{target}:refs/remotes/origin/{target}"], token=token, timeout=300)
-        result = _run_git(repo, ["diff", "--name-only", "--diff-filter=ACMR", f"refs/remotes/origin/{target}..HEAD", "--"])
+        result = _run_git(repo, ["diff", "--name-only", "--diff-filter=ACMRD", f"refs/remotes/origin/{target}..HEAD", "--"])
     else:
         result = _run_git(repo, ["ls-files"])
     paths: list[str] = []
@@ -343,11 +345,18 @@ def push_candidate_paths(root: Path, branch: str, token: str) -> tuple[str, list
     return before, sorted(set(paths))
 
 
-def _text_from_head(root: Path, path: str) -> str | None:
-    result = _run_git(root, ["show", f"HEAD:{path}"], check=False)
+def _text_from_revision(root: Path, revision: str, path: str) -> str | None:
+    if not _SHA.fullmatch(revision.lower()):
+        return None
+    result = _run_git(root, ["show", f"{revision}:{path}"], check=False)
     if result.returncode != 0 or len(result.stdout.encode("utf-8", errors="ignore")) > _MAX_SCAN_BYTES:
         return None
     return result.stdout
+
+
+def _text_from_head(root: Path, path: str) -> str | None:
+    current = head(root)
+    return _text_from_revision(root, current, path) if current else None
 
 
 def _scan_text(path: str, text: str, origin: str) -> list[dict]:
@@ -361,6 +370,57 @@ def _scan_text(path: str, text: str, origin: str) -> list[dict]:
                 continue
             findings.append({"path": path, "line": number, "kind": kind, "origin": origin})
             break
+    return findings
+
+
+def _scan_pending_history(repo: Path) -> list[dict]:
+    """Scan every file snapshot introduced by commits not present on origin.
+
+    Scanning only HEAD is insufficient: a secret can be committed and then
+    deleted in a later local commit while still remaining in the history about
+    to be pushed. The scan is deliberately bounded and fails closed if the
+    pending history is too large to inspect safely.
+    """
+    current = head(repo)
+    if not current:
+        return []
+    result = _run_git(
+        repo,
+        ["rev-list", "--max-count", str(_MAX_PENDING_HISTORY_COMMITS + 1), "HEAD", "--not", "--remotes=origin"],
+        check=False,
+    )
+    if result.returncode != 0:
+        return [{"path": "<git-history>", "line": 0, "kind": "history_scan_failed", "origin": "pending_history"}]
+    commits = [line.strip().lower() for line in result.stdout.splitlines() if _SHA.fullmatch(line.strip().lower())]
+    if len(commits) > _MAX_PENDING_HISTORY_COMMITS:
+        return [{"path": "<git-history>", "line": 0, "kind": "history_scan_commit_limit", "origin": "pending_history"}]
+
+    findings: list[dict] = []
+    scanned_files = 0
+    for commit_sha in commits:
+        changed = _run_git(
+            repo,
+            ["diff-tree", "--no-commit-id", "--name-only", "-r", "--root", "--diff-filter=ACMRD", commit_sha, "--"],
+            check=False,
+        )
+        if changed.returncode != 0:
+            findings.append({"path": "<git-history>", "line": 0, "kind": "history_scan_diff_failed", "origin": f"commit:{commit_sha[:12]}"})
+            continue
+        for raw in changed.stdout.splitlines():
+            if not raw.strip():
+                continue
+            scanned_files += 1
+            if scanned_files > _MAX_PENDING_HISTORY_FILES:
+                findings.append({"path": "<git-history>", "line": 0, "kind": "history_scan_file_limit", "origin": "pending_history"})
+                return findings
+            try:
+                path = _safe_path(raw.strip())
+            except GitError:
+                findings.append({"path": raw.strip()[:500], "line": 0, "kind": "unsafe_history_path", "origin": f"commit:{commit_sha[:12]}"})
+                continue
+            text = _text_from_revision(repo, commit_sha, path)
+            if text is not None:
+                findings.extend(_scan_text(path, text, f"commit:{commit_sha[:12]}"))
     return findings
 
 
@@ -385,6 +445,7 @@ def scan_secrets(root: Path, paths: list[str]) -> list[dict]:
         committed = _text_from_head(repo, path)
         if committed is not None:
             findings.extend(_scan_text(path, committed, "HEAD"))
+    findings.extend(_scan_pending_history(repo))
     unique = {(item["path"], item["line"], item["kind"], item["origin"]): item for item in findings}
     return list(unique.values())
 
