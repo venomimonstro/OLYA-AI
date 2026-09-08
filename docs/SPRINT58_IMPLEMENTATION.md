@@ -23,7 +23,7 @@ RC считается принятым только если на эталонн
 - больше не содержит Docker CLI;
 - не монтирует Docker socket;
 - не использует `subprocess` для Docker;
-- отправляет команду proxy по приватному Compose DNS;
+- отправляет command request proxy по приватному Compose DNS;
 - аутентифицируется существующим installer-generated sandbox token.
 
 Proxy не публикует порт наружу.
@@ -42,7 +42,9 @@ Proxy не является generic Docker API.
 - exec managed preview;
 - forced remove managed container.
 
-Запрещены:
+Для `docker run` используется allowlist grammar. До имени pinned image принимаются только параметры, которые реально генерирует X1. Любой неизвестный Docker option блокируется.
+
+Запрещены, в том числе:
 
 - `--privileged`;
 - host PID/IPC/UTS/user namespace;
@@ -56,7 +58,7 @@ Proxy не является generic Docker API.
 - arbitrary Docker commands;
 - Docker socket mount inside child container.
 
-Critical flags допускаются ровно один раз, чтобы duplicate flag не мог переопределить ранее безопасное значение.
+Critical flags допускаются ровно один раз, поэтому duplicate flag не может переопределить ранее безопасное значение.
 
 Каждый sandbox container обязан иметь:
 
@@ -123,7 +125,7 @@ Sprint 52 отдельно устранил LibreOffice render под долги
 
 Он fail-closed проверяет основные trust boundaries.
 
-`scripts/run_full_regression.py` теперь запускает его до pytest вместе с Sprint 57 golden-corpus validation.
+`scripts/run_full_regression.py` запускает его до pytest вместе с Sprint 57 golden-corpus validation.
 
 Поэтому возвращение Docker socket в sandbox-worker, снятие SSRF checks или DB deadlines ломает обычный regression gate.
 
@@ -142,15 +144,13 @@ Sprint 52 отдельно устранил LibreOffice render под долги
 - document-worker;
 - llama.cpp.
 
-После каждого restart приложение обязано снова пройти HTTP health recovery.
-
-Сервисы перезапускаются последовательно, а не одновременно, чтобы определить конкретный broken recovery path.
+После каждого restart сначала обязан восстановиться сам компонент, затем отдельно проверяется API health. Это важно: core chat может оставаться доступным при деградации secondary capability и не должен маскировать не восстановившийся research/sandbox/document runtime.
 
 ## 8. Disk full
 
-RC runner не заполняет production filesystem до нуля — такой тест сам по себе может повредить машину.
+RC runner не заполняет production filesystem до нуля - такой тест сам по себе может повредить машину.
 
-Вместо этого ENOSPC создаётся в отдельном Docker container с bounded 4-MiB tmpfs и network=none/read-only/no-new-privileges. Это доказывает сам failure primitive безопасно.
+ENOSPC создаётся в отдельном container на уже локально собранном `x1-sandbox:0.39` с `--pull=never`, network=none, read-only root и bounded 4-MiB tmpfs. Registry во время RC для этого не нужен.
 
 Storage quota/free-space guards приложения дополнительно остаются покрыты regression tests файлов/images/documents.
 
@@ -164,7 +164,7 @@ Virtual arrivals не означают создание 100k resident inference 
 
 Также выполняются реальные bounded HTTP load probes.
 
-## 10. Model/Prompt regression
+## 10. Model/Prompt regression и baseline lifecycle
 
 Sprint 57 является обязательной частью runtime `component_acceptance`.
 
@@ -174,6 +174,16 @@ RC не проходит если:
 - candidate report failed;
 - critical golden case failed;
 - tool success/quality/TTFT/latency/token guardrail регрессировал.
+
+На первой production-установке baseline ещё отсутствует. Installer создаёт его не копированием текущего состояния, а только запуском:
+
+`python -m scripts.model_regression_lab --live-url http://llama:8080 --record-baseline`
+
+Сам Regression Lab запрещает стать baseline сборке с critical failures или pass rate ниже установленного порога. Если bootstrap baseline не проходит, установка блокируется.
+
+После этого baseline не обновляется обычными deploy/update-командами. Только полностью успешный Sprint 58 RC атомарно повышает `model-regression-latest.json` до нового `model-regression-baseline.json`, добавляя `accepted_by=x1-release-candidate-v1` и `accepted_at`.
+
+Если любой RC check красный, старый baseline остаётся неизменным. Следующий candidate всегда сравнивается с последней реально принятой RC-сборкой.
 
 ## 11. Backup / restore
 
@@ -198,7 +208,19 @@ Production watchdog использует progressive rollout.
 
 Sprint 58 security audit закрепляет наличие обоих механизмов.
 
-## 13. Final RC gate
+## 13. Installer / update lifecycle
+
+`install.sh` теперь явно:
+
+- собирает `docker-runtime-proxy`;
+- запускает его раньше sandbox-worker;
+- ждёт отдельный proxy health;
+- включает его логи в diagnostics release gate;
+- на первой установке выполняет безопасный baseline bootstrap после готовности pinned Qwen.
+
+`update.sh` учитывает новую trust boundary и при quiesce/rollback удаляет runtime proxy по Compose service label. Это выполняется до `git reset --hard`, чтобы rollback на старую ревизию не оставил orphan container с Docker socket.
+
+## 14. Final RC gate
 
 Новая финальная команда:
 
@@ -206,7 +228,7 @@ Sprint 58 security audit закрепляет наличие обоих меха
 python3 -m scripts.rc_release_candidate
 ```
 
-Она требует reference host приблизительно 32 GiB (31–40 GiB detected RAM), если оператор явно не использовал `--allow-nonreference-host` только для диагностического запуска.
+Она требует reference host приблизительно 32 GiB (31-40 GiB detected RAM), если оператор явно не использовал `--allow-nonreference-host` только для диагностического запуска.
 
 RC gate последовательно требует:
 
@@ -215,27 +237,30 @@ RC gate последовательно требует:
 3. host-level runtime chaos;
 4. successful release-gate evidence;
 5. successful Sprint 57 model regression evidence;
-6. successful restore drill evidence;
-7. successful runtime chaos evidence;
-8. подтверждение, что runtime/component/load/live/user-journey/chaos/capacity режимы реально были запрошены.
+6. `critical_failed=[]` в regression evidence;
+7. successful restore drill evidence;
+8. successful runtime chaos evidence;
+9. подтверждение, что runtime/component/load/live/user-journey/chaos/capacity режимы реально были запрошены;
+10. только после всех зелёных checks - atomic promotion нового accepted model baseline.
 
 Формат результата:
 
 `x1-release-candidate-v1`
 
-RC status `passed` возможен только если `failed_checks=[]`.
+RC status `passed` возможен только если `failed_checks=[]` и baseline promotion также успешно завершён.
 
-## 14. Regression coverage
+## 15. Regression coverage
 
-Добавлен:
+Добавлены:
 
-`tests/test_sprint58_production_hardening.py`
+- `tests/test_sprint58_production_hardening.py`;
+- `tests/test_sprint58_installer_contract.py`.
 
-Он покрывает:
+Они покрывают:
 
 - единственный Docker socket boundary;
 - отсутствие socket/CLI/subprocess у sandbox-worker;
-- canonical Docker run grammar;
+- allowlist-only Docker run grammar;
 - privileged/duplicate-network/host-namespace/security-opt bypass;
 - mount escape;
 - arbitrary Docker command rejection;
@@ -244,14 +269,18 @@ RC status `passed` возможен только если `failed_checks=[]`.
 - ZIP expansion bomb;
 - DB pool/deadlines;
 - final RC required modes/evidence;
-- real chaos restart matrix;
+- real component restart/recovery matrix;
 - isolated ENOSPC;
 - 100k virtual arrival requirement;
 - backup/restore requirement;
 - canary auto rollback;
-- security audit inclusion in full regression.
+- security audit inclusion in full regression;
+- installer proxy lifecycle;
+- safe first-install baseline bootstrap;
+- update rollback cleanup;
+- baseline promotion only after full RC pass.
 
-## 15. Что не считается доказанным в GitHub-only разработке
+## 16. Что не считается доказанным в GitHub-only разработке
 
 Код Sprint 58 не означает автоматический production acceptance.
 
@@ -261,9 +290,9 @@ RC status `passed` возможен только если `failed_checks=[]`.
 - Docker proxy может открыть host socket с конкретными host permissions;
 - Qwen live regression passed;
 - 100k virtual/bounded load passed;
-- DB/search/llama/sandbox restart recovery passed;
+- DB/search/llama/proxy/sandbox/document restart recovery passed;
 - backup/restore drill passed;
 - reference 32-GiB host не ушёл в swap/OOM;
 - critical regression cases = 0.
 
-Единственный authoritative результат для RC — сохранённый `backups/rc-release-candidate-latest.json` со `status=passed` после target-node execution.
+Единственный authoritative результат для RC - сохранённый `backups/rc-release-candidate-latest.json` со `status=passed` после target-node execution.
