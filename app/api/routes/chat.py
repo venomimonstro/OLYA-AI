@@ -18,7 +18,13 @@ from app.models import AnswerAudit, Conversation, Message, Project, Task, UsageE
 from app.schemas.chat import ChatMessage, ChatRequest, ChatResponse, ChatUsage, QualityReport
 from app.services.access import require_project_role
 from app.services.auth import get_current_user
+from app.services.conditional_verification import (
+    audit_with_critic_issues,
+    critic_has_repairable_issue,
+    plan_verification,
+)
 from app.services.diagnostics import detect_repeat_query, observe_usage
+from app.services.freshness import classify_freshness
 from app.services.project_context import ProjectContextBuilder
 from app.services.quality import AnswerQualityEngine
 from app.services.quota import QuotaExceededError, ensure_compute_available
@@ -32,6 +38,7 @@ router = APIRouter(prefix="/v1", tags=["chat"])
 _quality = AnswerQualityEngine()
 _source_context = SourceContextBuilder()
 TokenSink = Callable[[str], Awaitable[None]]
+_MAX_VERIFICATION_EXTRA_INFERENCES = 2
 
 
 def _resolve_scope(db: Session, user: User, payload: ChatRequest) -> tuple[Project | None, Conversation, Task | None]:
@@ -63,9 +70,9 @@ def _resolve_scope(db: Session, user: User, payload: ChatRequest) -> tuple[Proje
     return project, conversation, task
 
 
-def _estimated_reserve_seconds(mode: str, verification: str = "auto", has_requirements: bool = False) -> int:
+def _estimated_reserve_seconds(mode: str, extra_inferences: int = 0) -> int:
     base = {"fast": 15, "work": 60, "deep": 180}.get(mode, 60)
-    return base * (2 if verification == "strict" or (verification == "auto" and has_requirements) else 1)
+    return base * (1 + max(0, min(_MAX_VERIFICATION_EXTRA_INFERENCES, int(extra_inferences))))
 
 
 def _requirements_message(payload: ChatRequest) -> ChatMessage | None:
@@ -147,22 +154,11 @@ async def _primary_generation(
     reasoning: bool,
     on_token: TokenSink | None,
 ) -> LlamaGeneration:
-    """Use Sprint 43 streaming transport, with a narrow legacy-test fallback.
-
-    Production lifespan always installs LlamaClient, which exports generate().
-    The fallback exists only for historical/test backends that implement the old
-    chat()-only contract; keeping it prevents an internal interface migration from
-    invalidating the immutable Sprint 0-26 regression bundle.
-    """
+    """Use Sprint 43 streaming transport, with a narrow legacy-test fallback."""
     llama = request.app.state.llama
     generate = getattr(llama, "generate", None)
     if callable(generate):
-        return await generate(
-            messages,
-            max_tokens=max_tokens,
-            reasoning=reasoning,
-            on_token=on_token,
-        )
+        return await generate(messages, max_tokens=max_tokens, reasoning=reasoning, on_token=on_token)
     chat = getattr(llama, "chat", None)
     if not callable(chat):
         raise LlamaUnavailable("local inference backend does not expose generate or chat")
@@ -231,7 +227,16 @@ async def _chat_impl(
 
     repeat_query = detect_repeat_query(db, payload.conversation_id, user_text)
     route = choose_route(user_text, payload.mode, settings.max_context_tokens, settings.deep_context_tokens)
-    reserve_seconds = _estimated_reserve_seconds(route.mode, payload.verification, bool(payload.requirements))
+    preliminary_freshness = classify_freshness(user_text).required
+    preliminary_plan = plan_verification(
+        verification=payload.verification,
+        user_text=user_text,
+        route_mode=route.mode,
+        requirements=payload.requirements,
+        freshness_required=preliminary_freshness,
+        verified_source_count=len(payload.research_source_ids),
+    )
+    reserve_seconds = _estimated_reserve_seconds(route.mode, preliminary_plan.extra_inference_budget)
     try:
         quota = ensure_compute_available(db, user, settings, reserve_seconds=reserve_seconds)
     except QuotaExceededError as exc:
@@ -282,8 +287,6 @@ async def _chat_impl(
     freshness_required = FRESHNESS_SENTINEL in verified_urls
     quality_urls = {url for url in verified_urls if url != FRESHNESS_SENTINEL}
 
-    # Never hold a PostgreSQL connection while waiting for the CPU inference
-    # queue or while Qwen is generating.
     db.commit()
 
     request_id = str(uuid4())
@@ -300,6 +303,10 @@ async def _chat_impl(
     streamed_output_chars = 0
     streamed_chunks = 0
     streamed_ttft_ms: int | None = None
+    verification_extra_inferences = 0
+    verification_risk_score = preliminary_plan.risk_score
+    critic_used = False
+    repair_applied = False
 
     async def relay_token(text: str) -> None:
         nonlocal streamed_output_chars, streamed_chunks, streamed_ttft_ms
@@ -309,6 +316,28 @@ async def _chat_impl(
             streamed_ttft_ms = max(0, int((perf_counter() - inference_started) * 1000))
         if on_token is not None:
             await on_token(text)
+
+    async def repair_once(audit) -> bool:
+        nonlocal text_out, deterministic, verification_extra_inferences, repair_applied
+        if verification_extra_inferences >= _MAX_VERIFICATION_EXTRA_INFERENCES:
+            return False
+        repaired = await request.app.state.llama.chat(
+            _quality.repair_messages(user_text, text_out, audit, payload.requirements),
+            max_tokens=max_tokens,
+            reasoning=False,
+        )
+        verification_extra_inferences += 1
+        repair_applied = True
+        if repaired != text_out and on_replace is not None:
+            await on_replace(repaired)
+        text_out = repaired
+        deterministic = _quality.deterministic(
+            text_out,
+            payload.requirements,
+            quality_urls,
+            freshness_required=freshness_required,
+        )
+        return True
 
     try:
         async with request.app.state.user_governor.slot(user.id, quota.max_concurrent_inference):
@@ -331,43 +360,86 @@ async def _chat_impl(
                             quality_urls,
                             freshness_required=freshness_required,
                         )
-                        if deterministic.failed and (payload.requirements or payload.verification == "strict"):
+                        plan = plan_verification(
+                            verification=payload.verification,
+                            user_text=user_text,
+                            route_mode=route.mode,
+                            requirements=payload.requirements,
+                            freshness_required=freshness_required,
+                            verified_source_count=len(quality_urls),
+                            answer=text_out,
+                            deterministic=deterministic,
+                        )
+                        verification_risk_score = plan.risk_score
+
+                        if plan.repair_deterministic and deterministic.failed:
                             try:
-                                repaired = await request.app.state.llama.chat(
-                                    _quality.repair_messages(user_text, text_out, deterministic, payload.requirements),
-                                    max_tokens=max_tokens,
-                                    reasoning=False,
-                                )
-                                if repaired != text_out and on_replace is not None:
-                                    # The user may already have seen the primary
-                                    # answer. A repair therefore replaces the live
-                                    # bubble explicitly instead of silently making
-                                    # the final server history disagree with UI.
-                                    await on_replace(repaired)
-                                text_out = repaired
-                                deterministic = _quality.deterministic(
-                                    text_out,
-                                    payload.requirements,
-                                    quality_urls,
-                                    freshness_required=freshness_required,
-                                )
+                                await repair_once(deterministic)
                             except LlamaUnavailable:
                                 deterministic.warnings.append(
                                     "Автоматическая коррекция недоступна; сохранён первичный ответ с найденными дефектами."
                                 )
-                        if payload.verification == "strict" and deterministic is not None and not deterministic.failed:
+
+                        # Recalculate after a deterministic repair: a clean low-risk
+                        # answer should not pay for a critic just because the first
+                        # draft contained a mechanically repairable defect.
+                        plan = plan_verification(
+                            verification=payload.verification,
+                            user_text=user_text,
+                            route_mode=route.mode,
+                            requirements=payload.requirements,
+                            freshness_required=freshness_required,
+                            verified_source_count=len(quality_urls),
+                            answer=text_out,
+                            deterministic=deterministic,
+                        )
+                        verification_risk_score = max(verification_risk_score, plan.risk_score)
+
+                        if (
+                            plan.run_critic
+                            and deterministic is not None
+                            and not deterministic.failed
+                            and verification_extra_inferences < _MAX_VERIFICATION_EXTRA_INFERENCES
+                        ):
                             try:
-                                critic = _quality.parse_critic(
-                                    await request.app.state.llama.chat(
-                                        _quality.critic_messages(user_text, text_out, payload.requirements),
-                                        max_tokens=700,
-                                        reasoning=False,
-                                    )
+                                critic_raw = await request.app.state.llama.chat(
+                                    _quality.critic_messages(user_text, text_out, payload.requirements),
+                                    max_tokens=plan.critic_max_tokens,
+                                    reasoning=False,
                                 )
+                                verification_extra_inferences += 1
+                                critic_used = True
+                                critic = _quality.parse_critic(critic_raw)
                             except LlamaUnavailable:
-                                critic = {"ok": False, "issues": [], "summary": "Local critic unavailable; primary answer preserved"}
+                                critic = {
+                                    "ok": False,
+                                    "issues": [],
+                                    "summary": "Local critic unavailable; primary answer preserved",
+                                }
                                 deterministic.warnings.append(
-                                    "Строгая дополнительная проверка временно недоступна; ответ не помечен как подтверждённый."
+                                    "Дополнительная семантическая проверка временно недоступна; ответ не помечен как подтверждённый."
+                                )
+
+                        if (
+                            plan.repair_critic
+                            and critic_has_repairable_issue(critic)
+                            and deterministic is not None
+                            and verification_extra_inferences < _MAX_VERIFICATION_EXTRA_INFERENCES
+                        ):
+                            original_issues = list(critic.get("issues", [])) if critic else []
+                            try:
+                                repair_audit = audit_with_critic_issues(deterministic, critic)
+                                if await repair_once(repair_audit):
+                                    critic = {
+                                        "ok": True,
+                                        "issues": [],
+                                        "summary": "Major/critical critic findings were repaired in one bounded pass.",
+                                        "repair_applied": True,
+                                        "original_issues": original_issues[:10],
+                                    }
+                            except LlamaUnavailable:
+                                deterministic.warnings.append(
+                                    "Critic нашёл существенный дефект, но дополнительный repair-pass недоступен."
                                 )
                     success = True
                 finally:
@@ -395,9 +467,6 @@ async def _chat_impl(
             cancelled=True,
         )
         db.rollback()
-        # Cancellation must release the generation semaphore before doing this
-        # short accounting write. The exception reaches this block only after the
-        # async governor contexts above have already unwound.
         with contextlib.suppress(Exception):
             if task is not None and inference_ms > 0:
                 record_task_compute(db, task.id, max(1, (inference_ms + 999) // 1000))
@@ -492,6 +561,13 @@ async def _chat_impl(
     quality_status = "unchecked"
     if payload.verification != "off" and deterministic is not None:
         quality_status = _quality.final_status(deterministic, critic)
+        critic_payload = dict(critic or {})
+        critic_payload["conditional_verification"] = {
+            "risk_score": verification_risk_score,
+            "extra_inferences": verification_extra_inferences,
+            "critic_used": critic_used,
+            "repair_applied": repair_applied,
+        }
         audit = AnswerAudit(
             user_id=user.id,
             project_id=project.id if project else None,
@@ -501,7 +577,7 @@ async def _chat_impl(
             status=quality_status,
             checks=deterministic.checks,
             warnings=deterministic.warnings,
-            critic=critic or {},
+            critic=critic_payload,
         )
         db.add(audit)
         db.flush()
@@ -510,7 +586,7 @@ async def _chat_impl(
             status=quality_status,
             checks=deterministic.checks,
             warnings=deterministic.warnings,
-            critic=critic,
+            critic=critic_payload,
         )
 
     if task is not None:
@@ -563,6 +639,10 @@ async def _chat_impl(
             ttft_ms=primary.ttft_ms if primary is not None else None,
             output_tokens=primary.output_tokens if primary is not None else 0,
             tokens_per_second=primary.tokens_per_second if primary is not None else None,
+            verification_risk_score=verification_risk_score,
+            verification_extra_inferences=verification_extra_inferences,
+            critic_used=critic_used,
+            repair_applied=repair_applied,
         ),
         quality=quality_report,
         conversation_id=conversation.id,
@@ -610,9 +690,6 @@ async def chat_stream(
         )
         try:
             while True:
-                # Polling disconnect independently of token arrival matters most
-                # during queue wait and long TTFT. It ensures browser Abort/Stop
-                # cancels the worker even before llama.cpp emits its first chunk.
                 if await request.is_disconnected():
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
