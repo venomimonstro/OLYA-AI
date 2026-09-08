@@ -80,10 +80,11 @@ def usage_summary(
 @router.get("/budget")
 def current_budget(
     request: Request,
+    details: bool = Query(default=False),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    result = budget_snapshot(db, user, request.app.state.settings, include_details=True)
+    result = budget_snapshot(db, user, request.app.state.settings, include_details=details)
     db.commit()
     return result
 
