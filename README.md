@@ -2,9 +2,11 @@
 
 X1 — self-hosted AI-платформа с локальным inference на Qwen + llama.cpp. Внешний LLM API для ответов не требуется. В системе есть пользовательский чат, серверная история, Fast/Work/Deep, проверка качества, интернет-исследования через приватный SearXNG, проекты/файлы/документы, закрытая агентная разработка, sandbox, Git, Commerce/API, System Health, backup/restore и production release gates.
 
+> **Разработчикам и ИИ-агентам:** перед изменением проекта обязательно прочитайте [`PROJECT_SYSTEM_MAP.md`](PROJECT_SYSTEM_MAP.md). Это каноническая карта всех API controllers, UI routers, worker APIs, service-layer, ORM/storage ownership, Docker-связей и end-to-end потоков. Изменение архитектурной связи без одновременного обновления карты считается незавершённым изменением.
+
 ## Текущая версия
 
-**0.40.0 + Sprint 43 — Qwen3.6 + real token streaming/cancellation.**
+**0.40.0 + Sprints 41–58 — Qwen3.6, streaming, memory/RAG, verification, coding proof, production hardening и release candidate gates.**
 
 GitHub `main` является каноническим исходным кодом. Production-конфигурация fail-closed: дефолтные секреты, SQLite в production, сломанные обязательные routers, красный release gate, неподтверждённый GGUF или небезопасный memory budget не считаются рабочей установкой.
 
