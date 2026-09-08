@@ -42,6 +42,7 @@ class AutonomousDevelopmentLedger(Base):
     subagent_budget: Mapped[int] = mapped_column(Integer, default=8)
     max_parallel_subagents: Mapped[int] = mapped_column(Integer, default=1)
     subagent_calls_used: Mapped[int] = mapped_column(Integer, default=0)
+    active_subagents: Mapped[int] = mapped_column(Integer, default=0)
     last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
