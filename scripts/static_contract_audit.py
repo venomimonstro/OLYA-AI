@@ -15,6 +15,7 @@ REQUIRED_FILES = (
     "app/main.py",
     "app/user_ui.py",
     "app/sandbox_worker_api.py",
+    "app/docker_runtime_proxy.py",
     "app/services/research.py",
     "app/services/resource_governor.py",
     "app/services/git_collaboration.py",
@@ -28,6 +29,7 @@ REQUIRED_FILES = (
     "model-manifest.json",
     "docker-compose.yml",
     "Dockerfile",
+    "Dockerfile.docker-runtime-proxy",
     "Dockerfile.sandbox-worker",
     "Dockerfile.sandbox-runtime",
     "searxng/settings.yml",
@@ -137,20 +139,25 @@ def _audit_compose() -> list[dict[str, Any]]:
     text = (ROOT / "docker-compose.yml").read_text("utf-8")
     app = _service_section(text, "app")
     worker = _service_section(text, "sandbox-worker")
+    proxy = _service_section(text, "docker-runtime-proxy")
     socket = "/var/run/docker.sock"
     if socket in app:
         findings.append(issue("docker_socket_exposed_to_web_app", "docker-compose.yml"))
-    if socket not in worker:
-        findings.append(issue("sandbox_worker_missing_docker_socket", "docker-compose.yml"))
-    if text.count(socket) != 2:
+    if socket in worker:
+        findings.append(issue("docker_socket_exposed_to_sandbox_worker", "docker-compose.yml"))
+    if socket not in proxy:
+        findings.append(issue("docker_runtime_proxy_missing_socket", "docker-compose.yml"))
+    if text.count(socket) != 1:
         findings.append(issue("unexpected_docker_socket_reference_count", "docker-compose.yml", detail=str(text.count(socket))))
+    if "X1_DOCKER_RUNTIME_PROXY_TOKEN" not in proxy:
+        findings.append(issue("docker_runtime_proxy_token_missing", "docker-compose.yml"))
     for service in ("db", "searxng", "llama"):
         section = _service_section(text, service)
         match = re.search(r"^\s*image:\s*(\S+)", section, flags=re.MULTILINE)
         image = match.group(1) if match else ""
         if "@sha256:" not in image:
             findings.append(issue("unpinned_runtime_image", "docker-compose.yml", detail=f"{service}: {image}"))
-    if "mem_limit:" not in app or "mem_limit:" not in worker:
+    if "mem_limit:" not in app or "mem_limit:" not in worker or "mem_limit:" not in proxy:
         findings.append(issue("core_container_memory_unbounded", "docker-compose.yml"))
     return findings
 
@@ -223,7 +230,7 @@ def main() -> int:
         findings.append(issue("canonical_model_wrapper_contract_changed", "app/models.py"))
 
     payload = {
-        "format": "x1-static-contract-v2",
+        "format": "x1-static-contract-v3",
         "status": "passed" if not findings else "failed",
         "settings_fields": len(settings_fields),
         "findings": findings,
