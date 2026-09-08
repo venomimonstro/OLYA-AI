@@ -165,7 +165,7 @@ def create_agent_run(workspace_id: str, payload: AgentRunCreate, user: User = De
         goal=payload.goal.strip(),
         allowed_paths=allowed,
         max_commands=payload.max_commands,
-        checkpoint={"phase": "planned", "repo_map": repo_map(Path(ws.root_path).resolve())},
+        checkpoint={"phase": "planned", "repo_map": repo_map(Path(ws.root_path).resolve()), "verification_valid": False},
     )
     db.add(run)
     db.commit()
@@ -185,7 +185,7 @@ def update_agent_plan(run_id: str, payload: AgentPlanUpdate, user: User = Depend
     if run.status in {"completed", "failed", "cancelled"}:
         raise HTTPException(status_code=409, detail="Terminal agent run is immutable")
     run.plan = payload.plan
-    run.checkpoint = payload.checkpoint
+    run.checkpoint = {**payload.checkpoint, "verification_valid": False}
     run.status = "running"
     run.updated_at = utcnow()
     db.commit()
@@ -205,7 +205,7 @@ def agent_write_file(run_id: str, payload: AgentFileWrite, user: User = Depends(
     except WorkspaceError as exc:
         raise HTTPException(status_code=409 if "changed" in str(exc).lower() else 422, detail=str(exc)) from exc
     run.changed_files = [*run.changed_files, change]
-    run.checkpoint = {**(run.checkpoint or {}), "phase": "editing", "last_change": change}
+    run.checkpoint = {**(run.checkpoint or {}), "phase": "editing", "last_change": change, "verification_valid": False}
     run.status = "running"
     run.updated_at = utcnow()
     _sync_stats(ws, Path(ws.root_path).resolve())
@@ -230,10 +230,11 @@ def agent_run_command(run_id: str, payload: AgentCommand, request: Request, user
         )
     except WorkspaceError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    passed = bool(result.get("exit_code") == 0 and not result.get("timed_out"))
     run.commands_used += 1
     run.command_results = [*run.command_results, result]
-    run.checkpoint = {**(run.checkpoint or {}), "phase": "verification", "last_command": result}
-    run.status = "running" if result.get("exit_code") in {0, None} else "blocked"
+    run.checkpoint = {**(run.checkpoint or {}), "phase": "verification", "last_command": result, "verification_valid": passed}
+    run.status = "running" if passed else "blocked"
     run.updated_at = utcnow()
     db.commit()
     db.refresh(run)
@@ -243,8 +244,12 @@ def agent_run_command(run_id: str, payload: AgentCommand, request: Request, user
 @router.post("/agent-runs/{run_id}/complete", response_model=AgentRunRead)
 def complete_agent_run(run_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> CodeAgentRun:
     run, _ = _run_access(db, user, run_id, write=True)
-    if run.status in {"failed", "cancelled"}:
+    if run.status in {"failed", "cancelled", "blocked"}:
         raise HTTPException(status_code=409, detail="Agent run cannot be completed")
+    if run.changed_files and not run.command_results:
+        raise HTTPException(status_code=409, detail="Changed code requires a server-recorded verification command")
+    if run.changed_files and not bool((run.checkpoint or {}).get("verification_valid")):
+        raise HTTPException(status_code=409, detail="Verification is missing or stale after the latest code change")
     if run.command_results and any((x.get("timed_out") or x.get("exit_code") not in {0}) for x in run.command_results[-3:]):
         raise HTTPException(status_code=409, detail="Recent verification command failed")
     run.status = "completed"
