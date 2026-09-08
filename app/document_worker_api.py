@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -13,6 +14,7 @@ from pydantic import BaseModel, Field
 
 TOKEN = os.environ.get("X1_DOCUMENT_RENDER_WORKER_TOKEN", "")
 DATA_ROOT = Path(os.environ.get("X1_DATA_ROOT", "/app/data")).resolve()
+DOCUMENTS_ROOT = (DATA_ROOT / "documents").resolve()
 MAX_CONCURRENT = max(1, int(os.environ.get("X1_DOCUMENT_MAX_CONCURRENT_RENDERS", "1")))
 MAX_PAGES = max(1, int(os.environ.get("X1_DOCUMENT_MAX_PAGES", "300")))
 MAX_DPI = max(72, int(os.environ.get("X1_DOCUMENT_MAX_RASTER_DPI", "150")))
@@ -28,7 +30,7 @@ class RenderRequest(BaseModel):
 
 
 def _auth(value: str) -> None:
-    if not TOKEN or TOKEN == "change-me-document-worker" or value != TOKEN:
+    if not TOKEN or TOKEN == "change-me-document-worker" or not secrets.compare_digest(value, TOKEN):
         raise HTTPException(status_code=403, detail="Document worker authentication failed")
 
 
@@ -39,10 +41,11 @@ def _safe_data_path(value: str, *, require_documents: bool = True) -> Path:
     if require_documents and (not rel.parts or rel.parts[0] != "documents"):
         raise HTTPException(status_code=422, detail="Document worker path must be inside documents")
     resolved = (DATA_ROOT / rel).resolve()
+    approved_root = DOCUMENTS_ROOT if require_documents else DATA_ROOT
     try:
-        resolved.relative_to(DATA_ROOT)
+        resolved.relative_to(approved_root)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail="Document worker path escaped data root") from exc
+        raise HTTPException(status_code=422, detail="Document worker path escaped approved data root") from exc
     return resolved
 
 
@@ -56,16 +59,7 @@ def _binary(*names: str) -> str:
 
 def _run(argv: list[str], *, timeout: int, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout,
-            shell=False,
-            env=env,
-        )
+        return subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, shell=False, env=env)
     except subprocess.TimeoutExpired as exc:
         raise HTTPException(status_code=504, detail="Document render timed out") from exc
     except OSError as exc:
@@ -100,6 +94,8 @@ def render(payload: RenderRequest, x_x1_document_token: str = Header(default="",
         output_dir.mkdir(parents=True, exist_ok=True)
         pages_dir = output_dir / "pages"
         if pages_dir.exists():
+            if pages_dir.is_symlink():
+                raise HTTPException(status_code=422, detail="Document pages directory cannot be a symlink")
             shutil.rmtree(pages_dir, ignore_errors=True)
         pages_dir.mkdir(parents=True, exist_ok=True)
 
