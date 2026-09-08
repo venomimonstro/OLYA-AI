@@ -60,8 +60,11 @@ def _repo_root(root: Path, *, require_git: bool = True) -> Path:
     candidate = candidate.resolve()
     if require_git:
         marker = candidate / ".git"
-        if marker.is_symlink() or not marker.exists():
-            raise GitError("Workspace is not a Git repository")
+        # X1 does not need linked worktrees/submodules as workspace roots. A
+        # regular .git pointer file can redirect Git metadata outside the
+        # workspace, so require the metadata directory to be physically local.
+        if marker.is_symlink() or not marker.is_dir():
+            raise GitError("Workspace Git metadata must be a local directory")
     return candidate
 
 
@@ -73,7 +76,11 @@ def normalize_github_url(value: str) -> tuple[str, str, str]:
         parsed = urlparse(raw)
         if parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() != "github.com":
             raise GitError("Only HTTPS github.com repository URLs are allowed")
-        if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.port not in {None, 443}:
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise GitError("Invalid GitHub repository URL port") from exc
+        if parsed.username or parsed.password or parsed.query or parsed.fragment or port not in {None, 443}:
             raise GitError("GitHub repository URL cannot contain credentials, query parameters or a custom port")
         path = parsed.path.lstrip("/")
     if path.endswith(".git"):
@@ -236,8 +243,8 @@ def ensure_local_repo(root: Path, default_branch: str) -> dict:
     repo.mkdir(parents=True, exist_ok=True)
     marker = repo / ".git"
     if marker.exists():
-        if marker.is_symlink():
-            raise GitError("Git metadata cannot be a symlink")
+        if marker.is_symlink() or not marker.is_dir():
+            raise GitError("Git metadata must be a directory inside the workspace")
     else:
         _run_git(repo, ["init", "--initial-branch", branch])
     _identity(repo)
