@@ -10,14 +10,8 @@ from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
-from app.models import (
-    ApiRateLimitWindow,
-    AuthSession,
-    BackgroundJob,
-    SearchQueryCache,
-    SystemCheckpoint,
-    SystemHealthSnapshot,
-)
+from app.models import ApiRateLimitWindow, AuthSession, BackgroundJob, SearchQueryCache, SystemCheckpoint, SystemHealthSnapshot
+from app.services.autonomous_development import recover_abandoned_slots
 from app.services.jobs import reap_exhausted_jobs
 
 logger = logging.getLogger(__name__)
@@ -36,19 +30,13 @@ def _hours(value: Any, minimum: int = 1) -> int:
 
 
 def cleanup_ephemeral_state(db: Session, settings, *, now: datetime | None = None) -> dict[str, int]:
-    """Bound tables whose rows have no long-term business/audit value.
-
-    Payment/resource ledgers, complaints, user content, beta history and other
-    business records are intentionally excluded. Every deletion below targets a
-    cache, rate window, expired/revoked session, health snapshot, or completed
-    background-job envelope whose useful lifetime is explicitly bounded.
-    """
     current = now or utcnow()
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
 
     counts: dict[str, int] = {}
     counts["reaped_exhausted_jobs"] = reap_exhausted_jobs(db)
+    counts["recovered_autonomous_leases"] = recover_abandoned_slots(db, stale_minutes=10)
 
     api_cutoff = current - timedelta(hours=_hours(getattr(settings, "api_rate_window_retention_hours", 2)))
     result = db.execute(delete(ApiRateLimitWindow).where(ApiRateLimitWindow.window_start < api_cutoff))
@@ -59,14 +47,7 @@ def cleanup_ephemeral_state(db: Session, settings, *, now: datetime | None = Non
     counts["search_cache"] = int(result.rowcount or 0)
 
     session_cutoff = current - timedelta(days=_days(getattr(settings, "expired_session_retention_days", 7)))
-    result = db.execute(
-        delete(AuthSession).where(
-            or_(
-                AuthSession.expires_at < session_cutoff,
-                and_(AuthSession.revoked_at.is_not(None), AuthSession.revoked_at < session_cutoff),
-            )
-        )
-    )
+    result = db.execute(delete(AuthSession).where(or_(AuthSession.expires_at < session_cutoff, and_(AuthSession.revoked_at.is_not(None), AuthSession.revoked_at < session_cutoff))))
     counts["auth_sessions"] = int(result.rowcount or 0)
 
     health_cutoff = current - timedelta(days=_days(getattr(settings, "system_health_snapshot_retention_days", 30)))
@@ -74,23 +55,11 @@ def cleanup_ephemeral_state(db: Session, settings, *, now: datetime | None = Non
     counts["health_snapshots"] = int(result.rowcount or 0)
 
     succeeded_cutoff = current - timedelta(days=_days(getattr(settings, "background_job_success_retention_days", 30)))
-    result = db.execute(
-        delete(BackgroundJob).where(
-            BackgroundJob.status.in_(["succeeded", "cancelled"]),
-            BackgroundJob.finished_at.is_not(None),
-            BackgroundJob.finished_at < succeeded_cutoff,
-        )
-    )
+    result = db.execute(delete(BackgroundJob).where(BackgroundJob.status.in_(["succeeded", "cancelled"]), BackgroundJob.finished_at.is_not(None), BackgroundJob.finished_at < succeeded_cutoff))
     counts["completed_jobs"] = int(result.rowcount or 0)
 
     failed_cutoff = current - timedelta(days=_days(getattr(settings, "background_job_failure_retention_days", 90)))
-    result = db.execute(
-        delete(BackgroundJob).where(
-            BackgroundJob.status == "failed",
-            BackgroundJob.finished_at.is_not(None),
-            BackgroundJob.finished_at < failed_cutoff,
-        )
-    )
+    result = db.execute(delete(BackgroundJob).where(BackgroundJob.status == "failed", BackgroundJob.finished_at.is_not(None), BackgroundJob.finished_at < failed_cutoff))
     counts["failed_jobs"] = int(result.rowcount or 0)
     return counts
 
@@ -132,28 +101,16 @@ def run_maintenance_tick(settings) -> dict[str, Any]:
 def _write_failure_checkpoint(error: str, interval: float) -> None:
     try:
         with SessionLocal() as db:
-            _write_checkpoint(
-                db,
-                status="failed",
-                message="Ephemeral-state maintenance failed",
-                details={"error": error[:500], "cleanup_interval_seconds": interval},
-            )
+            _write_checkpoint(db, status="failed", message="Ephemeral-state maintenance failed", details={"error": error[:500], "cleanup_interval_seconds": interval})
             db.commit()
     except Exception:
-        # If PostgreSQL itself is unavailable, core.database will already expose
-        # the root cause; a second exception must not kill the maintenance loop.
         logger.exception("X1 could not persist maintenance failure checkpoint")
 
 
 def _write_heartbeat(last_result: dict[str, Any] | None, interval: float) -> None:
     try:
         with SessionLocal() as db:
-            _write_checkpoint(
-                db,
-                status="stable",
-                message="Ephemeral-state maintenance scheduler is alive",
-                details={"last_cleanup": last_result or {}, "cleanup_interval_seconds": interval},
-            )
+            _write_checkpoint(db, status="stable", message="Ephemeral-state maintenance scheduler is alive", details={"last_cleanup": last_result or {}, "cleanup_interval_seconds": interval})
             db.commit()
     except Exception:
         logger.exception("X1 maintenance heartbeat failed")
