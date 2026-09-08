@@ -74,7 +74,7 @@ class ProxyResult:
 
 
 def _auth(value: str) -> None:
-    if not TOKEN or value != TOKEN:
+    if not TOKEN or not secrets.compare_digest(value, TOKEN):
         raise HTTPException(status_code=403, detail="Sandbox worker authentication failed")
 
 
@@ -82,12 +82,7 @@ def _run(argv: list[str], *, timeout: int = 10) -> ProxyResult:
     if not DOCKER_PROXY_TOKEN:
         raise RuntimeError("Docker runtime proxy token is not configured")
     body = json.dumps({"argv": argv, "timeout_seconds": max(1, min(1900, int(timeout)))}, separators=(",", ":")).encode("utf-8")
-    request = Request(
-        f"{DOCKER_PROXY_URL}/command",
-        data=body,
-        headers={"Content-Type": "application/json", "X-X1-Docker-Proxy-Token": DOCKER_PROXY_TOKEN},
-        method="POST",
-    )
+    request = Request(f"{DOCKER_PROXY_URL}/command", data=body, headers={"Content-Type": "application/json", "X-X1-Docker-Proxy-Token": DOCKER_PROXY_TOKEN}, method="POST")
     try:
         with urlopen(request, timeout=max(5, int(timeout) + 10)) as response:
             data = json.loads(response.read().decode("utf-8"))
@@ -99,12 +94,7 @@ def _run(argv: list[str], *, timeout: int = 10) -> ProxyResult:
         raise RuntimeError(f"Docker runtime proxy rejected command: HTTP {exc.code}: {detail}") from exc
     except (URLError, OSError, ValueError, json.JSONDecodeError) as exc:
         raise RuntimeError("Docker runtime proxy is unavailable") from exc
-    return ProxyResult(
-        returncode=data.get("exit_code"),
-        stdout=str(data.get("stdout") or ""),
-        stderr=str(data.get("stderr") or ""),
-        timed_out=bool(data.get("timed_out")),
-    )
+    return ProxyResult(returncode=data.get("exit_code"), stdout=str(data.get("stdout") or ""), stderr=str(data.get("stderr") or ""), timed_out=bool(data.get("timed_out")))
 
 
 def _validate_argv(argv: list[str]) -> None:
@@ -194,8 +184,16 @@ def _base_command(payload: ExecRequest, *, read_only_workspace: bool = False) ->
         "--user", "10001:10001",
         "--mount", f"type=bind,src={workspace},dst=/workspace,{mount_mode}",
         "--mount", f"type=bind,src={scratch},dst=/x1-runtime,rw",
-        "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=256m",
     ]
+    # Tests/builds may need a writable worktree, but no untrusted sandbox process
+    # needs to mutate Git metadata. Overlay .git read-only when this is a normal
+    # standalone repository. Host Git code separately rejects pointer-file roots.
+    workspace_rel = _safe_relative(payload.workspace_rel)
+    mirror_git = MIRROR_DATA_ROOT / workspace_rel / ".git"
+    host_git = workspace / ".git"
+    if mirror_git.is_dir() and not mirror_git.is_symlink():
+        command += ["--mount", f"type=bind,src={host_git},dst=/workspace/.git,ro"]
+    command += ["--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=256m"]
     for key, value in sorted(payload.env.items()):
         command += ["--env", f"{key}={value}"]
     command.append(RUNTIME_IMAGE)
