@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -8,6 +9,7 @@ from app.services.tool_reliability import (
     ToolBudgetError,
     ToolLoopError,
     ToolReliabilityError,
+    ToolReplayBlockedError,
     ToolSession,
     error_result,
 )
@@ -36,7 +38,7 @@ def _assistant_message(text: str, calls) -> dict[str, Any]:
                 "type": "function",
                 "function": {
                     "name": call.name,
-                    "arguments": __import__("json").dumps(call.arguments, ensure_ascii=False, separators=(",", ":")),
+                    "arguments": json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":")),
                 },
             }
             for call in calls
@@ -55,10 +57,9 @@ async def run_tool_agent(
 ) -> ToolAgentOutcome:
     """Run a serial, bounded model/tool loop.
 
-    This function does not grant capabilities. The ToolRegistry supplied by the
-    caller is the complete capability allowlist. Tool errors are shown back to the
-    model only in bounded form so it may correct one malformed call without
-    entering an infinite recovery loop.
+    The ToolRegistry supplied by the caller is the complete capability allowlist.
+    Tool errors are shown back to the model only in bounded form so it may correct
+    a malformed call without entering an infinite recovery loop.
     """
     if not messages:
         raise ValueError("Tool agent requires messages")
@@ -103,9 +104,7 @@ async def run_tool_agent(
             total_calls += 1
             try:
                 result = await session.execute(call)
-            except (ToolLoopError, ToolBudgetError) as exc:
-                # Loop/budget violations are terminal. Feeding them back for another
-                # model turn would spend more CPU on an already unsafe trajectory.
+            except (ToolLoopError, ToolBudgetError, ToolReplayBlockedError) as exc:
                 trace.append({
                     "step": step,
                     "tool": call.name,
