@@ -9,8 +9,10 @@ from app.services.tool_reliability import (
     ToolCall,
     ToolLoopError,
     ToolRegistry,
+    ToolReplayBlockedError,
     ToolSession,
     ToolSpec,
+    ToolTimeoutError,
     ToolValidationError,
     UnknownToolError,
 )
@@ -72,6 +74,28 @@ def test_successful_write_is_idempotent_across_new_call_ids():
     assert first.status == "ok"
     assert second.status == "cached"
     assert counter["writes"] == 1
+
+
+def test_ambiguous_write_timeout_freezes_further_writes():
+    async def slow_write(args):
+        await asyncio.sleep(0.05)
+        return {"saved": args.value}
+
+    registry = ToolRegistry()
+    registry.register(ToolSpec(
+        name="write.value",
+        description="write",
+        args_model=ValueArgs,
+        handler=slow_write,
+        effect="write",
+        timeout_seconds=0.01,
+        max_retries=0,
+    ))
+    session = ToolSession(registry)
+    with pytest.raises(ToolTimeoutError):
+        run(session.execute(ToolCall(name="write.value", arguments={"value": 1}, call_id="slow1")))
+    with pytest.raises(ToolReplayBlockedError):
+        run(session.execute(ToolCall(name="write.value", arguments={"value": 2}, call_id="slow2")))
 
 
 def test_third_identical_request_is_detected_as_loop_even_when_cached():
@@ -153,3 +177,10 @@ def test_agent_loop_has_hard_step_and_error_boundaries():
     assert "max_steps_exhausted" in source
     assert "ToolLoopError, ToolBudgetError" in source
     assert "session.registry.schemas()" in source
+
+
+def test_reliability_boundary_tracks_uncertain_write_state():
+    source = Path("app/services/tool_reliability.py").read_text(encoding="utf-8")
+    assert "_write_state_uncertain" in source
+    assert "further writes require reconciliation" in source
+    assert "asyncio.to_thread" in source
