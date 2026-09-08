@@ -1,4 +1,7 @@
 from functools import lru_cache
+from pathlib import Path
+from urllib.parse import urlsplit
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,14 +11,19 @@ class Settings(BaseSettings):
     env: str = "development"
     host: str = "0.0.0.0"
     port: int = 8000
-    database_url: str = "sqlite+pysqlite:///./x1.db"
+    data_root: str = "./data"
+    database_url: str = "sqlite+pysqlite:///./data/x1.db"
     database_pool_size: int = 8
     database_max_overflow: int = 4
     database_pool_timeout_seconds: float = 5.0
     database_pool_recycle_seconds: int = 1800
+    database_connect_timeout_seconds: int = 5
+    database_statement_timeout_ms: int = 30000
+    database_lock_timeout_ms: int = 10000
+    database_idle_transaction_timeout_ms: int = 60000
+
     llama_base_url: str = "http://127.0.0.1:8080"
     llama_model_name: str = "Qwen3.6-35B-A3B-Q4_K_M"
-    llama_model_file: str = "Qwen3.6-35B-A3B-Q4_K_M.gguf"
     max_context_tokens: int = 8192
     deep_context_tokens: int = 8192
     max_concurrent_generations: int = 1
@@ -23,6 +31,24 @@ class Settings(BaseSettings):
     inference_queue_timeout_seconds: float = 120.0
     default_max_output_tokens: int = 1200
     request_timeout_seconds: int = 180
+
+    # Sprint 54 pre-DB overload lanes. These protect DB/session allocation while
+    # preserving the deeper inference/job governors as separate safety layers.
+    overload_chat_max_active_http: int = 4
+    overload_chat_max_queue: int = 32
+    overload_chat_queue_timeout_seconds: float = 90.0
+    overload_research_max_active_http: int = 4
+    overload_research_max_queue: int = 24
+    overload_research_queue_timeout_seconds: float = 15.0
+    overload_image_max_active_http: int = 2
+    overload_image_max_queue: int = 8
+    overload_image_queue_timeout_seconds: float = 10.0
+    overload_sandbox_max_active_http: int = 2
+    overload_sandbox_max_queue: int = 8
+    overload_sandbox_queue_timeout_seconds: float = 15.0
+    overload_max_queued_per_principal: int = 2
+    overload_breaker_failures: int = 5
+    overload_breaker_cooldown_seconds: float = 20.0
 
     admin_bootstrap_token: str = "change-me"
     session_ttl_days: int = 30
@@ -191,10 +217,11 @@ class Settings(BaseSettings):
     public_launch_max_failure_rate: float = 0.03
     public_launch_max_requests_per_user_hour: int = 120
     public_launch_global_budget_microunits: int = 0
-    public_launch_enforce_exposure: bool = False
+    public_launch_enforce_exposure: bool = True
     public_launch_watchdog_enabled: bool = True
     public_launch_watchdog_interval_seconds: float = 300.0
     public_launch_auto_rollback: bool = True
+
     plan_ratio_free: float = 0.25
     plan_ratio_x1: float = 1.0
     plan_ratio_pro: float = 2.0
@@ -207,7 +234,30 @@ class Settings(BaseSettings):
     plan_share_image: float = 0.05
     plan_share_sandbox: float = 0.05
 
+    @property
+    def is_sqlite(self) -> bool:
+        return str(self.database_url).lower().startswith("sqlite")
 
-@lru_cache
+    @property
+    def database_host(self) -> str:
+        try:
+            return urlsplit(str(self.database_url).replace("postgresql+psycopg", "postgresql", 1)).hostname or ""
+        except ValueError:
+            return ""
+
+    def ensure_storage_paths(self) -> None:
+        for value in (
+            self.data_root,
+            self.file_storage_path,
+            self.document_storage_path,
+            self.code_workspace_storage_path,
+            self.project_runtime_storage_path,
+            self.image_storage_path,
+            self.backup_storage_path,
+        ):
+            Path(value).mkdir(parents=True, exist_ok=True)
+
+
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
