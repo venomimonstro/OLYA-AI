@@ -7,7 +7,7 @@ from pydantic import Field
 
 from app.services.code_workspace import repo_map, resolve_inside, safe_relative_path, sha256_file, write_text
 from app.services.git_collaboration import git_diff, git_status
-from app.services.tool_reliability import StrictToolArgs, ToolRegistry, ToolSpec
+from app.services.tool_reliability import StrictToolArgs, ToolRegistry, ToolSpec, ToolValidationError
 
 
 class WorkspaceMapArgs(StrictToolArgs):
@@ -31,8 +31,8 @@ class GitStatusArgs(StrictToolArgs):
     staged: bool = False
 
 
-class ToolScopeError(RuntimeError):
-    pass
+class ToolScopeError(ToolValidationError):
+    """Deterministic pre-side-effect scope rejection."""
 
 
 def _require_allowed(path: str, allowed_paths: tuple[str, ...]) -> str:
