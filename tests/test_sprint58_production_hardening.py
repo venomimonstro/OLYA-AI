@@ -22,6 +22,10 @@ def test_docker_socket_exists_only_on_runtime_proxy():
     assert "docker.sock" not in worker
     assert "docker.sock" in runtime_proxy
     assert "X1_DOCKER_RUNTIME_PROXY_TOKEN" in runtime_proxy
+    assert "./data:/x1-host-data:ro" in runtime_proxy
+    assert "X1_DOCKER_PROXY_MAX_MEMORY_MB" in runtime_proxy
+    assert "X1_DOCKER_PROXY_MAX_CPU" in runtime_proxy
+    assert "X1_DOCKER_PROXY_MAX_PIDS" in runtime_proxy
 
 
 def test_sandbox_worker_has_no_docker_cli_or_subprocess():
@@ -32,11 +36,19 @@ def test_sandbox_worker_has_no_docker_cli_or_subprocess():
     assert "X1_DOCKER_RUNTIME_PROXY_URL" in worker
 
 
+def _configure_proxy_roots(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(proxy, "HOST_DATA_ROOT", tmp_path.resolve())
+    monkeypatch.setattr(proxy, "MIRROR_DATA_ROOT", tmp_path.resolve())
+    monkeypatch.setattr(proxy, "MAX_MEMORY_MB", 2048)
+    monkeypatch.setattr(proxy, "MAX_CPU", 1.0)
+    monkeypatch.setattr(proxy, "MAX_PIDS", 128)
+
+
 def _safe_run(tmp_path: Path) -> list[str]:
     workspace = tmp_path / "code_workspaces" / "w"
     scratch = tmp_path / "project_runtimes" / "r"
-    workspace.mkdir(parents=True)
-    scratch.mkdir(parents=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    scratch.mkdir(parents=True, exist_ok=True)
     return [
         "docker", "run", "--rm", "--name", "x1-exec-abcdef1234567890",
         "--label", "x1.sandbox.execution=true", "--label", "x1.sandbox.expires_at=9999999999",
@@ -51,7 +63,7 @@ def _safe_run(tmp_path: Path) -> list[str]:
 
 
 def test_runtime_proxy_accepts_only_canonical_sandbox_run(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(proxy, "HOST_DATA_ROOT", tmp_path.resolve())
+    _configure_proxy_roots(tmp_path, monkeypatch)
     argv = _safe_run(tmp_path)
     proxy._validate_run(argv)
 
@@ -65,13 +77,58 @@ def test_runtime_proxy_accepts_only_canonical_sandbox_run(tmp_path: Path, monkey
             proxy._validate_run(mutation)
 
 
-def test_runtime_proxy_rejects_mount_outside_data_root(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(proxy, "HOST_DATA_ROOT", tmp_path.resolve())
+def test_runtime_proxy_rejects_mount_outside_or_above_approved_namespaces(tmp_path: Path, monkeypatch):
+    _configure_proxy_roots(tmp_path, monkeypatch)
     argv = _safe_run(tmp_path)
     mount_index = argv.index("--mount")
-    argv[mount_index + 1] = "type=bind,src=/,dst=/workspace,rw"
+    for unsafe_source in ("/", str(tmp_path)):
+        mutated = list(argv)
+        mutated[mount_index + 1] = f"type=bind,src={unsafe_source},dst=/workspace,rw"
+        with pytest.raises(HTTPException):
+            proxy._validate_run(mutated)
+
+
+def test_runtime_proxy_rejects_host_side_symlink_escape(tmp_path: Path, monkeypatch):
+    _configure_proxy_roots(tmp_path, monkeypatch)
+    argv = _safe_run(tmp_path)
+    outside = tmp_path.parent / (tmp_path.name + "-outside")
+    outside.mkdir(exist_ok=True)
+    link = tmp_path / "code_workspaces" / "escape"
+    link.symlink_to(outside, target_is_directory=True)
+    mount_index = argv.index("--mount")
+    argv[mount_index + 1] = f"type=bind,src={link},dst=/workspace,rw"
     with pytest.raises(HTTPException):
         proxy._validate_run(argv)
+
+
+def test_runtime_proxy_enforces_its_own_resource_ceiling(tmp_path: Path, monkeypatch):
+    _configure_proxy_roots(tmp_path, monkeypatch)
+    argv = _safe_run(tmp_path)
+    for flag, unsafe in (("--memory", "99999m"), ("--cpus", "8"), ("--pids-limit", "4096")):
+        mutated = list(argv)
+        mutated[mutated.index(flag) + 1] = unsafe
+        with pytest.raises(HTTPException):
+            proxy._validate_run(mutated)
+
+
+def test_runtime_proxy_requires_no_pull_and_exact_managed_labels(tmp_path: Path, monkeypatch):
+    _configure_proxy_roots(tmp_path, monkeypatch)
+    argv = _safe_run(tmp_path)
+    without_pull = [item for item in argv if item != "--pull=never"]
+    with pytest.raises(HTTPException):
+        proxy._validate_run(without_pull)
+
+    image_index = argv.index(proxy.RUNTIME_IMAGE)
+    with_extra_label = [*argv[:image_index], "--label", "com.example.untrusted=true", *argv[image_index:]]
+    with pytest.raises(HTTPException):
+        proxy._validate_run(with_extra_label)
+
+
+def test_runtime_proxy_restricts_inspect_templates(monkeypatch):
+    ref = "x1-preview-abcdef1234567890"
+    monkeypatch.setattr(proxy, "_managed", lambda value: value == ref)
+    with pytest.raises(HTTPException):
+        proxy._validate(["docker", "inspect", "-f", "{{json .}}", ref])
 
 
 def test_runtime_proxy_command_allowlist_rejects_arbitrary_docker():
