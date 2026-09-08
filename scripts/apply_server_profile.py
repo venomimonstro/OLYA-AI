@@ -6,7 +6,7 @@ import os
 import re
 from pathlib import Path
 
-from app.services.server_profiles import PROFILE_NAMES, persist_active_profile, profile_for_host, read_staged_profile
+from app.services.server_profiles import PROFILE_NAMES, REQUEST_FILE, persist_active_profile, profile_for_host, read_staged_profile
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -73,6 +73,8 @@ def main() -> int:
         return 0
     set_env_values(Path(args.env_file), values)
     persist_active_profile(args.data_root, profile, ram, cores)
+    if args.staged:
+        (Path(args.data_root).resolve() / REQUEST_FILE).unlink(missing_ok=True)
     print(
         f'[X1] server profile applied: {envelope.profile}; RAM={ram:.2f}GiB; '
         f'context={envelope.context_tokens}; llama={envelope.llama_memory_gib}GiB; '
