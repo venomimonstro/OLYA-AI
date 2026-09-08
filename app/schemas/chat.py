@@ -61,6 +61,12 @@ class ChatUsage(BaseModel):
     ttft_ms: int | None = None
     output_tokens: int = 0
     tokens_per_second: float | None = None
+    # Sprint 48 quality economics. These fields expose whether Auto paid for an
+    # additional semantic critic/repair instead of hiding that CPU cost.
+    verification_risk_score: int = 0
+    verification_extra_inferences: int = 0
+    critic_used: bool = False
+    repair_applied: bool = False
 
 
 class QualityCheck(BaseModel):
