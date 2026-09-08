@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import logging
@@ -73,6 +75,12 @@ def _production_configuration_errors(settings) -> list[str]:
         token = str(settings.project_sandbox_worker_token or "")
         if not token or token == "change-me-sandbox-worker":
             errors.append("sandbox_worker_token_is_default")
+    if str(settings.document_render_backend).lower() == "remote":
+        token = str(settings.document_render_worker_token or "")
+        if not token or token == "change-me-document-worker":
+            errors.append("document_render_worker_token_is_default")
+        if not str(settings.document_render_worker_url or "").startswith("http://"):
+            errors.append("document_render_worker_url_invalid")
     return errors
 
 
@@ -91,40 +99,13 @@ async def lifespan(app: FastAPI):
     app.state.capacity_boot_max_concurrent_generations = int(settings.max_concurrent_generations)
     app.state.llama = LlamaClient(settings.llama_base_url, settings.request_timeout_seconds)
     app.state.context = ContextCompiler(max_chars=settings.deep_context_tokens * 6)
-    app.state.governor = ResourceGovernor(
-        max_concurrent=settings.max_concurrent_generations,
-        max_queue=settings.max_queue_size,
-        wait_timeout_seconds=settings.inference_queue_timeout_seconds,
-    )
-    app.state.research_governor = ResourceGovernor(
-        max_concurrent=max(1, int(settings.research_max_concurrent_operations)),
-        max_queue=max(0, int(settings.research_max_queue_size)),
-        wait_timeout_seconds=max(0.5, float(settings.research_queue_timeout_seconds)),
-    )
-    # Upload bodies are buffered only after this gate. Two active 20 MiB bodies
-    # plus a tiny waiting queue are safe inside the 2 GiB API container; HTTP
-    # concurrency itself can remain much higher for cheap auth/health/UI calls.
-    app.state.file_upload_governor = ResourceGovernor(
-        max_concurrent=2,
-        max_queue=8,
-        wait_timeout_seconds=15.0,
-    )
+    app.state.governor = ResourceGovernor(max_concurrent=settings.max_concurrent_generations, max_queue=settings.max_queue_size, wait_timeout_seconds=settings.inference_queue_timeout_seconds)
+    app.state.research_governor = ResourceGovernor(max_concurrent=max(1, int(settings.research_max_concurrent_operations)), max_queue=max(0, int(settings.research_max_queue_size)), wait_timeout_seconds=max(0.5, float(settings.research_queue_timeout_seconds)))
+    app.state.file_upload_governor = ResourceGovernor(max_concurrent=2, max_queue=8, wait_timeout_seconds=15.0)
     app.state.user_governor = UserResourceGovernor()
-    configure_render_gate(
-        settings.document_max_concurrent_renders,
-        settings.document_render_queue_timeout_seconds,
-    )
-    app.state.research = ResearchFetcher(
-        timeout_seconds=settings.research_timeout_seconds,
-        max_bytes=settings.research_max_bytes,
-        max_chars=settings.research_max_chars,
-        max_redirects=settings.research_max_redirects,
-    )
-    configured = [
-        item.strip().lower()
-        for item in (settings.search_providers or settings.search_provider).split(",")
-        if item.strip()
-    ]
+    configure_render_gate(settings.document_max_concurrent_renders, settings.document_render_queue_timeout_seconds)
+    app.state.research = ResearchFetcher(timeout_seconds=settings.research_timeout_seconds, max_bytes=settings.research_max_bytes, max_chars=settings.research_max_chars, max_redirects=settings.research_max_redirects)
+    configured = [item.strip().lower() for item in (settings.search_providers or settings.search_provider).split(",") if item.strip()]
     providers = []
     for name in configured:
         if name == "searxng":
@@ -163,15 +144,7 @@ async def lifespan(app: FastAPI):
 
 _boot_settings = get_settings()
 _is_production = _is_prod(_boot_settings)
-app = FastAPI(
-    title="X1",
-    version="0.40.0",
-    description="Local-first CPU/RAM AI platform",
-    lifespan=lifespan,
-    docs_url=None if _is_production else "/docs",
-    redoc_url=None if _is_production else "/redoc",
-    openapi_url=None if _is_production else "/openapi.json",
-)
+app = FastAPI(title="X1", version="0.40.0", description="Local-first CPU/RAM AI platform", lifespan=lifespan, docs_url=None if _is_production else "/docs", redoc_url=None if _is_production else "/redoc", openapi_url=None if _is_production else "/openapi.json")
 app.add_middleware(RequestBodyLimitMiddleware, max_bytes=32 * 1024 * 1024)
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=3)
 
@@ -180,18 +153,13 @@ def _network_research_request(request: Request) -> bool:
     if request.method.upper() != "POST":
         return False
     path = request.url.path.rstrip("/")
-    return (
-        path == "/v1/research/sources"
-        or (path.startswith("/v1/research/runs/") and path.endswith(("/discover", "/collect")))
-    )
+    return path == "/v1/research/sources" or (path.startswith("/v1/research/runs/") and path.endswith(("/discover", "/collect")))
 
 
 def _file_upload_request(request: Request) -> bool:
     if request.method.upper() != "POST":
         return False
     parts = [part for part in request.url.path.split("/") if part]
-    # /v1/projects/{project_id}/files only. File-search/download/delete do not
-    # allocate request bodies and must not consume this scarce lane.
     return len(parts) == 4 and parts[0] == "v1" and parts[1] == "projects" and parts[3] == "files"
 
 
@@ -201,43 +169,26 @@ async def file_upload_admission(request: Request, call_next):
         return await call_next(request)
     governor = getattr(request.app.state, "file_upload_governor", None)
     if governor is None:
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "File upload admission is not ready; retry shortly"},
-            headers={"Retry-After": "3"},
-        )
+        return JSONResponse(status_code=503, content={"detail": "File upload admission is not ready; retry shortly"}, headers={"Retry-After": "3"})
     try:
         async with governor.slot():
             return await call_next(request)
     except ResourceBusyError:
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "File upload capacity is busy; retry shortly"},
-            headers={"Retry-After": "5"},
-        )
+        return JSONResponse(status_code=503, content={"detail": "File upload capacity is busy; retry shortly"}, headers={"Retry-After": "5"})
 
 
 @app.middleware("http")
 async def research_admission(request: Request, call_next):
-    """Queue network research before FastAPI creates a DB dependency."""
     if not _network_research_request(request):
         return await call_next(request)
     governor = getattr(request.app.state, "research_governor", None)
     if governor is None:
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "Research admission is not ready; retry shortly"},
-            headers={"Retry-After": "3"},
-        )
+        return JSONResponse(status_code=503, content={"detail": "Research admission is not ready; retry shortly"}, headers={"Retry-After": "3"})
     try:
         async with governor.slot():
             return await call_next(request)
     except ResourceBusyError:
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "Internet research is at safe capacity; retry shortly"},
-            headers={"Retry-After": "5"},
-        )
+        return JSONResponse(status_code=503, content={"detail": "Internet research is at safe capacity; retry shortly"}, headers={"Retry-After": "5"})
 
 
 @app.middleware("http")
@@ -257,10 +208,7 @@ async def privacy_headers(request: Request, call_next):
 
 @app.get("/robots.txt", include_in_schema=False)
 def robots() -> PlainTextResponse:
-    return PlainTextResponse(
-        "User-agent: *\nDisallow: /v1/\nDisallow: /app\nDisallow: /admin\nDisallow: /media-admin\n",
-        headers={"Cache-Control": "public, max-age=86400"},
-    )
+    return PlainTextResponse("User-agent: *\nDisallow: /v1/\nDisallow: /app\nDisallow: /admin\nDisallow: /media-admin\n", headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.exception_handler(StaleDataError)
@@ -272,21 +220,13 @@ async def stale_task_state_handler(request: Request, exc: StaleDataError):
 @app.exception_handler(SQLAlchemyTimeoutError)
 async def database_pool_timeout_handler(request: Request, exc: SQLAlchemyTimeoutError):
     _ = request, exc
-    return JSONResponse(
-        status_code=503,
-        content={"detail": "Database capacity is temporarily busy; retry shortly"},
-        headers={"Retry-After": "2"},
-    )
+    return JSONResponse(status_code=503, content={"detail": "Database capacity is temporarily busy; retry shortly"}, headers={"Retry-After": "2"})
 
 
 @app.exception_handler(OperationalError)
 async def database_operational_error_handler(request: Request, exc: OperationalError):
     _ = request, exc
-    return JSONResponse(
-        status_code=503,
-        content={"detail": "Database is temporarily unavailable; retry shortly"},
-        headers={"Retry-After": "2"},
-    )
+    return JSONResponse(status_code=503, content={"detail": "Database is temporarily unavailable; retry shortly"}, headers={"Retry-After": "2"})
 
 
 def _include_product_router(module: str) -> None:
