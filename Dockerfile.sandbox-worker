@@ -9,8 +9,14 @@ WORKDIR /worker
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir fastapi==0.141.1 uvicorn==0.52.4 pydantic==2.13.5
+    && pip install --no-cache-dir fastapi==0.141.1 uvicorn==0.52.4 pydantic==2.13.5 \
+    && groupadd --gid 10001 x1 \
+    && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/x1 x1 \
+    && mkdir -p /app/data/code_workspaces /app/data/project_runtimes /home/x1 \
+    && chown -R x1:x1 /worker /app/data /home/x1
 
-COPY app/sandbox_worker_api.py /worker/sandbox_worker_api.py
+COPY --chown=x1:x1 app/sandbox_worker_api.py /worker/sandbox_worker_api.py
+
+USER x1
 
 CMD ["uvicorn", "sandbox_worker_api:app", "--host", "0.0.0.0", "--port", "8090", "--workers", "1", "--limit-concurrency", "16", "--backlog", "32", "--timeout-keep-alive", "2"]
