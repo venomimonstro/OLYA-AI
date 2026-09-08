@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -11,6 +12,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_REPORT = ROOT / "backups" / "model-regression-latest.json"
 MODEL_BASELINE = ROOT / "backups" / "model-regression-baseline.json"
+_MODEL_FINGERPRINT_FILES = (
+    "model-manifest.json",
+    "app/inference/client.py",
+    "app/inference/router.py",
+    "app/services/context.py",
+    "app/services/quality.py",
+    "app/services/scope_lock.py",
+    "app/services/conditional_verification.py",
+    "app/services/tool_reliability.py",
+)
 
 
 def run(name: str, argv: list[str], timeout: int) -> dict:
@@ -26,6 +37,39 @@ def host_ram_gib() -> float:
         if line.startswith("MemTotal:"):
             return int(line.split()[1]) / 1024.0 / 1024.0
     return 0.0
+
+
+def current_git_head() -> str:
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5, shell=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    value = result.stdout.strip().lower()
+    return value if result.returncode == 0 and len(value) == 40 and all(char in "0123456789abcdef" for char in value) else ""
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def current_model_source_identity() -> dict:
+    files: dict[str, str] = {}
+    for relative in _MODEL_FINGERPRINT_FILES:
+        path = ROOT / relative
+        files[relative] = _sha256_file(path) if path.is_file() else "missing"
+    aggregate = hashlib.sha256(json.dumps(files, sort_keys=True).encode("utf-8")).hexdigest()
+    corpus = ROOT / "regression" / "golden_corpus.json"
+    manifest = ROOT / "model-manifest.json"
+    return {
+        "template_runtime_files": files,
+        "template_runtime_sha256": aggregate,
+        "corpus_sha256": _sha256_file(corpus) if corpus.is_file() else "missing",
+        "model_manifest_sha256": _sha256_file(manifest) if manifest.is_file() else "missing",
+    }
 
 
 def _report_passed(data: dict) -> tuple[bool, str]:
@@ -53,6 +97,43 @@ def require_report(path: Path, expected_format: str | None = None) -> dict:
     else:
         item["payload_status"] = data.get("status")
     return item
+
+
+def verify_release_head() -> dict:
+    expected = current_git_head()
+    path = ROOT / "backups" / "release-gate-latest.json"
+    if not expected or not path.is_file():
+        return {"name": "release_evidence_current_head", "status": "failed", "expected_head": expected, "reason": "missing_head_or_report"}
+    try:
+        report = json.loads(path.read_text("utf-8"))
+    except Exception as exc:
+        return {"name": "release_evidence_current_head", "status": "failed", "expected_head": expected, "reason": type(exc).__name__}
+    actual = str(report.get("git_head") or "").lower()
+    return {"name": "release_evidence_current_head", "status": "passed" if actual == expected else "failed", "expected_head": expected, "report_head": actual}
+
+
+def verify_model_report_current_source() -> dict:
+    expected = current_model_source_identity()
+    if not MODEL_REPORT.is_file():
+        return {"name": "model_evidence_current_source", "status": "failed", "reason": "missing_report"}
+    try:
+        report = json.loads(MODEL_REPORT.read_text("utf-8"))
+    except Exception as exc:
+        return {"name": "model_evidence_current_source", "status": "failed", "reason": type(exc).__name__}
+    snapshot = report.get("snapshot") or {}
+    mismatches = [
+        key for key in ("template_runtime_sha256", "corpus_sha256", "model_manifest_sha256")
+        if snapshot.get(key) != expected.get(key)
+    ]
+    if snapshot.get("template_runtime_files") != expected.get("template_runtime_files"):
+        mismatches.append("template_runtime_files")
+    return {
+        "name": "model_evidence_current_source",
+        "status": "passed" if not mismatches else "failed",
+        "mismatches": mismatches,
+        "candidate_template_runtime_sha256": snapshot.get("template_runtime_sha256"),
+        "current_template_runtime_sha256": expected.get("template_runtime_sha256"),
+    }
 
 
 def promote_model_baseline() -> dict:
@@ -106,6 +187,11 @@ def main() -> int:
         item["name"] = name
         checks.append(item)
 
+    # Evidence must be from exactly the code/image inputs being accepted. This
+    # prevents a stale green JSON from a previous checkout being promoted.
+    checks.append(verify_release_head())
+    checks.append(verify_model_report_current_source())
+
     release_path = ROOT / "backups" / "release-gate-latest.json"
     if release_path.is_file():
         try:
@@ -131,9 +217,10 @@ def main() -> int:
             failed.append("model_baseline_promotion")
 
     payload = {
-        "format": "x1-release-candidate-v1",
+        "format": "x1-release-candidate-v2",
         "status": "passed" if not failed else "failed",
         "reference_host_ram_gib": round(ram, 3),
+        "git_head": current_git_head(),
         "critical_regression_cases_required": 0,
         "model_baseline_promotion": baseline_promotion,
         "failed_checks": failed,
