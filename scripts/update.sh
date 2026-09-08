@@ -32,6 +32,12 @@ quiesce_sandbox_containers() {
   [ -z "$ids" ] || docker rm -f $ids >/dev/null
 }
 
+quiesce_runtime_proxy() {
+  local ids
+  ids="$(docker ps -aq --filter 'label=com.docker.compose.service=docker-runtime-proxy' 2>/dev/null | awk 'NF' | sort -u)"
+  [ -z "$ids" ] || docker rm -f $ids >/dev/null 2>&1 || true
+}
+
 info "Fetching main without changing the working tree"
 git fetch origin main
 TARGET_HEAD="$(git rev-parse origin/main)"
@@ -62,8 +68,9 @@ rollback() {
   trap - ERR INT TERM
   set +e
   printf '[X1 update] ROLLBACK: %s\n' "$reason" >&2
-  docker compose stop app image-worker sandbox-worker llama >/dev/null 2>&1 || true
+  docker compose stop app image-worker sandbox-worker document-worker llama >/dev/null 2>&1 || true
   quiesce_sandbox_containers >/dev/null 2>&1 || true
+  quiesce_runtime_proxy >/dev/null 2>&1 || true
   git reset --hard "$OLD_HEAD" >/dev/null 2>&1 || true
   # The installer mutates .env during model migrations. Code rollback without
   # restoring .env can otherwise pair the old runtime with the new model identity.
@@ -83,8 +90,9 @@ trap 'rollback "update command failed at line $LINENO"' ERR
 trap 'rollback "update interrupted"' INT TERM
 
 info "Quiescing write-producing services"
-docker compose stop app image-worker sandbox-worker >/dev/null 2>&1 || true
+docker compose stop app image-worker sandbox-worker document-worker >/dev/null 2>&1 || true
 quiesce_sandbox_containers
+quiesce_runtime_proxy
 
 info "Checking for legacy named-volume user data"
 X1_INSTALL_DIR="$ROOT" bash "$MIGRATE_COPY"
