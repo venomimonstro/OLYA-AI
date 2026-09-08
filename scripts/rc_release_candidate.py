@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+MODEL_REPORT = ROOT / "backups" / "model-regression-latest.json"
+MODEL_BASELINE = ROOT / "backups" / "model-regression-baseline.json"
 
 
 def run(name: str, argv: list[str], timeout: int) -> dict:
@@ -51,6 +55,26 @@ def require_report(path: Path, expected_format: str | None = None) -> dict:
     return item
 
 
+def promote_model_baseline() -> dict:
+    if not MODEL_REPORT.is_file():
+        return {"status": "failed", "reason": "candidate_report_missing"}
+    try:
+        data = json.loads(MODEL_REPORT.read_text("utf-8"))
+    except Exception as exc:
+        return {"status": "failed", "reason": type(exc).__name__}
+    passed, _ = _report_passed(data)
+    if not passed:
+        return {"status": "failed", "reason": "candidate_not_accepted"}
+    data["baseline"] = True
+    data["accepted_by"] = "x1-release-candidate-v1"
+    data["accepted_at"] = datetime.now(timezone.utc).isoformat()
+    MODEL_BASELINE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = MODEL_BASELINE.with_suffix(MODEL_BASELINE.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", "utf-8")
+    os.replace(tmp, MODEL_BASELINE)
+    return {"status": "passed", "path": str(MODEL_BASELINE), "accepted_at": data["accepted_at"]}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="X1 Sprint 58 final 32-GiB release candidate gate")
     parser.add_argument("--allow-nonreference-host", action="store_true")
@@ -73,7 +97,7 @@ def main() -> int:
 
     evidence = [
         ("release_gate_evidence", ROOT / "backups" / "release-gate-latest.json", "x1-release-gate-v4"),
-        ("model_regression_evidence", ROOT / "backups" / "model-regression-latest.json", "x1-model-regression-report-v1"),
+        ("model_regression_evidence", MODEL_REPORT, "x1-model-regression-report-v1"),
         ("restore_drill_evidence", ROOT / "backups" / "restore-drill-latest.json", None),
         ("runtime_chaos_evidence", ROOT / "backups" / "rc-chaos-runtime-latest.json", "x1-rc-chaos-v1"),
     ]
@@ -100,11 +124,18 @@ def main() -> int:
             checks.append({"name": "all_runtime_modes_requested", "status": "failed", "error": type(exc).__name__})
 
     failed = [item.get("name") for item in checks if item.get("status") != "passed"]
+    baseline_promotion = {"status": "not_run", "reason": "RC checks failed"}
+    if not failed:
+        baseline_promotion = promote_model_baseline()
+        if baseline_promotion.get("status") != "passed":
+            failed.append("model_baseline_promotion")
+
     payload = {
         "format": "x1-release-candidate-v1",
         "status": "passed" if not failed else "failed",
         "reference_host_ram_gib": round(ram, 3),
         "critical_regression_cases_required": 0,
+        "model_baseline_promotion": baseline_promotion,
         "failed_checks": failed,
         "checks": checks,
     }
