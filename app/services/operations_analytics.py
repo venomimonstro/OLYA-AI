@@ -6,7 +6,7 @@ from math import ceil
 from sqlalchemy import func, inspect, select, text
 from sqlalchemy.orm import Session
 
-from app.models import EngineeringExecution, EngineeringRun, FrustrationEvent, ImageBlob, ImageFeedback, ImageGeneration, ImageQAEvent, UsageEvent
+from app.models import ComputeBreakdownEvent, EngineeringExecution, EngineeringRun, FrustrationEvent, ImageBlob, ImageFeedback, ImageGeneration, ImageQAEvent, UsageEvent
 
 
 def _now():
@@ -28,6 +28,54 @@ def _optional_scalar(db: Session, sql: str, params: dict | None = None, default=
     try: return db.execute(text(sql), params or {}).scalar_one_or_none() or default
     except Exception:
         db.rollback(); return default
+
+
+def _compute_economics(db: Session, since: datetime) -> dict:
+    rows = list(db.scalars(select(ComputeBreakdownEvent).where(ComputeBreakdownEvent.created_at >= since)).all())
+    by_mode: dict[str, dict[str, int | float]] = {}
+    total_ms = wasted_ms = primary_ms = critic_ms = repair_ms = successful = 0
+    per_user: dict[str, dict[str, int]] = {}
+    for row in rows:
+        mode = row.mode or "unknown"
+        bucket = by_mode.setdefault(mode, {"requests": 0, "total_ms": 0, "wasted_ms": 0, "successful": 0})
+        bucket["requests"] += 1
+        bucket["total_ms"] += int(row.total_inference_ms or 0)
+        bucket["wasted_ms"] += int(row.wasted_ms or 0)
+        bucket["successful"] += int(bool(row.success))
+        total_ms += int(row.total_inference_ms or 0)
+        wasted_ms += int(row.wasted_ms or 0)
+        primary_ms += int(row.primary_ms or 0)
+        critic_ms += int(row.critic_ms or 0)
+        repair_ms += int(row.repair_ms or 0)
+        successful += int(bool(row.success))
+        user_bucket = per_user.setdefault(row.user_id, {"requests": 0, "total_ms": 0, "wasted_ms": 0})
+        user_bucket["requests"] += 1
+        user_bucket["total_ms"] += int(row.total_inference_ms or 0)
+        user_bucket["wasted_ms"] += int(row.wasted_ms or 0)
+    for bucket in by_mode.values():
+        bucket["compute_ms_per_success"] = round(int(bucket["total_ms"]) / max(1, int(bucket["successful"])), 2)
+        bucket["waste_rate"] = round(int(bucket["wasted_ms"]) / max(1, int(bucket["total_ms"])), 4)
+    expensive_users = sorted(
+        ({"user_id": uid, **values} for uid, values in per_user.items()),
+        key=lambda item: item["total_ms"],
+        reverse=True,
+    )[:20]
+    return {
+        "requests": len(rows),
+        "successful": successful,
+        "total_inference_ms": total_ms,
+        "primary_ms": primary_ms,
+        "critic_ms": critic_ms,
+        "repair_ms": repair_ms,
+        "verification_ms": critic_ms + repair_ms,
+        "wasted_ms": wasted_ms,
+        "waste_rate": round(wasted_ms / max(1, total_ms), 4),
+        "compute_ms_per_successful_answer": round(total_ms / max(1, successful), 2),
+        "verification_share": round((critic_ms + repair_ms) / max(1, total_ms), 4),
+        "by_mode": by_mode,
+        "top_compute_users": expensive_users,
+        "subcall_attribution_note": "Total inference and wasted compute are exact. Critic/repair split is call-equivalent estimated for historical Sprint 48 chat events unless dedicated sub-call timing is available.",
+    }
 
 
 def operations_summary(db: Session, *, window_hours: int = 24, monthly_server_cost_rub: float = 4000.0) -> dict:
@@ -69,6 +117,7 @@ def operations_summary(db: Session, *, window_hours: int = 24, monthly_server_co
       "window_hours":window_hours,
       "economics":{"recognized_revenue_rub":revenue_rub,"allocated_server_cost_rub":allocated_server_cost,"gross_after_server_rub":round(revenue_rub-allocated_server_cost,2),"resource_cost_microunits":resource_cost_microunits,"note":"Gross-after-server excludes taxes and other external costs; resource microunits are shown separately."},
       "traffic":{"requests":len(usage),"successful":len(success),"success_rate":round(len(success)/max(1,len(usage)),4),"active_users":len(users),"p95_duration_ms":_pct(durations,.95),"p95_queue_ms":_pct(queues,.95),"inference_minutes":round(inference_ms/60000,3),"cpu_seconds_per_success":round((inference_ms/1000)/max(1,len(success)),3),"context_efficiency_ratio":round(compiled_chars/max(1,raw_chars),4),"frustration_rate":round(frustration/max(1,len(usage)),4)},
+      "compute_economics":_compute_economics(db, since),
       "resources":{**_host_metrics(),"image_storage_mb":round(storage_bytes/1024/1024,2)},
       "images":{"generated":len(image_rows),"ready":len(image_ready),"failed":len(image_failed),"success_rate":round(len(image_ready)/max(1,len(image_rows)),4),"p95_end_to_end_ms":_pct(image_latency,.95),"qa_events":qa_total,"qa_failures":qa_failed,"qa_failure_rate":round(qa_failed/max(1,qa_total),4),"feedback_count":len(feedback),"avg_user_rating":avg_rating},
       "agents":{"engineering_runs":len(runs),"active_runs":len(active_runs),"executions":len(executions),"verified":len(verified),"blocked_or_rolled_back":len(blocked),"verified_rate":round(len(verified)/max(1,len(executions)),4),"failure_rate":round(len(blocked)/max(1,len(executions)),4)}
