@@ -37,6 +37,10 @@ _STABLE_EXPLANATION = re.compile(
     r"\b(?:что\s+такое|объясни|как\s+работает|принцип|определение|формула|теория|что\s+означает|what\s+is|explain|how\s+does)\b",
     re.IGNORECASE,
 )
+_DESIGN_TASK = re.compile(
+    r"\b(?:придумай|разработай|сформируй|предложи|спроектируй|создай|составь|рассчитай|модель\s+тариф|тарифн\w*\s+сетк|design|create|propose|draft)\b",
+    re.IGNORECASE,
+)
 _RECENCY = re.compile(
     r"\b(?:сейчас|сегодня|на\s+данный\s+момент|актуальн\w*|текущ\w*|последн\w*|свеж\w*|новейш\w*|latest|today|currently|current|right\s+now|recent)\b",
     re.IGNORECASE,
@@ -128,6 +132,8 @@ def classify_freshness(text: str) -> FreshnessDecision:
             return FreshnessDecision(False, "stable", "Запрос явно относится к историческому периоду.", 0, 0, 0.96)
         if _STABLE_EXPLANATION.search(value) and not recency and category in {"price", "market", "law"}:
             return FreshnessDecision(False, "stable", "Запрошено стабильное объяснение понятия, а не текущее значение.", 0, 0, 0.9)
+        if _DESIGN_TASK.search(value) and not recency and category == "price":
+            return FreshnessDecision(False, "stable", "Пользователь проектирует собственную цену/тариф, а не запрашивает текущую рыночную цену.", 0, 0, 0.92)
         return FreshnessDecision(True, category, reason, max_age, min_hosts, 0.96 if recency else 0.9)
 
     if recency:
