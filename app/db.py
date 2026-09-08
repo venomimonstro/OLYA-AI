@@ -22,9 +22,6 @@ def _connect_args(database_url: str) -> dict:
     if database_url.startswith("sqlite"):
         return {"check_same_thread": False}
     if database_url.startswith(("postgresql", "postgres")):
-        # Bound every layer of database waiting. Pool timeouts alone do not stop
-        # a request that already owns a connection from waiting forever on a row
-        # lock, pathological SQL or a half-open network connection.
         connect_timeout = _env_int("X1_DATABASE_CONNECT_TIMEOUT_SECONDS", 5, minimum=1)
         statement_timeout = _env_int("X1_DATABASE_STATEMENT_TIMEOUT_MS", 30_000, minimum=1_000)
         lock_timeout = _env_int("X1_DATABASE_LOCK_TIMEOUT_MS", 10_000, minimum=250)
@@ -43,14 +40,7 @@ def _connect_args(database_url: str) -> dict:
 def build_engine(database_url: str | None = None):
     settings = get_settings()
     url = database_url or settings.database_url
-    kwargs = {
-        "pool_pre_ping": True,
-        "connect_args": _connect_args(url),
-    }
-    # SQLite uses a different pool implementation in tests/development. For
-    # PostgreSQL keep both connection count and wait time bounded: under a traffic
-    # spike a request should fail fast with a retryable 503 instead of occupying a
-    # worker thread for SQLAlchemy's long default pool wait.
+    kwargs = {"pool_pre_ping": True, "connect_args": _connect_args(url)}
     if not url.startswith("sqlite"):
         kwargs.update(
             pool_size=max(1, int(settings.database_pool_size)),
@@ -72,6 +62,8 @@ def init_db() -> None:
     import app.models_sprint31  # noqa:F401
     import app.models_sprint37  # noqa:F401
     import app.models_sprint38  # noqa:F401
+    import app.models_sprint45  # noqa:F401
+    import app.models_sprint51  # noqa:F401
     try:
         import app.models_sprint30  # noqa:F401
     except ModuleNotFoundError:
