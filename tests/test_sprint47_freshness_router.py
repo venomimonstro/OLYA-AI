@@ -24,6 +24,12 @@ def test_current_price_is_not_answered_from_model_memory():
     assert decision.category == "price"
 
 
+def test_pricing_design_does_not_waste_web_research():
+    decision = classify_freshness("Придумай тарифы для моего сервиса и предложи цены")
+    assert decision.required is False
+    assert decision.category == "stable"
+
+
 def test_current_official_role_requires_freshness():
     decision = classify_freshness("Кто сейчас генеральный директор компании?")
     assert decision.required is True
@@ -96,4 +102,4 @@ def test_auto_mode_asks_backend_plan_while_forced_mode_still_works():
     ui = Path("app/user_ui.py").read_text(encoding="utf-8")
     assert "research(text,false)" in ui
     assert "research(text,true)" in ui
-    assert "webMode==='off'" not in ui or "else if(webMode==='auto')" in ui
+    assert "else if(webMode==='auto')" in ui
