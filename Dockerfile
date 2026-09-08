@@ -34,6 +34,11 @@ COPY --chown=x1:x1 alembic ./alembic
 COPY --chown=x1:x1 app ./app
 COPY --chown=x1:x1 scripts ./scripts
 COPY --chown=x1:x1 tests ./tests
+# Sprint 57 is executed inside both the production app container and the gate
+# container. Keep its immutable corpus/model identity inside the image instead
+# of relying on host files that are not mounted at /app.
+COPY --chown=x1:x1 model-manifest.json ./model-manifest.json
+COPY --chown=x1:x1 regression ./regression
 
 USER x1
 
