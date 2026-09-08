@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import secrets
+import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -108,6 +110,43 @@ def _deactivate(user_id: str) -> None:
             db.commit()
 
 
+def _run_model_regression(timeout_seconds: float) -> tuple[bool, dict[str, Any], int]:
+    started = time.monotonic()
+    timeout = max(300, int(timeout_seconds * 8))
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.model_regression_lab",
+                "--live-url",
+                "http://llama:8080",
+                "--baseline",
+                "/app/backups/model-regression-baseline.json",
+                "--report",
+                "/app/backups/model-regression-latest.json",
+                "--timeout",
+                str(max(60.0, timeout_seconds)),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            shell=False,
+        )
+        detail = {
+            "exit_code": completed.returncode,
+            "stdout": completed.stdout[-3000:],
+            "stderr": completed.stderr[-3000:],
+            "baseline": "/app/backups/model-regression-baseline.json",
+            "report": "/app/backups/model-regression-latest.json",
+        }
+        return completed.returncode == 0, detail, int((time.monotonic() - started) * 1000)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return False, {"error": f"{type(exc).__name__}: {exc}"}, int((time.monotonic() - started) * 1000)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="X1 production component acceptance")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
@@ -125,7 +164,11 @@ def main() -> int:
         health = run.call("health", "GET", "/health").json()
         run.assert_check("health_shape", health.get("status") in {"stable", "degraded", "ok"}, {"status": health.get("status")})
 
-        # Public commercial plan catalog must exist before authentication.
+        regression_ok, regression_detail, regression_ms = _run_model_regression(args.timeout)
+        run.checks.append(Check("model_prompt_regression", "passed" if regression_ok else "failed", regression_detail, regression_ms))
+        if not regression_ok:
+            raise RuntimeError("model_prompt_regression: candidate did not match accepted baseline")
+
         plans = run.call("commerce_plans", "GET", "/v1/commerce/plans").json()
         run.assert_check("commerce_plan_catalog", isinstance(plans, list) and len(plans) >= 1, {"plans": len(plans) if isinstance(plans, list) else None})
 
@@ -145,8 +188,6 @@ def main() -> int:
         me = run.call("profile", "GET", "/v1/auth/me").json()
         run.assert_check("profile_matches", me.get("email") == run.email, {"email": me.get("email")})
 
-        # Session lifecycle: revoked tokens must stop working, then password login
-        # must issue a fresh usable session.
         old_token = run.token
         run.call("logout", "POST", "/v1/auth/logout", expect=(204,))
         run.token = old_token
