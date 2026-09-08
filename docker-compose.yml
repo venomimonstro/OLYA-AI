@@ -72,6 +72,33 @@ services:
         limits:
           memory: 384M
 
+  document-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.document-worker
+    restart: unless-stopped
+    mem_limit: 768m
+    environment:
+      X1_DOCUMENT_RENDER_WORKER_TOKEN: ${X1_DOCUMENT_RENDER_WORKER_TOKEN:?Set X1_DOCUMENT_RENDER_WORKER_TOKEN in .env}
+      X1_DATA_ROOT: /app/data
+      X1_DOCUMENT_MAX_CONCURRENT_RENDERS: ${X1_DOCUMENT_MAX_CONCURRENT_RENDERS:-1}
+      X1_DOCUMENT_MAX_PAGES: ${X1_DOCUMENT_MAX_PAGES:-300}
+      X1_DOCUMENT_MAX_RASTER_DPI: ${X1_DOCUMENT_RASTER_DPI:-110}
+    volumes:
+      - ./data:/app/data
+    expose:
+      - "8091"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+
   app:
     build:
       context: .
@@ -86,6 +113,8 @@ services:
       X1_DATA_ROOT: /app/data
       X1_SEARXNG_BASE_URL: http://searxng:8080
       X1_PROJECT_SANDBOX_WORKER_URL: http://sandbox-worker:8090
+      X1_DOCUMENT_RENDER_BACKEND: remote
+      X1_DOCUMENT_RENDER_WORKER_URL: http://document-worker:8091
     ports:
       - "${X1_BIND_ADDRESS:-127.0.0.1}:${X1_PORT:-8000}:8000"
     volumes:
@@ -98,6 +127,8 @@ services:
         condition: service_started
       sandbox-worker:
         condition: service_started
+      document-worker:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
       interval: 15s
@@ -122,6 +153,7 @@ services:
       X1_DATABASE_AUTO_CREATE_SCHEMA: "true"
       X1_DATABASE_URL: sqlite+pysqlite:///./data/release_gate.db
       X1_DATA_ROOT: /app/data
+      X1_DOCUMENT_RENDER_BACKEND: local
     command: ["python", "-m", "pytest", "-q"]
     deploy:
       resources:
