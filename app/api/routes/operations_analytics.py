@@ -14,6 +14,23 @@ def summary(request: Request, window_hours: int = Query(default=24, ge=1, le=24*
     _ = admin
     return operations_summary(db, window_hours=window_hours, monthly_server_cost_rub=float(getattr(request.app.state.settings,'monthly_server_cost_rub',4000.0)))
 
+@router.get('/overload')
+def overload(request: Request, admin: User = Depends(require_admin)) -> dict:
+    _ = admin
+    lanes = getattr(request.app.state, 'overload_lanes', {}) or {}
+    result = {}
+    for name, lane in lanes.items():
+        snap = lane.snapshot()
+        result[name] = {
+            'active': snap.active,
+            'waiting': snap.waiting,
+            'max_concurrent': snap.max_concurrent,
+            'max_queue': snap.max_queue,
+            'breaker_state': snap.breaker_state,
+            'breaker_failures': snap.breaker_failures,
+        }
+    return {'status': 'stable' if all(x['breaker_state'] == 'closed' for x in result.values()) else 'degraded', 'lanes': result}
+
 @router.get('/health')
 async def health(request: Request, refresh: bool = Query(default=True), deep: bool = Query(default=False), admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     _ = admin
