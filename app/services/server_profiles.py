@@ -14,6 +14,7 @@ from scripts.download_model import (
 
 PROFILE_NAMES = ("super_low", "optimal", "maximum")
 REQUEST_FILE = "server-profile-request.json"
+ACTIVE_FILE = "server-profile-active.json"
 
 
 @dataclass(frozen=True)
@@ -172,25 +173,39 @@ def profile_payload(profile: str, ram_gib: float, cpu_cores: int) -> dict:
     return {"format": "x1-server-profile-v1", "envelope": asdict(envelope), "env": envelope.env()}
 
 
-def stage_profile_request(data_root: str | Path, profile: str, ram_gib: float, cpu_cores: int) -> Path:
-    root = Path(data_root).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    target = root / REQUEST_FILE
-    payload = profile_payload(profile, ram_gib, cpu_cores)
-    tmp = target.with_suffix(".tmp")
+def _atomic_json(target: Path, payload: dict) -> Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", "utf-8")
     tmp.replace(target)
     return target
 
 
-def read_staged_profile(data_root: str | Path) -> dict | None:
-    target = Path(data_root).resolve() / REQUEST_FILE
-    if not target.is_file():
+def stage_profile_request(data_root: str | Path, profile: str, ram_gib: float, cpu_cores: int) -> Path:
+    return _atomic_json(Path(data_root).resolve() / REQUEST_FILE, profile_payload(profile, ram_gib, cpu_cores))
+
+
+def persist_active_profile(data_root: str | Path, profile: str, ram_gib: float, cpu_cores: int) -> Path:
+    payload = profile_payload(profile, ram_gib, cpu_cores)
+    payload["status"] = "active"
+    return _atomic_json(Path(data_root).resolve() / ACTIVE_FILE, payload)
+
+
+def _read_profile(path: Path, expected_status: str) -> dict | None:
+    if not path.is_file():
         return None
     try:
-        payload = json.loads(target.read_text("utf-8"))
+        payload = json.loads(path.read_text("utf-8"))
     except (OSError, ValueError, json.JSONDecodeError):
-        return {"status": "invalid", "path": str(target)}
+        return {"status": "invalid", "path": str(path)}
     if payload.get("format") != "x1-server-profile-v1":
-        return {"status": "invalid", "path": str(target)}
-    return {"status": "staged", "path": str(target), **payload}
+        return {"status": "invalid", "path": str(path)}
+    return {"status": payload.get("status") or expected_status, "path": str(path), **payload}
+
+
+def read_staged_profile(data_root: str | Path) -> dict | None:
+    return _read_profile(Path(data_root).resolve() / REQUEST_FILE, "staged")
+
+
+def read_active_profile(data_root: str | Path) -> dict | None:
+    return _read_profile(Path(data_root).resolve() / ACTIVE_FILE, "active")
