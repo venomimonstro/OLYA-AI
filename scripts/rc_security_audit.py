@@ -31,11 +31,14 @@ def main() -> int:
     proxy_block = compose.split("  docker-runtime-proxy:", 1)[1].split("  sandbox-worker:", 1)[0]
     check("sandbox_worker_has_no_socket", "docker.sock" not in sandbox_block)
     check("runtime_proxy_owns_socket", "docker.sock" in proxy_block and "X1_DOCKER_RUNTIME_PROXY_TOKEN" in proxy_block)
+    check("runtime_proxy_has_readonly_data_mirror", "./data:/x1-host-data:ro" in proxy_block and "X1_DOCKER_PROXY_DATA_MIRROR_ROOT" in proxy_block)
     check("sandbox_worker_has_no_docker_cli", "docker.io" not in worker_dockerfile and "subprocess" not in worker)
-    check("proxy_rejects_privileged", all(marker in proxy for marker in ("--privileged", "--device", "--volume", "--entrypoint")))
-    check("proxy_forces_network_none", 'payload.argv' not in proxy or '"--network"' in proxy)
-    check("proxy_mounts_scoped", "HOST_DATA_ROOT" in proxy and "source_path.relative_to(HOST_DATA_ROOT)" in proxy)
-    check("proxy_managed_labels_only", "x1.sandbox.preview=true" in proxy and "x1.sandbox.execution=true" in proxy)
+    check("proxy_allowlist_grammar", "_RUN_STANDALONE" in proxy and "_RUN_VALUE_FLAGS" in proxy and "Docker run option is not allowed" in proxy)
+    check("proxy_requires_pull_never", "Sandbox image pulls must be disabled" in proxy and "--pull=never" in proxy)
+    check("proxy_resource_ceiling", all(marker in proxy for marker in ("MAX_MEMORY_MB", "MAX_CPU", "MAX_PIDS", "exceeds proxy envelope")))
+    check("proxy_mount_namespaces", all(marker in proxy for marker in ("MIRROR_DATA_ROOT", "code_workspaces", "project_runtimes", "resolved_mirror.relative_to")))
+    check("proxy_exact_labels", "Sandbox labels must contain exactly one managed label and one expiry label" in proxy)
+    check("proxy_restricts_inspect", "_ALLOWED_INSPECT_FORMATS" in proxy and "Only approved inspection" in proxy)
     check("proxy_pinned_image", "RUNTIME_IMAGE" in proxy and "Only pinned sandbox runtime image is allowed" in proxy)
 
     check("ssrf_scheme_allowlist", "_ALLOWED_SCHEMES = {\"http\", \"https\"}" in research)
@@ -59,7 +62,7 @@ def main() -> int:
     check("canary_auto_rollback_present", "public_launch_auto_rollback" in launch and "rollback_rollout" in launch)
 
     failed = [item["name"] for item in checks if item["status"] != "passed"]
-    payload = {"format": "x1-rc-security-audit-v1", "status": "passed" if not failed else "failed", "critical_failures": failed, "checks": checks}
+    payload = {"format": "x1-rc-security-audit-v2", "status": "passed" if not failed else "failed", "critical_failures": failed, "checks": checks}
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if payload["status"] == "passed" else 2
 
