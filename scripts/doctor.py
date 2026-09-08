@@ -33,10 +33,7 @@ def result(name: str, status: str, detail: str) -> dict:
 
 def cmd(args: list[str], timeout: int = 30):
     try:
-        return subprocess.run(
-            args, cwd=ROOT, text=True, capture_output=True, timeout=timeout,
-            stdin=subprocess.DEVNULL, shell=False,
-        )
+        return subprocess.run(args, cwd=ROOT, text=True, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL, shell=False)
     except Exception:
         return None
 
@@ -133,8 +130,8 @@ def main() -> int:
         env_text = env.read_text("utf-8", errors="replace")
         unsafe = [marker for marker in (
             "X1_ADMIN_BOOTSTRAP_TOKEN=change-me", "X1_PROJECT_RUNTIME_SECRET_KEY=change-me-runtime-secret",
-            "X1_PROJECT_SANDBOX_WORKER_TOKEN=change-me-sandbox-worker", "POSTGRES_PASSWORD=change-me-db",
-            "POSTGRES_PASSWORD=x1-dev-only", "x1:change-me-db@db:5432/x1",
+            "X1_PROJECT_SANDBOX_WORKER_TOKEN=change-me-sandbox-worker", "X1_DOCUMENT_RENDER_WORKER_TOKEN=change-me-document-worker",
+            "POSTGRES_PASSWORD=change-me-db", "POSTGRES_PASSWORD=x1-dev-only", "x1:change-me-db@db:5432/x1",
         ) if marker in env_text]
         checks.append(result("secrets", "failed" if unsafe else "stable", "unsafe defaults: "+",".join(unsafe) if unsafe else "non-default"))
         checks.append(result("environment", "stable" if "X1_ENV=production" in env_text else "degraded", "production" if "X1_ENV=production" in env_text else "X1_ENV is not production"))
@@ -144,67 +141,49 @@ def main() -> int:
     if inference_expected:
         size = MODEL.stat().st_size if MODEL.exists() else 0
         model_ok = MODEL.is_file() and size == DEFAULT_SIZE
-        checks.append(result("qwen_model", "stable" if model_ok else "failed", json.dumps({
-            "path": str(MODEL), "bytes": size, "expected_bytes": DEFAULT_SIZE,
-            "expected_sha256": DEFAULT_SHA256, "hash_verification": "installer_and_release_gate",
-        })))
-        env_name = _env_value(env_text, "X1_LLAMA_MODEL_NAME")
-        env_file = _env_value(env_text, "X1_LLAMA_MODEL_FILE")
+        checks.append(result("qwen_model", "stable" if model_ok else "failed", json.dumps({"path": str(MODEL), "bytes": size, "expected_bytes": DEFAULT_SIZE, "expected_sha256": DEFAULT_SHA256, "hash_verification": "installer_and_release_gate"})))
+        env_name = _env_value(env_text, "X1_LLAMA_MODEL_NAME"); env_file = _env_value(env_text, "X1_LLAMA_MODEL_FILE")
         identity_ok = env_name == DEFAULT_MODEL_NAME and env_file == DEFAULT_FILE
-        checks.append(result("qwen_model_identity", "stable" if identity_ok else "failed", json.dumps({
-            "configured_name": env_name, "expected_name": DEFAULT_MODEL_NAME,
-            "configured_file": env_file, "expected_file": DEFAULT_FILE,
-        })))
-
+        checks.append(result("qwen_model_identity", "stable" if identity_ok else "failed", json.dumps({"configured_name": env_name, "expected_name": DEFAULT_MODEL_NAME, "configured_file": env_file, "expected_file": DEFAULT_FILE})))
         llama_gib = _memory_gib(_env_value(env_text, "X1_LLAMA_MEMORY_LIMIT"))
         max_safe = min(float(LLAMA_MEMORY_CAP_GIB), max(0.0, host_gib - NON_LLAMA_RESERVE_GIB))
-        memory_ok = bool(
-            host_gib >= MIN_DETECTED_RAM_GIB and llama_gib is not None
-            and LLAMA_MIN_MEMORY_GIB <= llama_gib <= max_safe + 0.05
-        )
-        checks.append(result("host_memory_budget", "stable" if memory_ok else "failed", json.dumps({
-            "host_gib": round(host_gib, 2), "llama_limit_gib": None if llama_gib is None else round(llama_gib, 2),
-            "required_non_llama_reserve_gib": NON_LLAMA_RESERVE_GIB,
-            "required_llama_min_gib": LLAMA_MIN_MEMORY_GIB, "safe_llama_ceiling_gib": round(max_safe, 2),
-        })))
+        memory_ok = bool(host_gib >= MIN_DETECTED_RAM_GIB and llama_gib is not None and LLAMA_MIN_MEMORY_GIB <= llama_gib <= max_safe + 0.05)
+        checks.append(result("host_memory_budget", "stable" if memory_ok else "failed", json.dumps({"host_gib": round(host_gib, 2), "llama_limit_gib": None if llama_gib is None else round(llama_gib, 2), "required_non_llama_reserve_gib": NON_LLAMA_RESERVE_GIB, "required_llama_min_gib": LLAMA_MIN_MEMORY_GIB, "safe_llama_ceiling_gib": round(max_safe, 2)})))
         try: safe_context = safe_context_for_ram_gib(host_gib)
         except ValueError: safe_context = 0
         try: configured_context = int(_env_value(env_text, "X1_DEEP_CONTEXT_TOKENS") or "0")
         except ValueError: configured_context = 0
         context_ok = safe_context > 0 and 1024 <= configured_context <= safe_context
-        checks.append(result("qwen_context_budget", "stable" if context_ok else "failed", json.dumps({
-            "configured_tokens": configured_context, "safe_ceiling_tokens": safe_context,
-        })))
+        checks.append(result("qwen_context_budget", "stable" if context_ok else "failed", json.dumps({"configured_tokens": configured_context, "safe_ceiling_tokens": safe_context})))
 
     if shutil.which("docker"):
         compose = cmd(["docker", "compose", "config"])
         if compose and compose.returncode == 0:
             checks.append(result("compose", "stable", "valid")); rendered = compose.stdout
-            app_section = _service_section(rendered, "app"); sandbox_section = _service_section(rendered, "sandbox-worker")
+            app_section = _service_section(rendered, "app"); sandbox_section = _service_section(rendered, "sandbox-worker"); document_section = _service_section(rendered, "document-worker")
             persistent = "/app/data" in app_section and str((ROOT / "data").resolve()) in app_section
             checks.append(result("app_data_volume", "stable" if persistent else "failed", "host bind /app/data configured" if persistent else "persistent host /app/data bind missing"))
-            worker_has_socket = "/var/run/docker.sock" in sandbox_section; app_has_socket = "/var/run/docker.sock" in app_section
-            checks.append(result("sandbox_privilege_boundary", "stable" if worker_has_socket and not app_has_socket else "failed", "Docker socket isolated to sandbox worker" if worker_has_socket and not app_has_socket else "Docker socket boundary is incorrect"))
-            llama_section = _service_section(rendered, "llama")
-            model_path_ok = f"/models/{DEFAULT_FILE}" in llama_section
+            worker_has_socket = "/var/run/docker.sock" in sandbox_section; app_has_socket = "/var/run/docker.sock" in app_section; document_has_socket = "/var/run/docker.sock" in document_section
+            checks.append(result("sandbox_privilege_boundary", "stable" if worker_has_socket and not app_has_socket and not document_has_socket else "failed", "Docker socket isolated to sandbox worker" if worker_has_socket and not app_has_socket and not document_has_socket else "Docker socket boundary is incorrect"))
+            document_isolated = bool(document_section and "/app/data" in document_section and "8091" in document_section)
+            checks.append(result("document_render_isolation", "stable" if document_isolated else "failed", "dedicated document worker with shared data volume" if document_isolated else "document worker service missing or misconfigured"))
+            llama_section = _service_section(rendered, "llama"); model_path_ok = f"/models/{DEFAULT_FILE}" in llama_section
             checks.append(result("compose_qwen_identity", "stable" if model_path_ok else "failed", DEFAULT_FILE if model_path_ok else "rendered llama model path mismatch"))
         else:
             checks.append(result("compose", "failed", ((compose.stderr if compose else "cannot run") or "invalid")[-800:]))
 
         memory_ok, memory_detail = _active_container_memory_budget(env_text, host_gib)
         checks.append(result("active_container_memory_budget", "stable" if memory_ok else "failed", json.dumps(memory_detail, ensure_ascii=False)))
-
-        current = cmd(["docker", "compose", "exec", "-T", "app", "alembic", "current"])
-        heads = cmd(["docker", "compose", "exec", "-T", "app", "alembic", "heads"])
-        current_tokens = _revision_tokens((current.stdout + current.stderr) if current else "")
-        head_tokens = _revision_tokens((heads.stdout + heads.stderr) if heads else "")
+        current = cmd(["docker", "compose", "exec", "-T", "app", "alembic", "current"]); heads = cmd(["docker", "compose", "exec", "-T", "app", "alembic", "heads"])
+        current_tokens = _revision_tokens((current.stdout + current.stderr) if current else ""); head_tokens = _revision_tokens((heads.stdout + heads.stderr) if heads else "")
         migrations_ok = bool(current and heads and current.returncode == 0 and heads.returncode == 0 and len(head_tokens) == 1 and current_tokens == head_tokens)
         checks.append(result("migrations", "stable" if migrations_ok else "failed", json.dumps({"current": sorted(current_tokens), "heads": sorted(head_tokens)}, ensure_ascii=False)))
-
         data_probe = cmd(["docker", "compose", "exec", "-T", "app", "python", "-c", "from pathlib import Path; p=Path('/app/data'); p.mkdir(parents=True,exist_ok=True); assert p.is_dir() and p.exists()"])
         checks.append(result("app_data_runtime", "stable" if data_probe and data_probe.returncode == 0 else "failed", "writable persistent data path" if data_probe and data_probe.returncode == 0 else "app data path unavailable"))
         search_probe = cmd(["docker", "compose", "exec", "-T", "searxng", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/search?q=x1-doctor&format=json',timeout=5).read()"])
         checks.append(result("internet_search", "stable" if search_probe and search_probe.returncode == 0 else "failed", "private SearXNG JSON search reachable" if search_probe and search_probe.returncode == 0 else "SearXNG unavailable"))
+        document_probe = cmd(["docker", "compose", "exec", "-T", "document-worker", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health',timeout=5).read()"])
+        checks.append(result("document_renderer", "stable" if document_probe and document_probe.returncode == 0 else "failed", "isolated LibreOffice/Poppler worker reachable" if document_probe and document_probe.returncode == 0 else "document render worker unavailable"))
         sandbox_probe = cmd(["docker", "compose", "exec", "-T", "app", "python", "-m", "scripts.sandbox_probe"], timeout=90)
         checks.append(result("closed_sandbox", "stable" if sandbox_probe and sandbox_probe.returncode == 0 else "failed", ((sandbox_probe.stdout+sandbox_probe.stderr) if sandbox_probe else "sandbox probe unavailable")[-1200:]))
 
