@@ -5,6 +5,7 @@ from pathlib import Path
 from starlette.requests import Request
 
 from app.services.auth import _expensive_public_request
+from app.services.git_collaboration import commit, ensure_local_repo, scan_secrets
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,6 +58,25 @@ def test_durable_job_enqueue_contains_race_safe_idempotency_boundary():
     assert "with db.begin_nested()" in source
     assert "except IntegrityError" in source
     assert "idempotency_key == idempotency_key" in source
+
+
+def test_secret_scan_catches_secret_removed_from_head_but_present_in_pending_history(tmp_path: Path):
+    ensure_local_repo(tmp_path, "main")
+    secret_file = tmp_path / "temporary-secret.txt"
+    secret_file.write_text("api_key=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890\n", "utf-8")
+    commit(tmp_path, "add temporary secret", ["temporary-secret.txt"])
+    secret_file.unlink()
+    commit(tmp_path, "remove temporary secret", ["temporary-secret.txt"])
+    findings = scan_secrets(tmp_path, [])
+    assert any(item.get("kind") == "github_token" and str(item.get("origin", "")).startswith("commit:") for item in findings)
+
+
+def test_static_contract_audit_requires_socket_only_on_runtime_proxy():
+    source = (ROOT / "scripts" / "static_contract_audit.py").read_text("utf-8")
+    assert "docker_socket_exposed_to_sandbox_worker" in source
+    assert "docker_runtime_proxy_missing_socket" in source
+    assert "text.count(socket) != 1" in source
+    assert "sandbox_worker_missing_docker_socket" not in source
 
 
 def test_real_public_user_journey_never_grants_itself_db_privileges():
