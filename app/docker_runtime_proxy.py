@@ -16,6 +16,11 @@ MAX_TIMEOUT = max(30, min(1900, int(os.environ.get("X1_DOCKER_PROXY_MAX_TIMEOUT_
 _MANAGED_NAME = re.compile(r"^x1-(?:preview|exec)-[a-f0-9]{8,40}$")
 _HEX_ID = re.compile(r"^[a-f0-9]{12,64}$")
 _MANAGED_LABELS = {"x1.sandbox.preview=true", "x1.sandbox.execution=true"}
+_RUN_STANDALONE = {"--rm", "-d", "--read-only", "--cap-drop=ALL", "--pull=never"}
+_RUN_VALUE_FLAGS = {
+    "--name", "--label", "--workdir", "--security-opt", "--pids-limit", "--memory", "--cpus",
+    "--network", "--user", "--mount", "--tmpfs", "--env",
+}
 
 
 class CommandRequest(BaseModel):
@@ -74,52 +79,76 @@ def _safe_mount(spec: str) -> bool:
     return True
 
 
+def _validate_run_option_grammar(argv: list[str], image_index: int) -> None:
+    index = 2
+    while index < image_index:
+        token = argv[index]
+        if token in _RUN_STANDALONE:
+            index += 1
+            continue
+        if token in _RUN_VALUE_FLAGS:
+            if index + 1 >= image_index:
+                raise HTTPException(status_code=422, detail=f"Docker run option {token} is missing a value")
+            value = argv[index + 1]
+            if value.startswith("--") and token not in {"--env", "--label", "--tmpfs", "--mount"}:
+                raise HTTPException(status_code=422, detail=f"Docker run option {token} has an invalid value")
+            index += 2
+            continue
+        raise HTTPException(status_code=422, detail=f"Docker run option is not allowed: {token}")
+
+
 def _validate_run(argv: list[str]) -> None:
-    forbidden_exact = {
-        "--privileged", "--pid", "--ipc", "--uts", "--userns", "--device", "--device-cgroup-rule",
-        "--volume", "-v", "--volumes-from", "--entrypoint", "--runtime", "--gpus", "--cgroupns",
-        "--security-opt=seccomp=unconfined", "--cap-add", "--add-host", "--dns", "--dns-search",
-    }
-    forbidden_prefixes = (
-        "--privileged=", "--pid=", "--ipc=", "--uts=", "--userns=", "--device=", "--device-cgroup-rule=",
-        "--volume=", "--volumes-from=", "--entrypoint=", "--runtime=", "--gpus=", "--cgroupns=", "--cap-add=",
-        "--add-host=", "--dns=", "--dns-search=", "--network=", "--security-opt=seccomp=unconfined",
-    )
-    if any(item in forbidden_exact or item.startswith(forbidden_prefixes) for item in argv):
-        raise HTTPException(status_code=422, detail="Forbidden Docker run option")
+    image_positions = [index for index, item in enumerate(argv) if item == RUNTIME_IMAGE]
+    if len(image_positions) != 1:
+        raise HTTPException(status_code=422, detail="Only pinned sandbox runtime image is allowed")
+    image_index = image_positions[0]
+    if image_index < 3 or image_index == len(argv) - 1:
+        raise HTTPException(status_code=422, detail="Sandbox runtime command is incomplete")
+    _validate_run_option_grammar(argv, image_index)
+
     if argv.count("--network") != 1:
         raise HTTPException(status_code=422, detail="Sandbox run must define exactly one network policy")
     network_index = argv.index("--network")
-    if network_index + 1 >= len(argv) or argv[network_index + 1] != "none":
+    if argv[network_index + 1] != "none":
         raise HTTPException(status_code=422, detail="Sandbox Docker network must be none")
+
     if argv.count("--security-opt") != 1:
         raise HTTPException(status_code=422, detail="Sandbox must define exactly one security-opt")
     security_index = argv.index("--security-opt")
-    if security_index + 1 >= len(argv) or argv[security_index + 1] != "no-new-privileges":
+    if argv[security_index + 1] != "no-new-privileges":
         raise HTTPException(status_code=422, detail="Sandbox no-new-privileges required")
+
     if argv.count("--read-only") != 1 or argv.count("--cap-drop=ALL") != 1:
         raise HTTPException(status_code=422, detail="Sandbox rootfs/capability hardening flags missing")
+
     if argv.count("--user") != 1:
         raise HTTPException(status_code=422, detail="Sandbox container must define exactly one user")
     user_index = argv.index("--user")
-    if user_index + 1 >= len(argv) or argv[user_index + 1] != "10001:10001":
+    if argv[user_index + 1] != "10001:10001":
         raise HTTPException(status_code=422, detail="Sandbox container user mismatch")
-    names = [argv[index + 1] for index, value in enumerate(argv[:-1]) if value == "--name"]
+
+    names = [argv[index + 1] for index, value in enumerate(argv[:image_index]) if value == "--name"]
     if len(names) != 1 or not _MANAGED_NAME.fullmatch(names[0]):
         raise HTTPException(status_code=422, detail="Managed sandbox container name required")
-    labels = [argv[index + 1] for index, value in enumerate(argv[:-1]) if value == "--label"]
+
+    labels = [argv[index + 1] for index, value in enumerate(argv[:image_index]) if value == "--label"]
     if not set(labels).intersection(_MANAGED_LABELS):
         raise HTTPException(status_code=422, detail="Managed sandbox label required")
     if any(label.startswith("x1.sandbox.") and label not in _MANAGED_LABELS and not label.startswith("x1.sandbox.expires_at=") for label in labels):
         raise HTTPException(status_code=422, detail="Unexpected sandbox label")
-    mounts = [argv[index + 1] for index, value in enumerate(argv[:-1]) if value == "--mount"]
+
+    mounts = [argv[index + 1] for index, value in enumerate(argv[:image_index]) if value == "--mount"]
     if len(mounts) != 2 or not all(_safe_mount(item) for item in mounts):
         raise HTTPException(status_code=422, detail="Sandbox mounts are outside approved host data root")
     if any("docker.sock" in item for item in argv):
         raise HTTPException(status_code=422, detail="Docker socket may not be mounted into sandbox")
-    image_positions = [index for index, item in enumerate(argv) if item == RUNTIME_IMAGE]
-    if len(image_positions) != 1:
-        raise HTTPException(status_code=422, detail="Only pinned sandbox runtime image is allowed")
+
+    if argv.count("--pids-limit") != 1 or argv.count("--memory") != 1 or argv.count("--cpus") != 1:
+        raise HTTPException(status_code=422, detail="Sandbox resource limits are mandatory")
+    if argv.count("--workdir") != 1 or argv[argv.index("--workdir") + 1] != "/workspace":
+        raise HTTPException(status_code=422, detail="Sandbox workdir must be /workspace")
+    if argv.count("--tmpfs") != 1 or not argv[argv.index("--tmpfs") + 1].startswith("/tmp:rw,noexec,nosuid,nodev,"):
+        raise HTTPException(status_code=422, detail="Sandbox tmpfs hardening mismatch")
 
 
 def _validate(argv: list[str]) -> None:
@@ -149,7 +178,7 @@ def _validate(argv: list[str]) -> None:
             raise HTTPException(status_code=422, detail="Only forced removal of managed sandbox containers is allowed")
         if command == "exec" and (len(argv) < 4 or argv[2] != refs[0] or argv[3].startswith("--")):
             raise HTTPException(status_code=422, detail="Invalid managed sandbox exec")
-        if command == "inspect" and not (len(argv) >= 4 and argv[2] == "-f" and argv[-1] == refs[0]):
+        if command == "inspect" and not (len(argv) >= 5 and argv[2] == "-f" and argv[-1] == refs[0]):
             raise HTTPException(status_code=422, detail="Only formatted inspection of managed sandbox containers is allowed")
         return
     raise HTTPException(status_code=422, detail="Docker command is not exposed by runtime proxy")
