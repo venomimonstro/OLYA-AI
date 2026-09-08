@@ -35,6 +35,7 @@ def upgrade() -> None:
         sa.Column("subagent_budget", sa.Integer(), nullable=False),
         sa.Column("max_parallel_subagents", sa.Integer(), nullable=False),
         sa.Column("subagent_calls_used", sa.Integer(), nullable=False),
+        sa.Column("active_subagents", sa.Integer(), nullable=False),
         sa.Column("last_heartbeat_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
