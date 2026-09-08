@@ -10,7 +10,8 @@ from app.models import BackgroundJob, ImageBlob, ImageGeneration, ImageVariant, 
 from app.schemas.images import ImageGenerationCreate, ImageGenerationRead
 from app.services.access import require_project_role
 from app.services.auth import get_current_user
-from app.services.image_runtime import ImageRuntimeError, ensure_disk_capacity, user_image_storage_bytes, validate_dimensions
+from app.services.image_runtime import ImageRuntimeError, ensure_disk_capacity, validate_dimensions
+from app.services.image_references import total_user_image_storage_bytes
 from app.services.image_policy import evaluate_prompt, published_policy
 from app.services.jobs import enqueue_job
 from app.services.safety import require_capability
@@ -37,7 +38,7 @@ def create_generation(payload:ImageGenerationCreate,request:Request,user:User=De
     if settings.image_backend=="disabled": raise HTTPException(status_code=503,detail="Local image generation is not configured")
     try: ensure_disk_capacity(settings.image_storage_path,min_free_bytes=settings.image_storage_min_free_bytes,min_free_percent=settings.image_storage_min_free_percent)
     except ImageRuntimeError as exc: raise HTTPException(status_code=507,detail=str(exc)) from exc
-    if user_image_storage_bytes(db,user.id)>=settings.image_user_storage_quota_bytes: raise HTTPException(status_code=507,detail="User image storage quota reached")
+    if total_user_image_storage_bytes(db,user.id)>=settings.image_user_storage_quota_bytes: raise HTTPException(status_code=507,detail="User image storage quota reached")
     active=db.scalar(select(func.count(ImageGeneration.id)).where(ImageGeneration.user_id==user.id,ImageGeneration.status.in_(["queued","generating"]))) or 0
     if int(active)>=settings.image_max_active_per_user: raise HTTPException(status_code=429,detail="Too many active image generations")
     seed=payload.seed if payload.seed is not None else secrets.randbelow(2**31)
@@ -46,11 +47,15 @@ def create_generation(payload:ImageGenerationCreate,request:Request,user:User=De
 
 @router.get("/status")
 def image_status(request:Request,user:User=Depends(get_current_user),db:Session=Depends(get_db))->dict:
-    settings=request.app.state.settings; active=int(db.scalar(select(func.count(ImageGeneration.id)).where(ImageGeneration.user_id==user.id,ImageGeneration.status.in_(["queued","generating"]))) or 0); used=user_image_storage_bytes(db,user.id); configured=settings.image_backend!="disabled"; quota_ok=used<settings.image_user_storage_quota_bytes; slot_ok=active<settings.image_max_active_per_user; reason=None
+    settings=request.app.state.settings; active=int(db.scalar(select(func.count(ImageGeneration.id)).where(ImageGeneration.user_id==user.id,ImageGeneration.status.in_(["queued","generating"]))) or 0); used=total_user_image_storage_bytes(db,user.id); configured=settings.image_backend!="disabled"; quota_ok=used<settings.image_user_storage_quota_bytes; slot_ok=active<settings.image_max_active_per_user; reason=None
     if not configured: reason="local_image_backend_not_configured"
     elif not quota_ok: reason="storage_quota_reached"
     elif not slot_ok: reason="active_generation_limit"
-    return {"available":configured and quota_ok and slot_ok,"reason":reason,"backend":settings.image_backend if configured else "disabled","active_generations":active,"max_active_generations":settings.image_max_active_per_user,"storage_used_bytes":used,"storage_quota_bytes":settings.image_user_storage_quota_bytes,"queue_waiting":int(getattr(request.app.state.governor,"waiting",0))}
+    edit_configured=str(settings.image_edit_backend).lower()!="disabled"
+    local_edit=edit_configured and bool(str(settings.image_edit_model_path).strip())
+    identity_edit=edit_configured and bool(str(settings.image_edit_identity_model_path).strip())
+    strict_qa=(not settings.image_edit_require_vision_qa) or bool(str(settings.image_vision_qa_url).strip())
+    return {"available":configured and quota_ok and slot_ok,"reason":reason,"backend":settings.image_backend if configured else "disabled","active_generations":active,"max_active_generations":settings.image_max_active_per_user,"storage_used_bytes":used,"storage_quota_bytes":settings.image_user_storage_quota_bytes,"queue_waiting":int(getattr(request.app.state.governor,"waiting",0)),"editing":{"available":edit_configured and quota_ok and slot_ok and strict_qa and (local_edit or identity_edit),"backend":settings.image_edit_backend if edit_configured else "disabled","local_object_edit":local_edit,"identity_recompose":identity_edit,"strict_quality_ready":strict_qa,"automatic_object_localization":bool(str(settings.image_vision_qa_url).strip()),"max_source_bytes":settings.image_edit_max_source_bytes,"max_source_dimension":settings.image_edit_max_source_dimension}}
 
 @router.get("/generations",response_model=list[ImageGenerationRead])
 def list_generations(user:User=Depends(get_current_user),db:Session=Depends(get_db))->list[ImageGeneration]: return list(db.scalars(select(ImageGeneration).where(ImageGeneration.user_id==user.id).order_by(ImageGeneration.created_at.desc()).limit(100)).all())
@@ -95,3 +100,8 @@ def image_feedback(generation_id:str,payload:ImageFeedbackWrite,user:User=Depend
     if fb is None: fb=ImageFeedback(generation_id=row.id,user_id=user.id,rating=payload.rating,allow_training=payload.allow_training); db.add(fb)
     else: fb.rating=payload.rating; fb.allow_training=payload.allow_training
     db.flush(); build_candidate(db,row,fb) if payload.allow_training else withdraw_training_consent(db,row.id,user.id); db.commit(); return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+# Mount reference-photo editing under the same /v1/images boundary so all image
+# requests inherit the existing authentication, overload and rollout protections.
+from app.api.routes.image_editing import router as image_editing_router
+router.include_router(image_editing_router)
