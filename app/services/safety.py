@@ -1,3 +1,66 @@
-# Restored losslessly from the canonical cumulative source.
-import base64 as _b64, zlib as _zlib
-exec(compile(_zlib.decompress(_b64.b85decode('c-oa!OK;RL5WeSESbIuPh(N$)CHI0VaYCq+6GE0ZnY0EcPHm^{w)DR<e#L28t%MI7d;EDG-#oV0Y9NgDvz;|CM#L~FZ3!PoWw{k<G)2)nOvf!)F+f73b4}dugBl^=dTuPAM1p;}y!>{4-@@c{1%$bgT(;LR91}=sRucmfTDyfbN)HM49gJ~W0)|ghGpG)vN%t4R{5ijc(bnXL0eu0+YSDVbMbSY|I38|+>3mUkhkepplNnzz(d`M|*QDhWKL{!8(F-c__H3({{3Ty8@_j*Yjp~ljg_j18Wum5;ZCiPeR(Hms4vlHK<l2;8>{cM4+?c4EyKB&pVQy_OO>~@4nqsI=;sX(lFs!`PGgPP1nTSS=to*s-QtsCL{8}jpVO9-d%CPU1c3~4S`snuy6z(U1xj;Hl-oz8*b^(Zf!3eWrIxP)YwO;EhPa69m#$LVtGMi3l4U^<8l;IV9nYoQaXD;6--HAtMJl3Cvn;9Ro%-sLhUyelkYJ0V!7e#9wAqWh>r^2B3cEgM2!oc%}EwPvFY*>qZMnAs$P?HWU7n1h7&x>Ya!Sx^4LLN!-1Tc!nZ2f6hMGjgG*da_~uQG7W8Y+9ugBQFBpEV`1+rmYQTCS81+ys$9ecIC{a0UdHW(f<U0W=Q-fA$P+MF(RGd(xrf(Fk&zZB1JJ#@5{U@eI<c5se!^GEd<KjFDf#DF{*wjzD$@UgG7>91XI(s|#NR%b?rG0C0<_MVyC4q>sLs3OOX2xA}S#4&9tHFvmmlcBLm~iKb1x8h0UEbl~^p`<e`5EI-wYxLVDWm_-`DD;*)3G=B3%$|+47{Es1zPZ_WxnXdK$P{opLc-NJl-9^&N*<8oL78~3Hihrc>QQZ')), __file__, "exec"), globals())
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models import RiskEvent, UserRestriction
+
+
+def active_restriction(db: Session, user_id: str, capability: str) -> UserRestriction | None:
+    now = datetime.now(timezone.utc)
+    rows = db.scalars(
+        select(UserRestriction).where(
+            UserRestriction.user_id == user_id,
+            UserRestriction.active.is_(True),
+            UserRestriction.capability.in_(["all", capability]),
+        )
+    ).all()
+    for row in rows:
+        expires = row.expires_at
+        if expires is None:
+            return row
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if expires > now:
+            return row
+    return None
+
+
+def require_capability(db: Session, user_id: str, capability: str) -> None:
+    row = active_restriction(db, user_id, capability)
+    if row is not None:
+        raise HTTPException(status_code=403, detail=f"Capability temporarily restricted: {capability}")
+
+
+def create_risk_event(
+    db: Session,
+    *,
+    user_id: str | None,
+    category: str,
+    severity: int,
+    rule_id: str,
+    summary: str,
+    evidence: dict | None = None,
+    project_id: str | None = None,
+    conversation_id: str | None = None,
+    message_id: str | None = None,
+    detected_by: str = "system",
+) -> RiskEvent:
+    event = RiskEvent(
+        user_id=user_id,
+        project_id=project_id,
+        conversation_id=conversation_id,
+        message_id=message_id,
+        category=category,
+        severity=max(1, min(5, severity)),
+        rule_id=rule_id,
+        summary=summary,
+        evidence=evidence or {},
+        detected_by=detected_by,
+    )
+    db.add(event)
+    db.flush()
+    return event
