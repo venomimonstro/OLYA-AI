@@ -46,6 +46,32 @@ def test_simple_transform_stays_single_inference_in_auto():
     assert plan.extra_inference_budget == 0
 
 
+def test_scope_lock_reserves_one_possible_repair_without_forcing_critic():
+    plan = plan_verification(
+        verification="auto",
+        user_text="Исправь только ошибки, ничего не добавляй:\n\nИсходный текст для правки.",
+        route_mode="fast",
+        requirements=[],
+        freshness_required=False,
+        verified_source_count=0,
+    )
+    assert "scope_lock" in plan.reasons
+    assert plan.extra_inference_budget >= 1
+    assert plan.run_critic is False
+
+
+def test_explicit_requirement_reserves_repair_compute_before_generation():
+    plan = plan_verification(
+        verification="auto",
+        user_text="Верни JSON",
+        route_mode="fast",
+        requirements=[AnswerRequirement(kind="valid_json")],
+        freshness_required=False,
+        verified_source_count=0,
+    )
+    assert plan.extra_inference_budget >= 1
+
+
 def test_high_risk_audit_runs_conditional_critic():
     plan = plan_verification(
         verification="auto",
