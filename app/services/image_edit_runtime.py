@@ -72,6 +72,12 @@ def _store_blob(db: Session, *, storage_root: str, content: bytes, media_type: s
         winner = db.scalar(select(ImageBlob).where(ImageBlob.sha256 == digest))
         if winner is None:
             raise
+        # The winner may use a different canonical path. Remove only the file we
+        # created for the losing insert so a race cannot leave an orphan per-edit
+        # copy behind.
+        winner_path = Path(winner.storage_path).resolve()
+        if path.exists() and path.resolve() != winner_path:
+            path.unlink(missing_ok=True)
         return winner
 
 
@@ -190,6 +196,13 @@ def execute_edit_generation(
         edit.status = "generating"
         edit.updated_at = utcnow()
 
+        # Identity/scene recomposition has no immutable outside-mask region. It is
+        # therefore never deliverable without a second local vision pass comparing
+        # the visible person reference with the result. This remains mandatory
+        # even if a client asks for non-strict QA.
+        if plan.mode == "identity_recompose" and edit.preserve_identity and vision is None:
+            raise ImageEditError("Identity-preserving scene editing requires local semantic vision QA")
+
         mask = None
         coverage = 1.0
         if plan.mode != "identity_recompose":
@@ -219,8 +232,6 @@ def execute_edit_generation(
             negative = compose_negative_prompt(policy, negative)
             attempt_seed = (int(generation.seed) + (attempt - 1) * 7919) % (2**31)
             if plan.mode == "identity_recompose":
-                if edit.strict_quality and require_vision_qa and vision is None:
-                    raise ImageEditError("Strict identity editing requires local semantic vision QA")
                 candidate = backend.edit_identity(
                     source=identity_source,
                     prompt=positive,
@@ -263,8 +274,13 @@ def execute_edit_generation(
                 continue
 
             if vision is not None:
+                # When an explicit identity reference exists, semantic QA compares
+                # that reference with the result. Otherwise the source itself is
+                # the identity reference, which is the common "here is my photo"
+                # workflow.
+                verification_source = identity_source if plan.mode == "identity_recompose" and edit.preserve_identity else source
                 semantic = vision.verify(
-                    source,
+                    verification_source,
                     candidate,
                     instruction=edit.instruction,
                     mode=plan.mode,
