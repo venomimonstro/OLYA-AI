@@ -35,6 +35,13 @@ REQUIRED_FILES = (
     "searxng/settings.yml",
 )
 
+# Two historical source files are exact transfer wrappers around canonical
+# compressed source. They are not a general permission to use exec(). Any new
+# wrapper or any change to their narrow shape is a release-blocking finding.
+CANONICAL_EXEC_WRAPPERS = {
+    "app/services/engineering_execution.py",
+    "app/services/image_runtime.py",
+}
 ALLOWED_SETTINGS_ATTRIBUTES = {"model_dump", "model_copy", "model_fields"}
 
 
@@ -95,7 +102,7 @@ def _audit_python(path: Path, settings_fields: set[str]) -> list[dict[str, Any]]
         name = _call_name(node.func)
         if name in {"eval", "builtins.eval", "os.system", "os.popen", "tempfile.mktemp"}:
             findings.append(issue("dangerous_execution_primitive", rel, node.lineno, name))
-        if name in {"exec", "builtins.exec"} and rel != "app/models.py":
+        if name in {"exec", "builtins.exec"} and rel != "app/models.py" and rel not in CANONICAL_EXEC_WRAPPERS:
             findings.append(issue("unexpected_exec", rel, node.lineno, name))
         if name in {"pickle.loads", "pickle.load", "marshal.loads", "marshal.load"}:
             findings.append(issue("unsafe_deserialization", rel, node.lineno, name))
@@ -210,6 +217,16 @@ def _audit_model_contract() -> list[dict[str, Any]]:
     return findings
 
 
+def _audit_canonical_exec_wrappers() -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    marker = "# Restored losslessly from the canonical cumulative source."
+    for rel in sorted(CANONICAL_EXEC_WRAPPERS):
+        text = (ROOT / rel).read_text("utf-8", errors="replace")
+        if not text.startswith(marker) or text.count("exec(") != 1 or "b85decode" not in text or "zlib" not in text:
+            findings.append(issue("canonical_exec_wrapper_contract_changed", rel))
+    return findings
+
+
 def main() -> int:
     findings: list[dict[str, Any]] = []
     for rel in REQUIRED_FILES:
@@ -224,13 +241,14 @@ def main() -> int:
     findings.extend(_audit_versions())
     findings.extend(_audit_compose())
     findings.extend(_audit_model_contract())
+    findings.extend(_audit_canonical_exec_wrappers())
 
     models = (ROOT / "app/models.py").read_text("utf-8", errors="replace")
     if models.count("exec(") != 1 or "_models_impl.py.gz" not in models:
         findings.append(issue("canonical_model_wrapper_contract_changed", "app/models.py"))
 
     payload = {
-        "format": "x1-static-contract-v3",
+        "format": "x1-static-contract-v4",
         "status": "passed" if not findings else "failed",
         "settings_fields": len(settings_fields),
         "findings": findings,
