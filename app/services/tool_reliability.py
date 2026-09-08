@@ -188,44 +188,56 @@ class ToolSession:
         self.history_size = max(8, min(int(self.history_size), 64))
         self._recent_tools = deque(maxlen=self.history_size)
 
+    def _cached_result(self, call: ToolCall, fingerprint: str) -> ToolResult | None:
+        cached = self._cache.get(fingerprint)
+        if cached is None:
+            return None
+        return ToolResult(
+            call_id=call.call_id,
+            name=cached.name,
+            status="cached",
+            output=cached.output,
+            error_code=cached.error_code,
+            attempts=0,
+            duration_ms=0,
+            fingerprint=fingerprint,
+            truncated=cached.truncated,
+        )
+
     def _admit(self, call: ToolCall, spec: ToolSpec, fingerprint: str) -> ToolResult | None:
         if not call.call_id or len(call.call_id) > 128 or not re.fullmatch(r"[A-Za-z0-9_.:-]+", call.call_id):
             raise ToolValidationError("Invalid tool_call_id")
 
         prior_fp = self._call_ids.get(call.call_id)
-        if prior_fp is not None:
-            if prior_fp != fingerprint:
-                raise ToolValidationError("tool_call_id was reused with different arguments")
-            cached = self._cache.get(fingerprint)
-            if cached is not None:
-                return ToolResult(
-                    call_id=call.call_id,
-                    name=cached.name,
-                    status="cached",
-                    output=cached.output,
-                    error_code=cached.error_code,
-                    attempts=0,
-                    duration_ms=0,
-                    fingerprint=fingerprint,
-                    truncated=cached.truncated,
-                )
+        if prior_fp is not None and prior_fp != fingerprint:
+            raise ToolValidationError("tool_call_id was reused with different arguments")
 
-        if self.calls_used >= self.max_calls:
-            raise ToolBudgetError("Tool call budget exhausted")
-        if self._fingerprints[fingerprint] >= self.max_same_call:
+        # Count requests, not just physical executions. Identical replays are
+        # idempotently served from cache, but repeated requests still prove the
+        # agent is not making progress and eventually trip the loop guard.
+        self._fingerprints[fingerprint] += 1
+        if self._fingerprints[fingerprint] > self.max_same_call:
             raise ToolLoopError("The same tool call was repeated too many times")
+
         if len(self._recent_tools) >= self.max_consecutive_same_tool:
             tail = list(self._recent_tools)[-self.max_consecutive_same_tool :]
             if tail and all(name == spec.name for name in tail):
                 raise ToolLoopError("The agent is repeatedly calling the same tool without progress")
+
+        self._call_ids[call.call_id] = fingerprint
+        self._recent_tools.append(spec.name)
+
+        cached = self._cached_result(call, fingerprint)
+        if cached is not None:
+            return cached
+
+        if self.calls_used >= self.max_calls:
+            raise ToolBudgetError("Tool call budget exhausted")
         return None
 
     async def _invoke(self, spec: ToolSpec, args: BaseModel) -> Any:
         if inspect.iscoroutinefunction(spec.handler):
             return await asyncio.wait_for(spec.handler(args), timeout=spec.timeout_seconds)
-        # Run blocking local handlers away from the event loop. wait_for bounds
-        # the caller's wait; handlers themselves must still use bounded OS/network
-        # primitives because Python cannot force-kill an arbitrary worker thread.
         return await asyncio.wait_for(asyncio.to_thread(spec.handler, args), timeout=spec.timeout_seconds)
 
     async def execute(self, call: ToolCall) -> ToolResult:
@@ -245,10 +257,6 @@ class ToolSession:
             return cached
 
         self.calls_used += 1
-        self._fingerprints[fingerprint] += 1
-        self._recent_tools.append(spec.name)
-        self._call_ids[call.call_id] = fingerprint
-
         started = time.perf_counter()
         attempts = 0
         last_error: Exception | None = None
@@ -270,6 +278,9 @@ class ToolSession:
                     fingerprint=fingerprint,
                     truncated=truncated,
                 )
+                # Fingerprint cache applies equally to read and successful write
+                # tools. A model retry with a new call id therefore cannot replay
+                # an already completed side effect.
                 self._cache[fingerprint] = result
                 return result
             except asyncio.TimeoutError as exc:
