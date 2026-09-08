@@ -6,6 +6,7 @@ from typing import Iterable
 
 from app.schemas.chat import AnswerRequirement
 from app.services.quality import DeterministicAudit
+from app.services.scope_lock import compile_scope_contract
 
 
 _HIGH_RISK = re.compile(
@@ -34,15 +35,17 @@ class VerificationPlan:
 
     @property
     def extra_inference_budget(self) -> int:
-        # One possible deterministic repair plus one critic plus one possible
-        # critic-driven repair are never all needed in Auto. The chat pipeline
-        # enforces an overall two-extra-call cap after the primary generation.
         if self.mode == "off":
             return 0
         if self.mode == "strict":
             return 2
         if self.repair_deterministic or self.run_critic:
             return 2
+        # Formal requirements/Scope Lock may need one deterministic repair even
+        # when the primary answer later turns out clean. Reserve one call rather
+        # than making quota accounting optimistic.
+        if "explicit_requirements" in self.reasons or "scope_lock" in self.reasons:
+            return 1
         return 0
 
 
@@ -70,6 +73,7 @@ def plan_verification(
     score = 0
     requirement_count = sum(1 for _ in requirements)
     failed = _failed_keys(deterministic)
+    scope_active = compile_scope_contract(user_text).active
 
     if route_mode == "deep":
         score += 2
@@ -82,6 +86,9 @@ def plan_verification(
         reasons.append("explicit_requirements")
     if requirement_count >= 3:
         score += 1
+    if scope_active:
+        score += 1
+        reasons.append("scope_lock")
 
     if freshness_required:
         score += 2
@@ -122,9 +129,6 @@ def plan_verification(
             critic_max_tokens=800,
         )
 
-    # Auto: deterministic violations are concrete defects and may be repaired
-    # without paying for a critic first. Semantic critic is reserved for elevated
-    # risk after deterministic gates are clean.
     repair_deterministic = bool(failed)
     run_critic = not repair_deterministic and score >= 3
     return VerificationPlan(
@@ -148,11 +152,7 @@ def critic_has_repairable_issue(critic: dict | None) -> bool:
 
 
 def audit_with_critic_issues(audit: DeterministicAudit, critic: dict | None) -> DeterministicAudit:
-    """Convert critic major/critical findings into explicit repair targets.
-
-    This keeps AnswerQualityEngine.repair_messages as the single repair prompt
-    builder and avoids teaching the chat route a second prompt format.
-    """
+    """Convert critic major/critical findings into explicit repair targets."""
     if not critic_has_repairable_issue(critic):
         return audit
     checks = list(audit.checks)
