@@ -61,7 +61,6 @@ ram_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
 disk_gb=$(df -Pk "$ROOT" | awk 'NR==2 {print int($4/1024/1024)}')
 cores=$(nproc)
 
-# Read the production model and host envelope from one canonical manifest.
 readarray -t policy < <(PYTHONPATH="$ROOT" python3 - "$ram_kb" <<'PY'
 import sys
 from scripts.download_model import (
@@ -118,16 +117,17 @@ db_password=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
 admin_token=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
 runtime_secret=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
 sandbox_token=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
+document_token=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
 host_data_root="$(realpath "$ROOT/data")"
 
-python3 - "$new_env" "$db_password" "$admin_token" "$runtime_secret" "$sandbox_token" "$host_data_root" "$safe_context" "$threads" "$llama_memory_gb" "$llama_min_gib" "$model_name" "$model_file" <<'PY'
+python3 - "$new_env" "$db_password" "$admin_token" "$runtime_secret" "$sandbox_token" "$document_token" "$host_data_root" "$safe_context" "$threads" "$llama_memory_gb" "$llama_min_gib" "$model_name" "$model_file" <<'PY'
 from pathlib import Path
 import re
 import sys
 
 path=Path('.env'); text=path.read_text('utf-8')
-new_env=bool(int(sys.argv[1])); generated_db,generated_admin,generated_runtime,generated_sandbox,host_data=sys.argv[2:7]
-safe_context=int(sys.argv[7]); threads=int(sys.argv[8]); llama_memory_gb=int(sys.argv[9]); llama_min_gib=int(sys.argv[10]); model_name=sys.argv[11]; model_file=sys.argv[12]
+new_env=bool(int(sys.argv[1])); generated_db,generated_admin,generated_runtime,generated_sandbox,generated_document,host_data=sys.argv[2:8]
+safe_context=int(sys.argv[8]); threads=int(sys.argv[9]); llama_memory_gb=int(sys.argv[10]); llama_min_gib=int(sys.argv[11]); model_name=sys.argv[12]; model_file=sys.argv[13]
 lines=text.splitlines(); values={}
 for line in lines:
     if line and not line.lstrip().startswith('#') and '=' in line:
@@ -162,28 +162,25 @@ ensure_secret('POSTGRES_PASSWORD',generated_db,{'change-me-db'}); db=values['POS
 ensure_secret('X1_ADMIN_BOOTSTRAP_TOKEN',generated_admin,{'change-me'})
 ensure_secret('X1_PROJECT_RUNTIME_SECRET_KEY',generated_runtime,{'change-me-runtime-secret'})
 ensure_secret('X1_PROJECT_SANDBOX_WORKER_TOKEN',generated_sandbox,{'change-me-sandbox-worker'})
+ensure_secret('X1_DOCUMENT_RENDER_WORKER_TOKEN',generated_document,{'change-me-document-worker'})
 
-# Model identity is an installation contract, not a user-tunable setting. Keeping
-# name and filename in sync prevents a half-migrated deployment.
 setv('X1_LLAMA_MODEL_NAME',model_name)
 setv('X1_LLAMA_MODEL_FILE',model_file)
 setv('X1_LLAMA_BASE_URL','http://llama:8080')
 setv('X1_PROJECT_SANDBOX_BACKEND','remote'); setv('X1_PROJECT_SANDBOX_IMAGE','x1-sandbox:0.39'); setv('X1_PROJECT_SANDBOX_WORKER_URL','http://sandbox-worker:8090')
+setv('X1_DOCUMENT_RENDER_BACKEND','remote'); setv('X1_DOCUMENT_RENDER_WORKER_URL','http://document-worker:8091')
+if not values.get('X1_DOCUMENT_RASTER_DPI'): setv('X1_DOCUMENT_RASTER_DPI','110')
+if not values.get('X1_DOCUMENT_QA_MAX_REPAIRS'): setv('X1_DOCUMENT_QA_MAX_REPAIRS','1')
 if values.get('X1_SEARCH_PROVIDER','') in {'','disabled'}: setv('X1_SEARCH_PROVIDER','searxng')
 if values.get('X1_SEARCH_PROVIDERS','') in {'','disabled'}: setv('X1_SEARCH_PROVIDERS','searxng')
 setv('X1_SEARXNG_BASE_URL','http://searxng:8080')
 setv('X1_PUBLIC_LAUNCH_ENFORCE_EXPOSURE','true')
 
-# The 8K/32-GB class profile deliberately uses the minimum validated llama cap
-# instead of consuming every technically available GiB. This leaves useful
-# headroom for PostgreSQL, API, search, page cache and cancellation cleanup.
 target_llama_memory_gb = llama_min_gib if safe_context <= 8192 else llama_memory_gb
 current_memory=memory_gb(values.get('X1_LLAMA_MEMORY_LIMIT'))
 if current_memory is None or current_memory > target_llama_memory_gb or current_memory < llama_min_gib:
     setv('X1_LLAMA_MEMORY_LIMIT',f'{target_llama_memory_gb}g')
 
-# llama.cpp boots with DEEP_CONTEXT_TOKENS. Existing installations are clamped
-# down when moved to a smaller host or when a new model needs a safer envelope.
 if new_env:
     deep_context=safe_context
     normal_context=min(8192,deep_context)
@@ -193,9 +190,6 @@ else:
 setv('X1_DEEP_CONTEXT_TOKENS',deep_context)
 setv('X1_MAX_CONTEXT_TOKENS',min(normal_context,deep_context))
 
-# Repair pre-Sprint42 installations whose 2-GiB sandbox envelope was reasonable
-# for the old model but leaves too little operational margin on a 32-GiB Qwen3.6
-# node. Larger 48/64+ hosts keep their explicitly configured higher envelope.
 if safe_context <= 8192:
     sandbox_mb=bounded_int('X1_SANDBOX_MAX_MEMORY_MB',1024,256,1024)
     runtime_max_mb=bounded_int('X1_PROJECT_RUNTIME_MAX_MEMORY_MB',1024,256,1024)
@@ -227,21 +221,23 @@ if [ "$WITH_INFERENCE" -eq 1 ]; then docker compose --profile inference pull lla
 info "Building hardened closed-development sandbox runtime"
 docker build --pull -f Dockerfile.sandbox-runtime -t x1-sandbox:0.39 .
 info "Validating Compose configuration"; docker compose config --quiet
-info "Building X1 services"; docker compose build app sandbox-worker
+info "Building X1 services"; docker compose build app sandbox-worker document-worker
 
-info "Starting database, private search and sandbox worker"
-docker compose up -d db searxng sandbox-worker
+info "Starting database, private search, sandbox worker and document worker"
+docker compose up -d db searxng sandbox-worker document-worker
 for _ in $(seq 1 90); do
-  db_ok=0; search_ok=0; sandbox_ok=0
+  db_ok=0; search_ok=0; sandbox_ok=0; document_ok=0
   docker compose exec -T db pg_isready -U x1 -d x1 >/dev/null 2>&1 && db_ok=1
   docker compose exec -T searxng python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/search?q=x1&format=json',timeout=5).read()" >/dev/null 2>&1 && search_ok=1
   docker compose exec -T sandbox-worker python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health',timeout=3).read()" >/dev/null 2>&1 && sandbox_ok=1
-  [ "$db_ok$search_ok$sandbox_ok" = "111" ] && break
+  docker compose exec -T document-worker python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health',timeout=3).read()" >/dev/null 2>&1 && document_ok=1
+  [ "$db_ok$search_ok$sandbox_ok$document_ok" = "1111" ] && break
   sleep 2
 done
 docker compose exec -T db pg_isready -U x1 -d x1 >/dev/null 2>&1 || fail "PostgreSQL did not become ready"
 docker compose exec -T searxng python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/search?q=x1&format=json',timeout=5).read()" >/dev/null 2>&1 || fail "SearXNG did not become ready"
 docker compose exec -T sandbox-worker python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health',timeout=3).read()" >/dev/null 2>&1 || fail "Sandbox worker did not become ready"
+docker compose exec -T document-worker python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health',timeout=3).read()" >/dev/null 2>&1 || fail "Document worker did not become ready"
 
 info "Applying database migrations"; docker compose run --rm --no-deps app alembic upgrade head
 if [ "$WITH_INFERENCE" -eq 1 ]; then info "Starting Qwen3.6 llama.cpp and X1"; docker compose --profile inference up -d llama app
@@ -281,7 +277,7 @@ if [ "$WITH_INFERENCE" -eq 1 ]; then
   info "Running production release gate, user journey and chaos simulations"
   gate_args=(--runtime --live-inference --user-journey --chaos); [ "$SKIP_E2E" -eq 1 ] && gate_args=(--runtime --live-inference)
   set +e; python3 scripts/release_gate.py "${gate_args[@]}"; gate_status=$?; set -e
-  if [ "$gate_status" -ne 0 ]; then docker compose ps >&2 || true; docker compose logs --tail=120 app llama searxng sandbox-worker >&2 || true; fail "Production release gate failed; inspect backups/release-gate-latest.json"; fi
+  if [ "$gate_status" -ne 0 ]; then docker compose ps >&2 || true; docker compose logs --tail=120 app llama searxng sandbox-worker document-worker >&2 || true; fail "Production release gate failed; inspect backups/release-gate-latest.json"; fi
 else
   info "Creating and restore-testing initial backup"; backup_path=$(bash scripts/backup.sh); bash scripts/restore_drill.sh "$backup_path" >/dev/null
 fi
