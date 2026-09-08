@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     document_max_pages: int = 300
     document_max_concurrent_renders: int = 1
     document_render_queue_timeout_seconds: float = 5.0
+    document_render_backend: str = "remote"
+    document_render_worker_url: str = "http://document-worker:8091"
+    document_render_worker_token: str = "change-me-document-worker"
+    document_raster_dpi: int = 110
+    document_qa_max_repairs: int = 1
 
     database_auto_create_schema: bool = False
     default_monthly_compute_seconds: int = 600
