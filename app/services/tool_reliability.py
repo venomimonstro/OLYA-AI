@@ -185,6 +185,7 @@ class ToolSession:
     _cache: dict[str, ToolResult] = field(default_factory=dict)
     _call_ids: dict[str, str] = field(default_factory=dict)
     _blocked_fingerprints: set[str] = field(default_factory=set)
+    _write_state_uncertain: bool = False
 
     def __post_init__(self) -> None:
         self.max_calls = max(1, min(int(self.max_calls), 64))
@@ -219,6 +220,8 @@ class ToolSession:
 
         if fingerprint in self._blocked_fingerprints:
             raise ToolReplayBlockedError("Previous side-effect outcome is uncertain; replay is blocked")
+        if spec.effect == "write" and self._write_state_uncertain:
+            raise ToolReplayBlockedError("A previous write has uncertain outcome; further writes require reconciliation")
 
         self._fingerprints[fingerprint] += 1
         if self._fingerprints[fingerprint] > self.max_same_call:
@@ -289,6 +292,7 @@ class ToolSession:
                 last_error = exc
                 if spec.effect == "write":
                     self._blocked_fingerprints.add(fingerprint)
+                    self._write_state_uncertain = True
                     raise ToolTimeoutError("Tool timed out; side-effecting call outcome is uncertain and replay is blocked") from exc
                 if attempts >= max_attempts:
                     raise ToolTimeoutError("Tool timed out after bounded retries") from exc
@@ -298,6 +302,7 @@ class ToolSession:
                 last_error = exc
                 if spec.effect == "write":
                     self._blocked_fingerprints.add(fingerprint)
+                    self._write_state_uncertain = True
                     raise ToolExecutionError(
                         f"Tool execution failed with uncertain side-effect outcome: {exc.__class__.__name__}"
                     ) from exc
