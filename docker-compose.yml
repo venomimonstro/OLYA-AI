@@ -48,10 +48,15 @@ services:
     environment:
       X1_DOCKER_RUNTIME_PROXY_TOKEN: ${X1_PROJECT_SANDBOX_WORKER_TOKEN:?Set X1_PROJECT_SANDBOX_WORKER_TOKEN in .env}
       X1_HOST_DATA_ROOT: ${X1_HOST_DATA_ROOT:?Set X1_HOST_DATA_ROOT in .env}
+      X1_DOCKER_PROXY_DATA_MIRROR_ROOT: /x1-host-data
       X1_SANDBOX_RUNTIME_IMAGE: ${X1_PROJECT_SANDBOX_IMAGE:-x1-sandbox:0.39}
       X1_DOCKER_PROXY_MAX_TIMEOUT_SECONDS: 1830
+      X1_DOCKER_PROXY_MAX_MEMORY_MB: ${X1_SANDBOX_MAX_MEMORY_MB:-2048}
+      X1_DOCKER_PROXY_MAX_CPU: ${X1_SANDBOX_MAX_CPU:-1.0}
+      X1_DOCKER_PROXY_MAX_PIDS: ${X1_SANDBOX_MAX_PIDS:-128}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/x1-host-data:ro
     expose:
       - "8092"
     read_only: true
