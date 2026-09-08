@@ -114,7 +114,15 @@ def _finish_qa(
     return revision
 
 
-def _reset_busy_qa(db: Session, user: User, *, artifact_id: str, revision_number: int, source_docx_sha: str) -> None:
+def _reset_busy_qa(
+    db: Session,
+    user: User,
+    *,
+    artifact_id: str,
+    revision_number: int,
+    source_docx_sha: str,
+    repaired_docx_sha: str | None = None,
+) -> None:
     try:
         artifact = _artifact_access(db, user, artifact_id, "viewer")
         artifact = _artifact_write_access(db, user, artifact)
@@ -123,6 +131,8 @@ def _reset_busy_qa(db: Session, user: User, *, artifact_id: str, revision_number
         revision = _revision(db, artifact, revision_number)
         if revision.docx_sha256 != source_docx_sha:
             db.rollback(); return
+        if repaired_docx_sha and repaired_docx_sha != source_docx_sha:
+            revision.docx_sha256 = repaired_docx_sha
         if revision.qa_status == "running":
             revision.qa_status = "pending"
             artifact.status = "draft"
@@ -195,7 +205,6 @@ def revise_document(artifact_id: str, payload: DocumentSpec, request: Request, u
 
 @router.post("/{artifact_id}/qa", response_model=DocumentRevisionRead)
 def run_document_qa(artifact_id: str, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> DocumentRevision:
-    # Phase 1: short transaction. Claim this revision for QA and snapshot its immutable inputs.
     artifact = _artifact_access(db, user, artifact_id, "viewer")
     artifact = _artifact_write_access(db, user, artifact)
     revision = _revision(db, artifact)
@@ -215,7 +224,7 @@ def run_document_qa(artifact_id: str, request: Request, user: User = Depends(get
     spec = dict(revision.spec or {})
     revision.qa_status = "running"; artifact.status = "qa_running"
     _record_gate(db, revision, "qa_started", {"status": "running", "source_docx_sha256": source_docx_sha})
-    db.commit()  # releases FOR UPDATE before LibreOffice/Poppler work
+    db.commit()
 
     events: list[dict] = []
     structural = structural_qa(docx, spec)
@@ -227,10 +236,7 @@ def run_document_qa(artifact_id: str, request: Request, user: User = Depends(get
     settings = request.app.state.settings
     root = Path(settings.document_storage_path).resolve()
     rev_dir = root / artifact_id / f"r{revision_number}"
-    data_root = Path(getattr(settings, "data_root", "./data")).resolve() if hasattr(settings, "data_root") else root.parent
-    # document_storage_path normally resolves to <data_root>/documents; derive the shared root safely.
-    if root.name == "documents":
-        data_root = root.parent
+    data_root = root.parent if root.name == "documents" else Path("./data").resolve()
     repairs: list[dict] = []
     pdf: Path | None = None
     rendered: dict = {"status": "failed", "issues": [{"code": "render_not_started"}]}
@@ -263,7 +269,8 @@ def run_document_qa(artifact_id: str, request: Request, user: User = Depends(get
             if not repair.get("applied"):
                 break
     except DocumentBusyError as exc:
-        _reset_busy_qa(db, user, artifact_id=artifact_id, revision_number=revision_number, source_docx_sha=source_docx_sha)
+        repaired_sha = sha256_file(docx) if docx.is_file() else None
+        _reset_busy_qa(db, user, artifact_id=artifact_id, revision_number=revision_number, source_docx_sha=source_docx_sha, repaired_docx_sha=repaired_sha)
         raise HTTPException(status_code=503, detail="Document renderer is busy; retry shortly", headers={"Retry-After": "3"}) from exc
     except DocumentQAError as exc:
         rendered = {"status": "failed", "issues": [{"code": "render_failed", "message": str(exc)}]}
