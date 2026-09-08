@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
-from app.models import ComputeBreakdownEvent, ImageGeneration, ProjectSandboxRun, ResearchRun, UsageEvent, User
+from app.models import ComputeBreakdownEvent, ImageGeneration, ProjectSandboxRun, ResearchRun, User
 from app.services.commerce import measured_user_resources, price_resource_ms
 from app.services.quota import compute_seconds_used, get_or_create_quota, month_start
 
@@ -89,6 +89,7 @@ def budget_snapshot(
     *,
     projected_mode: str | None = None,
     projected_verification_extra: int = 0,
+    include_details: bool = True,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     current = now or datetime.now(timezone.utc)
@@ -98,33 +99,6 @@ def budget_snapshot(
     limit_seconds = max(1, int(quota.monthly_compute_seconds_limit))
     remaining_seconds = max(0, limit_seconds - used_seconds)
     utilization = _pct(used_seconds, limit_seconds)
-    measured = measured_user_resources(db, user.id, settings, current)
-    chat = _chat_breakdown(db, user.id, since)
-
-    research_runs = int(
-        db.scalar(
-            select(func.count()).select_from(ResearchRun).where(
-                ResearchRun.user_id == user.id,
-                ResearchRun.created_at >= since,
-            )
-        ) or 0
-    )
-    images = int(
-        db.scalar(
-            select(func.count()).select_from(ImageGeneration).where(
-                ImageGeneration.user_id == user.id,
-                ImageGeneration.created_at >= since,
-            )
-        ) or 0
-    )
-    sandboxes = int(
-        db.scalar(
-            select(func.count()).select_from(ProjectSandboxRun).where(
-                ProjectSandboxRun.created_by == user.id,
-                ProjectSandboxRun.created_at >= since,
-            )
-        ) or 0
-    )
 
     projection = None
     if projected_mode:
@@ -139,8 +113,7 @@ def budget_snapshot(
             "remaining_after_reserve_seconds": max(0, remaining_seconds - reserve_seconds),
         }
 
-    resource_cost = measured.get("cost_microunits", {})
-    return {
+    result: dict[str, Any] = {
         "month": since.strftime("%Y-%m"),
         "plan": quota.plan,
         "compute": {
@@ -151,21 +124,26 @@ def budget_snapshot(
             "warning": warning_for(utilization),
         },
         "projection": projection,
-        "chat": chat,
-        "resources": {
-            "cpu_ms": int(measured.get("usage_ms", {}).get("cpu", 0)),
-            "image_worker_ms": int(measured.get("usage_ms", {}).get("image_worker", 0)),
-            "sandbox_ms": int(measured.get("usage_ms", {}).get("sandbox", 0)),
-            "gpu_ms": int(measured.get("usage_ms", {}).get("gpu", 0)),
-            "cost_microunits": resource_cost,
-            "total_cost_microunits": int(measured.get("total_cost_microunits", 0)),
-        },
-        "activity": {
-            "research_runs": research_runs,
-            "image_generations": images,
-            "sandbox_runs": sandboxes,
-        },
     }
+    if not include_details:
+        return result
+
+    measured = measured_user_resources(db, user.id, settings, current)
+    result["chat"] = _chat_breakdown(db, user.id, since)
+    result["resources"] = {
+        "cpu_ms": int(measured.get("usage_ms", {}).get("cpu", 0)),
+        "image_worker_ms": int(measured.get("usage_ms", {}).get("image_worker", 0)),
+        "sandbox_ms": int(measured.get("usage_ms", {}).get("sandbox", 0)),
+        "gpu_ms": int(measured.get("usage_ms", {}).get("gpu", 0)),
+        "cost_microunits": measured.get("cost_microunits", {}),
+        "total_cost_microunits": int(measured.get("total_cost_microunits", 0)),
+    }
+    result["activity"] = {
+        "research_runs": int(db.scalar(select(func.count()).select_from(ResearchRun).where(ResearchRun.user_id == user.id, ResearchRun.created_at >= since)) or 0),
+        "image_generations": int(db.scalar(select(func.count()).select_from(ImageGeneration).where(ImageGeneration.user_id == user.id, ImageGeneration.created_at >= since)) or 0),
+        "sandbox_runs": int(db.scalar(select(func.count()).select_from(ProjectSandboxRun).where(ProjectSandboxRun.created_by == user.id, ProjectSandboxRun.created_at >= since)) or 0),
+    }
+    return result
 
 
 def record_compute_breakdown(
@@ -190,8 +168,6 @@ def record_compute_breakdown(
     total_inference_ms = max(0, int(total_inference_ms))
     accounted = primary_ms + critic_ms + repair_ms
     if accounted > total_inference_ms:
-        # Independent timers can be a few ms wider than the outer timer. Keep the
-        # canonical total authoritative while preserving the component ratios.
         overflow = accounted - total_inference_ms
         primary_ms = max(0, primary_ms - overflow)
     wasted_ms = 0 if success else total_inference_ms
