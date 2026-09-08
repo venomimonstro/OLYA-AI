@@ -142,6 +142,17 @@ def store_reference(
         max_dimension=int(settings.image_edit_max_source_dimension),
         max_pixels=int(settings.image_edit_max_source_pixels),
     )
+    if kind == "mask":
+        if not source_reference_id:
+            raise ImageReferenceError("Mask requires a source reference")
+        source = db.get(ImageReference, source_reference_id)
+        if source is None or source.status != "ready" or source.kind == "mask":
+            raise ImageReferenceError("Mask source reference is invalid")
+        source_blob = db.get(ImageBlob, source.blob_id)
+        if source_blob is None:
+            raise ImageReferenceError("Mask source blob is unavailable")
+        if (normalized.width, normalized.height) != (source_blob.width, source_blob.height):
+            raise ImageReferenceError("Mask dimensions must exactly match the source image")
     if total_user_image_storage_bytes(db, user.id) + len(normalized.content) > int(settings.image_user_storage_quota_bytes):
         raise ImageReferenceError("User image storage quota reached")
     ensure_disk_capacity(
