@@ -94,7 +94,11 @@ _RULES: tuple[tuple[FreshnessCategory, re.Pattern[str], int, int, str], ...] = (
     ),
     (
         "official_role",
-        re.compile(r"\b(?:кто\s+(?:сейчас\s+)?(?:президент|премьер|министр|губернатор|мэр|директор|гендиректор|ceo|cto|cfo)|нынешн\w*\s+(?:президент|директор|ceo)|current\s+(?:president|prime\s+minister|ceo|director))\b", re.IGNORECASE),
+        re.compile(
+            r"\b(?:кто\s+(?:сейчас\s+)?(?:(?:генеральный\s+)?директор|гендиректор|президент|премьер(?:-министр)?|министр|губернатор|мэр|ceo|cto|cfo)|"
+            r"нынешн\w*\s+(?:(?:генеральный\s+)?директор|президент|ceo)|current\s+(?:president|prime\s+minister|ceo|director))\b",
+            re.IGNORECASE,
+        ),
         6 * 60 * 60,
         2,
         "Должности и публичные роли могут измениться.",
@@ -120,12 +124,8 @@ def classify_freshness(text: str) -> FreshnessDecision:
     for category, pattern, max_age, min_hosts, reason in _RULES:
         if not pattern.search(value):
             continue
-        # Questions explicitly anchored in the past do not need a live snapshot,
-        # except when the user also explicitly asks for the current/latest state.
         if historical and not recency:
             return FreshnessDecision(False, "stable", "Запрос явно относится к историческому периоду.", 0, 0, 0.96)
-        # Generic definitions such as "что такое цена" should not accidentally
-        # invoke research merely because a volatile-domain noun is present.
         if _STABLE_EXPLANATION.search(value) and not recency and category in {"price", "market", "law"}:
             return FreshnessDecision(False, "stable", "Запрошено стабильное объяснение понятия, а не текущее значение.", 0, 0, 0.9)
         return FreshnessDecision(True, category, reason, max_age, min_hosts, 0.96 if recency else 0.9)
