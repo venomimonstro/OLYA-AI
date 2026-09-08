@@ -221,21 +221,23 @@ if [ "$WITH_INFERENCE" -eq 1 ]; then docker compose --profile inference pull lla
 info "Building hardened closed-development sandbox runtime"
 docker build --pull -f Dockerfile.sandbox-runtime -t x1-sandbox:0.39 .
 info "Validating Compose configuration"; docker compose config --quiet
-info "Building X1 services"; docker compose build app sandbox-worker document-worker
+info "Building X1 services"; docker compose build app docker-runtime-proxy sandbox-worker document-worker
 
-info "Starting database, private search, sandbox worker and document worker"
-docker compose up -d db searxng sandbox-worker document-worker
+info "Starting database, private search, Docker runtime proxy, sandbox worker and document worker"
+docker compose up -d db searxng docker-runtime-proxy sandbox-worker document-worker
 for _ in $(seq 1 90); do
-  db_ok=0; search_ok=0; sandbox_ok=0; document_ok=0
+  db_ok=0; search_ok=0; proxy_ok=0; sandbox_ok=0; document_ok=0
   docker compose exec -T db pg_isready -U x1 -d x1 >/dev/null 2>&1 && db_ok=1
   docker compose exec -T searxng python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/search?q=x1&format=json',timeout=5).read()" >/dev/null 2>&1 && search_ok=1
+  docker compose exec -T docker-runtime-proxy python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8092/health',timeout=3).read()" >/dev/null 2>&1 && proxy_ok=1
   docker compose exec -T sandbox-worker python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health',timeout=3).read()" >/dev/null 2>&1 && sandbox_ok=1
   docker compose exec -T document-worker python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health',timeout=3).read()" >/dev/null 2>&1 && document_ok=1
-  [ "$db_ok$search_ok$sandbox_ok$document_ok" = "1111" ] && break
+  [ "$db_ok$search_ok$proxy_ok$sandbox_ok$document_ok" = "11111" ] && break
   sleep 2
 done
 docker compose exec -T db pg_isready -U x1 -d x1 >/dev/null 2>&1 || fail "PostgreSQL did not become ready"
 docker compose exec -T searxng python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/search?q=x1&format=json',timeout=5).read()" >/dev/null 2>&1 || fail "SearXNG did not become ready"
+docker compose exec -T docker-runtime-proxy python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8092/health',timeout=3).read()" >/dev/null 2>&1 || fail "Docker runtime proxy did not become ready"
 docker compose exec -T sandbox-worker python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health',timeout=3).read()" >/dev/null 2>&1 || fail "Sandbox worker did not become ready"
 docker compose exec -T document-worker python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health',timeout=3).read()" >/dev/null 2>&1 || fail "Document worker did not become ready"
 
@@ -270,6 +272,12 @@ from urllib.request import urlopen
 urlopen('http://llama:8080/health',timeout=5).read()
 PY
   python3 scripts/download_model.py --profile primary --verify-only >/dev/null || fail "Pinned Qwen3.6 GGUF integrity check failed after startup"
+
+  if [ ! -f backups/model-regression-baseline.json ]; then
+    info "Creating first accepted model/prompt baseline; critical golden cases must pass"
+    docker compose exec -T app python -m scripts.model_regression_lab --live-url http://llama:8080 --record-baseline \
+      || fail "Initial model regression baseline failed; production installation is blocked"
+  fi
 fi
 
 info "Running hardened sandbox execution probe"; docker compose exec -T app python -m scripts.sandbox_probe
@@ -277,7 +285,7 @@ if [ "$WITH_INFERENCE" -eq 1 ]; then
   info "Running production release gate, user journey and chaos simulations"
   gate_args=(--runtime --live-inference --user-journey --chaos); [ "$SKIP_E2E" -eq 1 ] && gate_args=(--runtime --live-inference)
   set +e; python3 scripts/release_gate.py "${gate_args[@]}"; gate_status=$?; set -e
-  if [ "$gate_status" -ne 0 ]; then docker compose ps >&2 || true; docker compose logs --tail=120 app llama searxng sandbox-worker document-worker >&2 || true; fail "Production release gate failed; inspect backups/release-gate-latest.json"; fi
+  if [ "$gate_status" -ne 0 ]; then docker compose ps >&2 || true; docker compose logs --tail=120 app llama searxng docker-runtime-proxy sandbox-worker document-worker >&2 || true; fail "Production release gate failed; inspect backups/release-gate-latest.json"; fi
 else
   info "Creating and restore-testing initial backup"; backup_path=$(bash scripts/backup.sh); bash scripts/restore_drill.sh "$backup_path" >/dev/null
 fi
