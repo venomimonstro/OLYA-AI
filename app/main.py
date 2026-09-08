@@ -189,6 +189,21 @@ def _overload_lane_name(request: Request) -> str | None:
     return None
 
 
+def _overload_request_resumable(request: Request, lane_name: str) -> bool:
+    """Return true only when admission rejected work that already has durable state.
+
+    A new image generation or one-shot /research/sources request has not created
+    a job/run before this pre-route gate, so the client must retry creation rather
+    than being told that an existing operation can be resumed.
+    """
+    path = request.url.path.rstrip("/")
+    if lane_name == "research":
+        return path.startswith("/v1/research/runs/") and path.endswith(("/discover", "/collect"))
+    if lane_name == "sandbox":
+        return path.startswith("/v1/project-sandboxes/") and path.endswith("/execute")
+    return False
+
+
 def _file_upload_request(request: Request) -> bool:
     if request.method.upper() != "POST":
         return False
@@ -247,7 +262,7 @@ async def graceful_overload_admission(request: Request, call_next):
                     "subsystem": lane_name,
                     "reason": exc.reason,
                     "retry_after": exc.retry_after,
-                    "resumable": lane_name in {"research", "images", "sandbox"},
+                    "resumable": _overload_request_resumable(request, lane_name),
                 }
             },
             headers={"Retry-After": str(exc.retry_after), "X-X1-Overload-Lane": lane_name},
