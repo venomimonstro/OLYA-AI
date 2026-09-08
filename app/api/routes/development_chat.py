@@ -11,6 +11,7 @@ from app.schemas.development_chat import DevelopmentChatRequest, DevelopmentChat
 from app.schemas.engineering import ExecuteApprovedRequest, ExecuteRoleRequest
 from app.services.access import require_project_role
 from app.services.auth import get_current_user
+from app.services.autonomous_development import AutonomousDevelopmentError, serialize_ledger, sync_ledger
 from app.services.development_chat import (
     DevelopmentChatError,
     commit_verified_execution,
@@ -32,12 +33,11 @@ def _conversation(db: Session, user: User, project_id: str, conversation_id: str
         if row is None or row.project_id != project_id:
             raise HTTPException(status_code=404, detail="Conversation not found")
         if row.owner_id != user.id:
-            # Project members may read shared project context, but chat-control ownership
-            # stays with the user who owns this conversation.
             raise HTTPException(status_code=403, detail="Development conversation is owned by another user")
         return row
     row = Conversation(owner_id=user.id, project_id=project_id, title=title[:120] or "Development")
-    db.add(row); db.flush()
+    db.add(row)
+    db.flush()
     return row
 
 
@@ -140,10 +140,26 @@ async def development_chat(
                 if not session.last_summary:
                     session.last_action = step
                     session.last_summary = text
+
+        # Canonical development state is persisted independently from chat prose.
+        # Meaningful control transitions force a checkpoint so restart/compaction
+        # can resume from an exact server-owned state boundary.
+        sync_ledger(
+            db,
+            session,
+            checkpoint_kind=str(action or command)[:32],
+            force_checkpoint=action not in {"status"},
+        )
         _reply(db, conversation, payload.message, text)
-        db.commit(); db.refresh(session)
-        return DevelopmentChatResponse(text=text, action=action, state=serialize_state(db, session))
+        db.commit()
+        db.refresh(session)
+        state = serialize_state(db, session)
+        state["autonomous"] = serialize_ledger(db, session)
+        db.commit()
+        return DevelopmentChatResponse(text=text, action=action, state=state)
     except HTTPException:
-        db.rollback(); raise
-    except DevelopmentChatError as exc:
-        db.rollback(); raise HTTPException(status_code=409, detail=str(exc)) from exc
+        db.rollback()
+        raise
+    except (DevelopmentChatError, AutonomousDevelopmentError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
