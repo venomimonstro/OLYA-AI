@@ -82,6 +82,23 @@ def _production_configuration_errors(settings) -> list[str]:
             errors.append("document_render_worker_token_is_default")
         if not str(settings.document_render_worker_url or "").startswith("http://"):
             errors.append("document_render_worker_url_invalid")
+
+    edit_backend = str(getattr(settings, "image_edit_backend", "disabled") or "disabled").strip().lower()
+    if edit_backend != "disabled":
+        if edit_backend not in {"diffusers", "qwen-image-edit"}:
+            errors.append("image_edit_backend_unsupported")
+        if not str(getattr(settings, "image_edit_model_path", "") or "").strip() and not str(getattr(settings, "image_edit_identity_model_path", "") or "").strip():
+            errors.append("image_edit_model_path_missing")
+        if bool(getattr(settings, "image_edit_require_vision_qa", True)):
+            vision_url = str(getattr(settings, "image_vision_qa_url", "") or "").strip()
+            if not vision_url:
+                errors.append("image_edit_vision_qa_missing")
+            else:
+                try:
+                    from app.services.image_vision_endpoint import validate_vision_endpoint
+                    validate_vision_endpoint(vision_url, trusted_internal_base_url=str(settings.llama_base_url or ""))
+                except (ValueError, RuntimeError):
+                    errors.append("image_edit_vision_qa_untrusted")
     return errors
 
 
@@ -182,7 +199,7 @@ def _overload_lane_name(request: Request) -> str | None:
         return "chat"
     if _network_research_request(request):
         return "research"
-    if path == "/v1/images/generations":
+    if path in {"/v1/images/generations", "/v1/images/edits", "/v1/images/references"}:
         return "images"
     if path.startswith("/v1/project-sandboxes/") and path.endswith("/execute"):
         return "sandbox"
@@ -190,12 +207,6 @@ def _overload_lane_name(request: Request) -> str | None:
 
 
 def _overload_request_resumable(request: Request, lane_name: str) -> bool:
-    """Return true only when admission rejected work that already has durable state.
-
-    A new image generation or one-shot /research/sources request has not created
-    a job/run before this pre-route gate, so the client must retry creation rather
-    than being told that an existing operation can be resumed.
-    """
     path = request.url.path.rstrip("/")
     if lane_name == "research":
         return path.startswith("/v1/research/runs/") and path.endswith(("/discover", "/collect"))
@@ -233,11 +244,7 @@ async def graceful_overload_admission(request: Request, call_next):
     lanes = getattr(request.app.state, "overload_lanes", None) or {}
     lane = lanes.get(lane_name)
     if lane is None:
-        return JSONResponse(
-            status_code=503,
-            content={"detail": {"code": "admission_not_ready", "subsystem": lane_name, "retry_after": 3}},
-            headers={"Retry-After": "3"},
-        )
+        return JSONResponse(status_code=503, content={"detail": {"code": "admission_not_ready", "subsystem": lane_name, "retry_after": 3}}, headers={"Retry-After": "3"})
     principal = principal_from_authorization(request.headers.get("authorization"))
     try:
         async with lane.slot(principal):
@@ -246,7 +253,6 @@ async def graceful_overload_admission(request: Request, call_next):
             except Exception:
                 await lane.record_outcome(failed=True)
                 raise
-            # Capacity/quota/user errors do not indicate a broken dependency.
             breaker_failure = response.status_code in {500, 502, 504} or (response.status_code == 503 and lane_name != "chat")
             await lane.record_outcome(failed=breaker_failure)
             snap = lane.snapshot()
@@ -256,15 +262,7 @@ async def graceful_overload_admission(request: Request, call_next):
     except OverloadRejected as exc:
         return JSONResponse(
             status_code=503,
-            content={
-                "detail": {
-                    "code": "graceful_overload",
-                    "subsystem": lane_name,
-                    "reason": exc.reason,
-                    "retry_after": exc.retry_after,
-                    "resumable": _overload_request_resumable(request, lane_name),
-                }
-            },
+            content={"detail": {"code": "graceful_overload", "subsystem": lane_name, "reason": exc.reason, "retry_after": exc.retry_after, "resumable": _overload_request_resumable(request, lane_name)}},
             headers={"Retry-After": str(exc.retry_after), "X-X1-Overload-Lane": lane_name},
         )
 
