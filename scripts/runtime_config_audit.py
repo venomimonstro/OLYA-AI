@@ -5,7 +5,11 @@ import json
 
 from app.core.config import get_settings
 from app.services.image_capabilities import SUPPORTED_EDIT_BACKENDS
-from app.services.image_vision_endpoint import VisionEndpointError, validate_vision_endpoint
+from app.services.image_vision_endpoint import (
+    VisionEndpointError,
+    is_self_hosted_vision_origin,
+    validate_vision_endpoint,
+)
 
 
 def validate(settings) -> list[str]:
@@ -44,18 +48,33 @@ def validate(settings) -> list[str]:
     edit_backend = str(settings.image_edit_backend or "disabled").strip().lower()
     require(image_backend in {"disabled", "mock", "diffusers"}, "unsupported_image_generation_backend")
     require(edit_backend in SUPPORTED_EDIT_BACKENDS, "unsupported_image_edit_backend")
+
+    # Image generation/edit checkpoints are paths on our own host. A URL/model
+    # hub identifier must never become an implicit download/API escape hatch.
+    image_paths = {
+        "generation": str(settings.image_model_path or "").strip(),
+        "edit": str(settings.image_edit_model_path or "").strip(),
+        "identity": str(settings.image_edit_identity_model_path or "").strip(),
+    }
+    for label, value in image_paths.items():
+        if value:
+            require("://" not in value, f"image_{label}_model_path_must_be_local")
+    if image_backend == "diffusers":
+        require(bool(image_paths["generation"]), "image_generation_enabled_without_local_model_path")
     if edit_backend != "disabled":
-        require(bool(str(settings.image_edit_model_path or settings.image_edit_identity_model_path or "").strip()), "image_edit_enabled_without_model_path")
+        require(bool(image_paths["edit"] or image_paths["identity"]), "image_edit_enabled_without_model_path")
         if bool(settings.image_edit_require_vision_qa):
             require(bool(str(settings.image_vision_qa_url or "").strip()), "image_edit_requires_missing_vision_qa")
-    if str(settings.image_vision_qa_url or "").strip():
+
+    vision_url = str(settings.image_vision_qa_url or "").strip()
+    if vision_url:
         try:
             validate_vision_endpoint(
-                str(settings.image_vision_qa_url),
+                vision_url,
                 trusted_internal_base_url=str(settings.llama_base_url or ""),
             )
         except VisionEndpointError:
-            errors.append("image_vision_endpoint_not_private_or_not_llama")
+            errors.append("image_vision_endpoint_not_self_hosted")
 
     for name in ("chat", "research", "image", "sandbox"):
         active = int(getattr(settings, f"overload_{name}_max_active_http"))
@@ -84,6 +103,8 @@ def validate(settings) -> list[str]:
         require(str(settings.document_render_backend).lower() == "remote", "production_document_renderer_not_isolated")
         require(str(settings.project_sandbox_backend).lower() == "remote", "production_sandbox_not_isolated")
         require(bool(str(settings.database_host or "").strip()), "production_database_host_missing")
+        if vision_url:
+            require(is_self_hosted_vision_origin(vision_url), "production_image_vision_not_self_hosted")
 
     return sorted(set(errors))
 
@@ -92,10 +113,11 @@ def main() -> int:
     settings = get_settings()
     errors = validate(settings)
     payload = {
-        "format": "x1-runtime-config-audit-v1",
+        "format": "x1-runtime-config-audit-v2",
         "status": "passed" if not errors else "failed",
         "environment": str(settings.env),
         "server_profile": str(settings.server_optimization_profile),
+        "image_compute_policy": "self_hosted_only",
         "errors": errors,
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
