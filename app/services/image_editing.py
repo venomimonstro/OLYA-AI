@@ -8,10 +8,11 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import httpx
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
+
+from app.services.image_vision_endpoint import VisionEndpointError, validate_vision_endpoint
 
 
 class ImageEditError(RuntimeError):
@@ -65,8 +66,6 @@ def infer_edit_mode(instruction: str) -> str:
         return "add_object"
     if _BACKGROUND_RE.search(text):
         return "background"
-    # Unknown edit intents are not sent to a whole-image model. A local planner
-    # may still turn them into a bounded edit, otherwise the worker fails closed.
     return "auto"
 
 
@@ -76,8 +75,6 @@ def resolve_edit_mode(requested: str, instruction: str) -> str:
     inferred = infer_edit_mode(instruction)
     if requested == "auto":
         return inferred
-    # Prevent an explicit local mode from being silently widened to a scene
-    # rewrite when the instruction clearly requests identity recomposition.
     if inferred == "identity_recompose" and requested in _LOCAL_EDIT_MODES:
         raise ImageEditError("Instruction requires identity_recompose mode")
     return requested
@@ -106,23 +103,33 @@ def _preview_data_url(image: Image.Image, max_side: int = 1024) -> str:
 
 
 class LocalImageEditVision:
-    """Loopback-only edit planner and semantic QA.
+    """Private edit planner and semantic QA using loopback or internal llama.cpp.
 
-    It never identifies a person. For identity-preservation QA it only compares
-    whether person-specific visible appearance in the supplied source changed in
-    an unintended way.
+    The endpoint never identifies a person. For identity-preservation QA it only
+    compares whether the visible appearance supplied by the user changed in an
+    unintended way. Arbitrary remote vision endpoints are rejected.
     """
 
-    def __init__(self, base_url: str, timeout_seconds: int = 45):
-        parsed = urlsplit(base_url)
-        if parsed.scheme not in {"http", "https"} or (parsed.hostname or "").lower() not in {"127.0.0.1", "localhost", "::1"}:
-            raise ImageEditError("Image edit vision endpoint must be local loopback")
-        self.url = base_url.rstrip("/") + "/v1/chat/completions"
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: int = 45,
+        *,
+        trusted_internal_base_url: str = "",
+        model_name: str = "local-vision",
+    ):
+        try:
+            endpoint = validate_vision_endpoint(base_url, trusted_internal_base_url=trusted_internal_base_url)
+        except VisionEndpointError as exc:
+            raise ImageEditError(str(exc)) from exc
+        self.url = endpoint.base_url + "/v1/chat/completions"
         self.timeout = max(5, int(timeout_seconds))
+        self.model_name = str(model_name or "local-vision")[:160]
+        self.endpoint_source = endpoint.source
 
     def _request(self, content: list[dict], *, max_tokens: int = 900) -> dict:
         payload = {
-            "model": "local-vision",
+            "model": self.model_name,
             "temperature": 0,
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": content}],
@@ -171,7 +178,7 @@ class LocalImageEditVision:
             protected_boxes=protected,
             fill_prompt=str(raw.get("fill_prompt") or "")[:1000],
             confidence=confidence,
-            planner="local-vision",
+            planner=self.endpoint_source,
         )
 
     def verify(
@@ -210,7 +217,7 @@ class LocalImageEditVision:
             "identity_consistent": identity_ok,
             "unintended_changes": unintended,
             "findings": findings[:20],
-            "verifier": "local-vision",
+            "verifier": self.endpoint_source,
         }
 
 
@@ -254,7 +261,6 @@ def build_edit_mask(
         draw = ImageDraw.Draw(mask)
         for box in plan.target_boxes:
             draw.rectangle(_box_to_pixels(box, width, height, padding_ratio), fill=255)
-        # A protected person/face always wins over an automatically planned target.
         for box in plan.protected_boxes:
             draw.rectangle(_box_to_pixels(box, width, height, 0.02), fill=0)
     if mask.getbbox() is None:
@@ -273,14 +279,10 @@ def composite_preserving_outside(source: Image.Image, candidate: Image.Image, ma
 def outside_mask_change_score(source: Image.Image, result: Image.Image, mask: Image.Image) -> float:
     src = source.convert("RGB")
     out = result.convert("RGB").resize(src.size, Image.Resampling.LANCZOS)
-    outside = ImageOps.invert(mask.convert("L").point(lambda value: 255 if value == 0 else 0))
-    # outside above is 0 for protected exact pixels and 255 elsewhere; use a
-    # direct binary selection to avoid a fuzzy-border false positive.
     exact_outside = mask.convert("L").point(lambda value: 255 if value == 0 else 0)
     diff = ImageChops.difference(src, out)
     diff.paste((0, 0, 0), mask=ImageOps.invert(exact_outside))
     extrema = diff.getextrema()
-    _ = outside
     return float(max(channel[1] for channel in extrema))
 
 
@@ -308,11 +310,7 @@ def _filtered_call_kwargs(callable_obj, kwargs: dict) -> dict:
 
 
 class DiffusersImageEditBackend:
-    """Lazy, local-only diffusers backend with explicit capability separation.
-
-    Local inpainting and identity/scene recomposition can use different models.
-    A text-to-image checkpoint is never silently reused for identity editing.
-    """
+    """Lazy, local-only diffusers backend with explicit capability separation."""
 
     def __init__(self, *, inpaint_model_path: str = "", identity_model_path: str = ""):
         self.inpaint_model_path = inpaint_model_path.strip()
