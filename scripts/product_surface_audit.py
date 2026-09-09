@@ -84,9 +84,11 @@ def _ui_contract_errors(registered_paths: set[str]) -> list[dict]:
         source = path.read_text("utf-8")
         rel = path.relative_to(ROOT).as_posix()
 
-        # Every literal internal API URL used by a button/page must resolve to a
-        # registered FastAPI route shape. Dynamic ${id} segments are normalized.
-        refs = sorted(set(re.findall(r"[\'\"`](/v1/[A-Za-z0-9_./?=&${}:+-]+)", source)))
+        # Capture quoted/template-literal internal URLs as a whole. This keeps
+        # `${esc(id)}` or `${generationId}` intact so _path_shape can normalize
+        # the complete dynamic segment to a path parameter instead of treating
+        # a partial JavaScript expression as a literal route.
+        refs = sorted(set(re.findall(r"[\'\"`](/v1/[^\'\"`\s<>]+)", source)))
         for ref in refs:
             base = ref.split("?", 1)[0]
             # A trailing slash commonly means string concatenation continues
