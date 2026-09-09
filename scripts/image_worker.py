@@ -7,12 +7,14 @@ import os
 import socket
 import threading
 import time
+from pathlib import Path
 
 from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.db import SessionLocal
 from app.models import ImageEditRequest, ImageGeneration, utcnow
+from app.services.image_capabilities import validate_image_edit_files
 from app.services.image_editing import DiffusersImageEditBackend, LocalImageEditVision
 from app.services.image_edit_runtime import execute_edit_generation
 from app.services.image_runtime import DisabledImageBackend, LocalDiffusersBackend, MockImageBackend, execute_generation
@@ -54,12 +56,36 @@ def _vision_services(settings):
         "trusted_internal_base_url": str(settings.llama_base_url or ""),
         "model_name": str(settings.llama_model_name or "local-vision"),
     }
-    semantic = LocalVisionQA(url, settings.image_vision_qa_timeout_seconds, **common)
-    editing = LocalImageEditVision(url, settings.image_vision_qa_timeout_seconds, **common)
-    return semantic, editing
+    return (
+        LocalVisionQA(url, settings.image_vision_qa_timeout_seconds, **common),
+        LocalImageEditVision(url, settings.image_vision_qa_timeout_seconds, **common),
+    )
 
 
-def _write_worker_heartbeat(settings, worker_id: str, *, status: str = "stable", message: str = "Image worker is alive") -> None:
+def _preflight(settings, generation_backend, edit_backend) -> dict:
+    details: dict = {
+        "generation_backend": str(settings.image_backend or "disabled"),
+        "edit_backend": str(settings.image_edit_backend or "disabled"),
+    }
+    if str(settings.image_backend or "disabled").lower() == "diffusers":
+        model_path = Path(str(settings.image_model_path or ""))
+        if not model_path.is_dir():
+            raise RuntimeError("Configured image generation model path is missing")
+        details["generation_model_path"] = str(model_path)
+    edit_name = str(settings.image_edit_backend or "disabled").lower()
+    if edit_name != "disabled":
+        failures = validate_image_edit_files(settings)
+        if failures:
+            raise RuntimeError("Image edit model preflight failed: " + ",".join(failures))
+        if edit_name == "qwen-image-edit":
+            details["qwen_image_edit"] = edit_backend.preflight()
+        elif edit_name == "diffusers":
+            details["local_edit_available"] = bool(edit_backend.local_edit_available)
+            details["identity_edit_available"] = bool(edit_backend.identity_edit_available)
+    return details
+
+
+def _write_worker_heartbeat(settings, worker_id: str, *, status: str = "stable", message: str = "Image worker is alive", extra: dict | None = None) -> None:
     try:
         with SessionLocal() as db:
             write_image_worker_heartbeat(
@@ -72,11 +98,11 @@ def _write_worker_heartbeat(settings, worker_id: str, *, status: str = "stable",
                     "edit_backend": str(settings.image_edit_backend),
                     "vision_qa_configured": bool(str(settings.image_vision_qa_url or "").strip()),
                     "vision_model": str(settings.llama_model_name or ""),
+                    **(extra or {}),
                 },
             )
             db.commit()
     except Exception:
-        # Heartbeat visibility must never steal/abort a durable image job.
         return
 
 
@@ -116,24 +142,24 @@ def run(*, persistent: bool = False) -> None:
     settings = get_settings()
     worker_id = f"image-{socket.gethostname()}-{os.getpid()}"
     generation_backend = backend_for(settings.image_backend, model_path=settings.image_model_path, model_name=settings.image_model_name)
-    semantic_qa, edit_vision = _vision_services(settings)
     edit_backend = edit_backend_for(settings)
+    try:
+        semantic_qa, edit_vision = _vision_services(settings)
+        preflight = _preflight(settings, generation_backend, edit_backend)
+    except Exception as exc:
+        _write_worker_heartbeat(settings, worker_id, status="failed", message=f"Image worker preflight failed: {type(exc).__name__}", extra={"error": str(exc)[:500]})
+        raise
+
     idle_since = time.monotonic()
     next_worker_heartbeat = 0.0
-
     while True:
         now_mono = time.monotonic()
         if now_mono >= next_worker_heartbeat:
-            _write_worker_heartbeat(settings, worker_id)
+            _write_worker_heartbeat(settings, worker_id, extra={"preflight": preflight})
             next_worker_heartbeat = now_mono + 30.0
 
         with SessionLocal() as db:
-            job = lease_next_job(
-                db,
-                worker_id=worker_id,
-                lease_seconds=settings.job_lease_seconds,
-                kinds={"image.generate", "image.edit"},
-            )
+            job = lease_next_job(db, worker_id=worker_id, lease_seconds=settings.job_lease_seconds, kinds={"image.generate", "image.edit"})
             if job is None:
                 db.rollback()
                 if not persistent and time.monotonic() - idle_since >= settings.image_worker_idle_exit_seconds:
@@ -161,13 +187,7 @@ def run(*, persistent: bool = False) -> None:
                 if generation is None or generation.status == "cancelled":
                     if heartbeat_lost.is_set():
                         raise JobLeaseLostError("Image job lease was lost")
-                    complete_job(
-                        db,
-                        job.id,
-                        worker_id=worker_id,
-                        lease_token=token,
-                        result_payload={"skipped": True, "job_kind": job.kind},
-                    )
+                    complete_job(db, job.id, worker_id=worker_id, lease_token=token, result_payload={"skipped": True, "job_kind": job.kind})
                     db.commit()
                     continue
 
@@ -206,15 +226,9 @@ def run(*, persistent: bool = False) -> None:
                 if heartbeat_lost.is_set():
                     db.rollback()
                     raise JobLeaseLostError("Image job lease was lost during execution")
-                complete_job(
-                    db,
-                    job.id,
-                    worker_id=worker_id,
-                    lease_token=token,
-                    result_payload={"job_kind": job.kind, **result_payload},
-                )
+                complete_job(db, job.id, worker_id=worker_id, lease_token=token, result_payload={"job_kind": job.kind, **result_payload})
                 db.commit()
-                _write_worker_heartbeat(settings, worker_id)
+                _write_worker_heartbeat(settings, worker_id, extra={"preflight": preflight})
                 next_worker_heartbeat = time.monotonic() + 30.0
             except Exception as exc:
                 db.rollback()
@@ -225,20 +239,14 @@ def run(*, persistent: bool = False) -> None:
                     if leased and leased.lease_token == token:
                         generation_id = (leased.payload or {}).get("generation_id")
                         try:
-                            fail_job(
-                                failure_db,
-                                job.id,
-                                worker_id=worker_id,
-                                lease_token=token,
-                                error_message=str(exc),
-                            )
+                            fail_job(failure_db, job.id, worker_id=worker_id, lease_token=token, error_message=str(exc))
                         except JobLeaseLostError:
                             failure_db.rollback()
                             continue
                         if leased.status == "failed":
                             _mark_terminal_failure(failure_db, generation_id, job_kind=leased.kind, error=str(exc))
                         failure_db.commit()
-                _write_worker_heartbeat(settings, worker_id, status="degraded", message=f"Image worker job failed: {type(exc).__name__}")
+                _write_worker_heartbeat(settings, worker_id, status="degraded", message=f"Image worker job failed: {type(exc).__name__}", extra={"preflight": preflight})
                 next_worker_heartbeat = time.monotonic() + 10.0
             finally:
                 heartbeat_stop.set()
