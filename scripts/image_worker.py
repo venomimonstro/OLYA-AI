@@ -17,6 +17,7 @@ from app.services.image_editing import DiffusersImageEditBackend, LocalImageEdit
 from app.services.image_edit_runtime import execute_edit_generation
 from app.services.image_runtime import DisabledImageBackend, LocalDiffusersBackend, MockImageBackend, execute_generation
 from app.services.image_vision import LocalVisionQA
+from app.services.image_worker_state import write_image_worker_heartbeat
 from app.services.jobs import JobLeaseLostError, complete_job, fail_job, heartbeat_job, lease_next_job, start_job
 from app.services.qwen_image_edit_backend import QwenImageEditBackend
 
@@ -32,10 +33,6 @@ def backend_for(name: str, *, model_path: str = "", model_name: str = ""):
 def edit_backend_for(settings):
     name = str(settings.image_edit_backend or "disabled").strip().lower()
     if name == "qwen-image-edit":
-        # The current 32-GiB CPU production profile must not attempt to load a
-        # 20B-class image editor beside the 23-GiB llama process. Qwen Image Edit
-        # is therefore an explicit CUDA-worker capability; CPU deployments can
-        # use a smaller, separately qualified diffusers edit checkpoint instead.
         return QwenImageEditBackend(
             model_path=settings.image_edit_model_path,
             identity_model_path=settings.image_edit_identity_model_path or settings.image_edit_model_path,
@@ -46,9 +43,41 @@ def edit_backend_for(settings):
             inpaint_model_path=settings.image_edit_model_path,
             identity_model_path=settings.image_edit_identity_model_path,
         )
-    # Keep the worker able to serve ordinary image.generate jobs when editing is
-    # disabled. Any image.edit admission is already rejected by the HTTP layer.
     return DiffusersImageEditBackend(inpaint_model_path="", identity_model_path="")
+
+
+def _vision_services(settings):
+    url = str(settings.image_vision_qa_url or "").strip()
+    if not url:
+        return None, None
+    common = {
+        "trusted_internal_base_url": str(settings.llama_base_url or ""),
+        "model_name": str(settings.llama_model_name or "local-vision"),
+    }
+    semantic = LocalVisionQA(url, settings.image_vision_qa_timeout_seconds, **common)
+    editing = LocalImageEditVision(url, settings.image_vision_qa_timeout_seconds, **common)
+    return semantic, editing
+
+
+def _write_worker_heartbeat(settings, worker_id: str, *, status: str = "stable", message: str = "Image worker is alive") -> None:
+    try:
+        with SessionLocal() as db:
+            write_image_worker_heartbeat(
+                db,
+                status=status,
+                message=message,
+                details={
+                    "worker_id": worker_id,
+                    "generation_backend": str(settings.image_backend),
+                    "edit_backend": str(settings.image_edit_backend),
+                    "vision_qa_configured": bool(str(settings.image_vision_qa_url or "").strip()),
+                    "vision_model": str(settings.llama_model_name or ""),
+                },
+            )
+            db.commit()
+    except Exception:
+        # Heartbeat visibility must never steal/abort a durable image job.
+        return
 
 
 def _lease_heartbeat(job_id: str, worker_id: str, token: str, lease_seconds: int, stop: threading.Event, lost: threading.Event) -> None:
@@ -62,8 +91,6 @@ def _lease_heartbeat(job_id: str, worker_id: str, token: str, lease_seconds: int
             lost.set()
             return
         except Exception:
-            # A transient DB failure is retried on the next short interval. If the
-            # lease genuinely expires, the next heartbeat marks it lost.
             continue
 
 
@@ -89,20 +116,17 @@ def run(*, persistent: bool = False) -> None:
     settings = get_settings()
     worker_id = f"image-{socket.gethostname()}-{os.getpid()}"
     generation_backend = backend_for(settings.image_backend, model_path=settings.image_model_path, model_name=settings.image_model_name)
-    semantic_qa = (
-        LocalVisionQA(settings.image_vision_qa_url, settings.image_vision_qa_timeout_seconds)
-        if settings.image_vision_qa_url
-        else None
-    )
+    semantic_qa, edit_vision = _vision_services(settings)
     edit_backend = edit_backend_for(settings)
-    edit_vision = (
-        LocalImageEditVision(settings.image_vision_qa_url, settings.image_vision_qa_timeout_seconds)
-        if settings.image_vision_qa_url
-        else None
-    )
     idle_since = time.monotonic()
+    next_worker_heartbeat = 0.0
 
     while True:
+        now_mono = time.monotonic()
+        if now_mono >= next_worker_heartbeat:
+            _write_worker_heartbeat(settings, worker_id)
+            next_worker_heartbeat = now_mono + 30.0
+
         with SessionLocal() as db:
             job = lease_next_job(
                 db,
@@ -125,9 +149,6 @@ def run(*, persistent: bool = False) -> None:
             try:
                 start_job(db, job, worker_id=worker_id, lease_token=token)
                 db.commit()
-                # Commit the running lease before expensive model work, then keep
-                # it alive from an independent Session so the generation session
-                # is never shared across threads.
                 heartbeat_thread = threading.Thread(
                     target=_lease_heartbeat,
                     args=(job.id, worker_id, token, settings.job_lease_seconds, heartbeat_stop, heartbeat_lost),
@@ -185,9 +206,6 @@ def run(*, persistent: bool = False) -> None:
                 if heartbeat_lost.is_set():
                     db.rollback()
                     raise JobLeaseLostError("Image job lease was lost during execution")
-                # A quality-gate rejection is a completed durable job, not a worker
-                # crash. The ImageGeneration/ImageEditRequest rows retain failed QA
-                # state and no content endpoint can deliver a failed image.
                 complete_job(
                     db,
                     job.id,
@@ -196,11 +214,10 @@ def run(*, persistent: bool = False) -> None:
                     result_payload={"job_kind": job.kind, **result_payload},
                 )
                 db.commit()
-            except Exception as exc:  # durable worker boundary
+                _write_worker_heartbeat(settings, worker_id)
+                next_worker_heartbeat = time.monotonic() + 30.0
+            except Exception as exc:
                 db.rollback()
-                # Lease loss is not a worker crash: another worker may already own
-                # and be processing this durable job. Never mutate/requeue it using
-                # a stale token; simply abandon this result and continue polling.
                 if isinstance(exc, JobLeaseLostError) or heartbeat_lost.is_set():
                     continue
                 with SessionLocal() as failure_db:
@@ -221,6 +238,8 @@ def run(*, persistent: bool = False) -> None:
                         if leased.status == "failed":
                             _mark_terminal_failure(failure_db, generation_id, job_kind=leased.kind, error=str(exc))
                         failure_db.commit()
+                _write_worker_heartbeat(settings, worker_id, status="degraded", message=f"Image worker job failed: {type(exc).__name__}")
+                next_worker_heartbeat = time.monotonic() + 10.0
             finally:
                 heartbeat_stop.set()
                 if heartbeat_thread is not None:
