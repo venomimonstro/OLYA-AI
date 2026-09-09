@@ -53,9 +53,6 @@ def create_session(db: Session, user: User) -> tuple[str, AuthSession]:
     now = datetime.now(timezone.utc)
     max_active = max(1, min(100, int(settings.session_max_active_per_user)))
 
-    # Serialize session creation for one account on PostgreSQL. Without this,
-    # concurrent login bursts can all observe the old active-session set and
-    # temporarily bypass the cap. SQLite test databases safely ignore FOR UPDATE.
     db.execute(select(User.id).where(User.id == user.id).with_for_update())
     record = AuthSession(
         user_id=user.id,
@@ -95,13 +92,7 @@ def create_session(db: Session, user: User) -> tuple[str, AuthSession]:
 
 
 def _expensive_public_request(request: Request) -> bool:
-    """Identify public operations that can consume scarce CPU/RAM/disk/network.
-
-    Project CRUD remains available so a newly registered account can enter the
-    product, but compute/storage-heavy development surfaces stay behind the same
-    progressive rollout gate as chat and research. File upload is special-cased
-    because its URL lives under otherwise-cheap project CRUD.
-    """
+    """Identify public operations that can consume scarce CPU/RAM/disk/network."""
     path = request.url.path.rstrip("/")
     if path.startswith(
         (
@@ -147,19 +138,39 @@ def _enforce_public_exposure(request: Request, db: Session, user: User) -> None:
 def _enforce_resource_lane(request: Request, db: Session, user: User) -> None:
     if request.method.upper() != "POST":
         return
-    path = request.url.path
+    path = request.url.path.rstrip("/")
+    settings = request.app.state.settings
     channel = None
+    image_operation_enabled = False
     if path == "/v1/images/generations":
         channel = "image_worker"
+        image_operation_enabled = str(settings.image_backend or "disabled").lower() != "disabled"
+    elif path == "/v1/images/edits":
+        channel = "image_worker"
+        image_operation_enabled = str(settings.image_edit_backend or "disabled").lower() != "disabled"
     elif path.startswith("/v1/project-sandboxes/") and path.endswith("/execute"):
         channel = "sandbox"
     elif path == "/v1/project-sandboxes/previews":
         channel = "sandbox"
     if not channel:
         return
+
+    # Do not admit durable image work into a queue with no consumer. A stale or
+    # absent worker otherwise leaves jobs queued indefinitely and lets clients
+    # consume storage/DB rows while the capability is effectively down.
+    if channel == "image_worker" and image_operation_enabled:
+        from app.services.image_worker_state import image_worker_snapshot
+        worker = image_worker_snapshot(db, stale_seconds=90)
+        if not worker.get("alive"):
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "image_worker_unavailable", "message": "Image processing is temporarily unavailable."},
+                headers={"Retry-After": "5"},
+            )
+
     from app.services.measured_plans import ensure_channel_budget
     try:
-        ensure_channel_budget(db, user, request.app.state.settings, channel, 0)
+        ensure_channel_budget(db, user, settings, channel, 0)
     except RuntimeError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
