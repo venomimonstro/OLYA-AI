@@ -9,6 +9,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - x1_pgdata:/var/lib/postgresql/data
+    networks:
+      - default
+      - image-private
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U x1 -d x1"]
       interval: 10s
@@ -219,6 +222,8 @@ services:
     volumes:
       - ./data:/app/data
       - ./models:/models:ro
+    networks:
+      - image-private
     depends_on:
       db:
         condition: service_healthy
@@ -234,6 +239,9 @@ services:
     mem_limit: ${X1_LLAMA_MEMORY_LIMIT:-23g}
     volumes:
       - ./models:/models:ro
+    networks:
+      - default
+      - image-private
     command:
       - -m
       - /models/${X1_LLAMA_MODEL_FILE:-Qwen3.6-35B-A3B-Q4_K_M.gguf}
@@ -267,6 +275,10 @@ services:
       resources:
         limits:
           memory: ${X1_LLAMA_MEMORY_LIMIT:-23g}
+
+networks:
+  image-private:
+    internal: true
 
 volumes:
   x1_pgdata:
