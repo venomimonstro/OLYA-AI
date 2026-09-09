@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import io
 import os
 from pathlib import Path
@@ -72,9 +73,6 @@ def _store_blob(db: Session, *, storage_root: str, content: bytes, media_type: s
         winner = db.scalar(select(ImageBlob).where(ImageBlob.sha256 == digest))
         if winner is None:
             raise
-        # The winner may use a different canonical path. Remove only the file we
-        # created for the losing insert so a race cannot leave an orphan per-edit
-        # copy behind.
         winner_path = Path(winner.storage_path).resolve()
         if path.exists() and path.resolve() != winner_path:
             path.unlink(missing_ok=True)
@@ -106,9 +104,14 @@ def _resolve_plan(
             mode="identity_recompose", target="person/scene", target_boxes=(), protected_boxes=(),
             fill_prompt=edit.instruction, confidence=1.0, planner="deterministic-intent",
         )
-    if manual_mask is not None and requested_mode != "auto":
+    if manual_mask is not None:
+        # A user-supplied mask is a stronger boundary than an uncertain natural-
+        # language classifier. Unknown/auto masked edits are treated as a generic
+        # replacement inside exactly that region rather than invoking whole-image
+        # planning or failing after admission.
+        manual_mode = "replace_object" if requested_mode == "auto" else requested_mode
         return EditPlan(
-            mode=requested_mode, target="manual-mask", target_boxes=(), protected_boxes=(),
+            mode=manual_mode, target="manual-mask", target_boxes=(), protected_boxes=(),
             fill_prompt=edit.instruction, confidence=1.0, planner="user-mask",
         )
     if vision is None:
@@ -117,8 +120,6 @@ def _resolve_plan(
     if planned.mode == "unknown" or planned.confidence < min_confidence:
         raise ImageEditError("Edit target could not be located with sufficient confidence")
     if requested_mode != "auto" and planned.mode != requested_mode:
-        # Never broaden/narrow a user-selected operation silently. The model can
-        # locate the target, but the server remains the authority on edit mode.
         planned = EditPlan(
             mode=requested_mode,
             target=planned.target,
@@ -129,6 +130,24 @@ def _resolve_plan(
             planner=planned.planner,
         )
     return planned
+
+
+def _identity_edit_call(backend, *, scene: Image.Image, identity_reference: Image.Image, prompt: str, negative_prompt: str, steps: int, seed: int) -> Image.Image:
+    values = {
+        "source": scene,
+        "identity_reference": identity_reference,
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "steps": steps,
+        "seed": seed,
+    }
+    try:
+        signature = inspect.signature(backend.edit_identity)
+        if not any(p.kind == p.VAR_KEYWORD for p in signature.parameters.values()):
+            values = {key: value for key, value in values.items() if key in signature.parameters}
+    except (TypeError, ValueError):
+        pass
+    return backend.edit_identity(**values)
 
 
 def _mark_failed(generation: ImageGeneration, edit: ImageEditRequest, reason: str, *, qa_summary: dict | None = None) -> dict:
@@ -196,12 +215,10 @@ def execute_edit_generation(
         edit.status = "generating"
         edit.updated_at = utcnow()
 
-        # Identity/scene recomposition has no immutable outside-mask region. It is
-        # therefore never deliverable without a second local vision pass comparing
-        # the visible person reference with the result. This remains mandatory
-        # even if a client asks for non-strict QA.
-        if plan.mode == "identity_recompose" and edit.preserve_identity and vision is None:
+        if plan.mode == "identity_recompose" and vision is None:
             raise ImageEditError("Identity-preserving scene editing requires local semantic vision QA")
+        if require_vision_qa and vision is None:
+            raise ImageEditError("Image editing policy requires local semantic vision QA")
 
         mask = None
         coverage = 1.0
@@ -214,7 +231,7 @@ def execute_edit_generation(
                 feather_px=mask_feather_px,
             )
             coverage = mask_coverage(mask)
-            if plan.mode != "background" and coverage > max_local_mask_ratio:
+            if manual_mask is None and plan.mode != "background" and coverage > max_local_mask_ratio:
                 raise ImageEditError("Automatic edit mask is too broad; refusing to rewrite most of the photograph")
             if coverage < 0.0002:
                 raise ImageEditError("Edit mask is too small to produce a reliable change")
@@ -232,8 +249,10 @@ def execute_edit_generation(
             negative = compose_negative_prompt(policy, negative)
             attempt_seed = (int(generation.seed) + (attempt - 1) * 7919) % (2**31)
             if plan.mode == "identity_recompose":
-                candidate = backend.edit_identity(
-                    source=identity_source,
+                candidate = _identity_edit_call(
+                    backend,
+                    scene=source,
+                    identity_reference=identity_source,
                     prompt=positive,
                     negative_prompt=negative,
                     steps=generation.steps,
@@ -274,10 +293,6 @@ def execute_edit_generation(
                 continue
 
             if vision is not None:
-                # When an explicit identity reference exists, semantic QA compares
-                # that reference with the result. Otherwise the source itself is
-                # the identity reference, which is the common "here is my photo"
-                # workflow.
                 verification_source = identity_source if plan.mode == "identity_recompose" and edit.preserve_identity else source
                 semantic = vision.verify(
                     verification_source,
@@ -305,14 +320,14 @@ def execute_edit_generation(
                     passed = True
                     final_image = candidate
                     break
-            elif edit.strict_quality and require_vision_qa:
-                last_findings = [{"code": "semantic_qa_unavailable", "severity": "critical", "repairable": False, "detail": "Strict edit cannot verify instruction success"}]
+            elif require_vision_qa:
+                last_findings = [{"code": "semantic_qa_unavailable", "severity": "critical", "repairable": False, "detail": "Edit cannot verify instruction success"}]
                 _qa_event(db, generation, attempt=attempt, qa_type="edit_semantic", passed=False, findings=last_findings, metrics={"local_vision_qa": False})
                 break
             else:
                 passed = True
                 final_image = candidate
-                last_semantic = {"passed": True, "semantic_check": "not_required_by_request"}
+                last_semantic = {"passed": True, "semantic_check": "not_required_by_policy"}
                 break
 
         generation.repair_attempts = max(0, (attempt if "attempt" in locals() else 1) - 1)
