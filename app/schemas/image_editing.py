@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.services.image_editing import infer_edit_mode
+
 
 ImageReferenceKind = Literal["edit_source", "identity", "mask"]
 ImageEditMode = Literal[
@@ -44,8 +46,12 @@ class ImageEditCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_edit_contract(self):
-        if self.mode == "identity_recompose" and not self.preserve_identity:
-            raise ValueError("identity_recompose requires preserve_identity=true")
+        effective_mode = infer_edit_mode(self.instruction) if self.mode == "auto" else self.mode
+        if effective_mode == "identity_recompose":
+            if not self.preserve_identity:
+                raise ValueError("identity_recompose requires preserve_identity=true")
+            if not self.strict_quality:
+                raise ValueError("identity_recompose requires strict_quality=true")
         return self
 
 
