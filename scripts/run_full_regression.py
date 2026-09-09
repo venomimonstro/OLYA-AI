@@ -13,51 +13,17 @@ ARCHIVE = ROOT / "tests" / "legacy_sprint0_26.tar.gz"
 TARGET = ROOT / "tests" / "_legacy_sprint0_26"
 
 EXPECTED = {
-    "test_account_lifecycle.py",
-    "test_admin.py",
-    "test_auth.py",
-    "test_benchmark_helpers.py",
-    "test_business_intelligence.py",
-    "test_chat_file_context.py",
-    "test_chat_persistence.py",
-    "test_chat_quality.py",
-    "test_chat_research_context.py",
-    "test_code_workspace.py",
-    "test_context.py",
-    "test_conversations.py",
-    "test_development_chat.py",
-    "test_development_orchestrator.py",
-    "test_diagnostics.py",
-    "test_documents.py",
-    "test_engineering_execution.py",
-    "test_engineering_team.py",
-    "test_file_context.py",
-    "test_files.py",
-    "test_git_collaboration.py",
-    "test_health.py",
-    "test_image_learning.py",
-    "test_images.py",
-    "test_jobs.py",
-    "test_media_admin.py",
-    "test_memory.py",
-    "test_migrations.py",
-    "test_performance.py",
-    "test_project_context.py",
-    "test_project_runtime.py",
-    "test_projects.py",
-    "test_quality.py",
-    "test_quota.py",
-    "test_research.py",
-    "test_research_planner.py",
-    "test_research_runs.py",
-    "test_resource_governor.py",
-    "test_router.py",
-    "test_safety_admin.py",
-    "test_sandbox.py",
-    "test_search_routing.py",
-    "test_task_concurrency.py",
-    "test_task_context.py",
-    "test_tasks.py",
+    "test_account_lifecycle.py", "test_admin.py", "test_auth.py", "test_benchmark_helpers.py",
+    "test_business_intelligence.py", "test_chat_file_context.py", "test_chat_persistence.py",
+    "test_chat_quality.py", "test_chat_research_context.py", "test_code_workspace.py", "test_context.py",
+    "test_conversations.py", "test_development_chat.py", "test_development_orchestrator.py",
+    "test_diagnostics.py", "test_documents.py", "test_engineering_execution.py", "test_engineering_team.py",
+    "test_file_context.py", "test_files.py", "test_git_collaboration.py", "test_health.py",
+    "test_image_learning.py", "test_images.py", "test_jobs.py", "test_media_admin.py", "test_memory.py",
+    "test_migrations.py", "test_performance.py", "test_project_context.py", "test_project_runtime.py",
+    "test_projects.py", "test_quality.py", "test_quota.py", "test_research.py", "test_research_planner.py",
+    "test_research_runs.py", "test_resource_governor.py", "test_router.py", "test_safety_admin.py",
+    "test_sandbox.py", "test_search_routing.py", "test_task_concurrency.py", "test_task_context.py", "test_tasks.py",
 }
 
 
@@ -101,10 +67,9 @@ def main() -> int:
     args = parser.parse_args()
     try:
         restore_legacy_suite()
-        # Validate opaque historical source transfers before importing pytest/app.
-        # Wrapper-shape checks alone cannot detect a truncated gzip/base85 payload.
         for module, extra in (
             ("scripts.canonical_source_audit", []),
+            ("scripts.runtime_config_audit", []),
             ("scripts.model_regression_lab", ["--validate-only"]),
             ("scripts.rc_security_audit", []),
         ):
