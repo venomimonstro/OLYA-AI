@@ -21,7 +21,7 @@ class ImageReferenceRead(BaseModel):
     id: str
     user_id: str
     project_id: str | None
-    blob_id: str
+    blob_id: str | None
     kind: str
     original_name: str
     status: str
