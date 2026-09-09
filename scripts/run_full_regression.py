@@ -70,6 +70,8 @@ def main() -> int:
         for module, extra in (
             ("scripts.canonical_source_audit", []),
             ("scripts.runtime_config_audit", []),
+            ("scripts.local_image_contract_audit", []),
+            ("scripts.product_surface_audit", []),
             ("scripts.model_regression_lab", ["--validate-only"]),
             ("scripts.rc_security_audit", []),
         ):
