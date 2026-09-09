@@ -1,0 +1,15 @@
+services:
+  image-worker:
+    runtime: nvidia
+    shm_size: 1gb
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${X1_IMAGE_WORKER_NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      HF_HOME: /tmp/huggingface
+      TRANSFORMERS_CACHE: /tmp/huggingface/transformers
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=2g
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
