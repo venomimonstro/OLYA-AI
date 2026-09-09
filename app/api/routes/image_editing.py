@@ -5,29 +5,33 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.image_studio_ui import router as studio_ui_router
 from app.models import BackgroundJob, ImageBlob, ImageEditRequest, ImageGeneration, ImageReference, User, utcnow
 from app.schemas.image_editing import ImageEditCreate, ImageEditCreateResponse, ImageEditRead, ImageReferenceRead
 from app.services.access import require_project_role
 from app.services.auth import get_current_user
+from app.services.image_capabilities import image_edit_capabilities
 from app.services.image_editing import ImageEditError, resolve_edit_mode
 from app.services.image_policy import evaluate_prompt, published_policy
-from app.services.image_references import ImageReferenceError, store_reference, total_user_image_storage_bytes
+from app.services.image_references import ImageReferenceError, delete_reference_bytes, store_reference, total_user_image_storage_bytes
 from app.services.image_runtime import ImageRuntimeError, ensure_disk_capacity
+from app.services.image_worker_state import image_worker_snapshot
 from app.services.jobs import enqueue_job
 from app.services.safety import require_capability
 
 router = APIRouter(tags=["image-editing"])
+router.include_router(studio_ui_router)
 _LOCAL_EDIT_MODES = {"remove_object", "replace_object", "add_object", "background"}
 
 
 def _reference_access(db: Session, user: User, reference_id: str, minimum_project_role: str = "viewer") -> ImageReference:
     row = db.get(ImageReference, reference_id)
-    if row is None or row.status != "ready":
+    if row is None or row.status != "ready" or not row.blob_id:
         raise HTTPException(status_code=404, detail="Image reference not found")
     if row.project_id:
         require_project_role(db, user, row.project_id, minimum_project_role)
@@ -47,11 +51,26 @@ def _edit_access(db: Session, user: User, edit_id: str) -> ImageEditRequest:
     return row
 
 
+def _safe_blob_path(blob: ImageBlob, storage_root: str) -> Path:
+    root = Path(storage_root).resolve()
+    path = Path(blob.storage_path).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail="Image blob path is outside configured storage") from exc
+    if not path.is_file():
+        raise HTTPException(status_code=410, detail="Image content is unavailable")
+    return path
+
+
 async def _read_limited_image(request: Request, limit: int) -> bytes:
-    declared = request.headers.get("content-length")
-    if declared:
+    declared_values = request.headers.get_list("content-length")
+    if declared_values:
+        normalized = {value.strip() for item in declared_values for value in item.split(",") if value.strip()}
+        if len(normalized) != 1:
+            raise HTTPException(status_code=400, detail="Conflicting Content-Length")
         try:
-            size = int(declared)
+            size = int(next(iter(normalized)))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Invalid Content-Length") from exc
         if size < 0:
@@ -103,7 +122,7 @@ async def upload_reference(
     except (ImageReferenceError, ImageRuntimeError) as exc:
         db.rollback()
         message = str(exc)
-        code = 507 if "quota" in message.lower() or "disk" in message.lower() or "storage" in message.lower() else 422
+        code = 507 if any(word in message.lower() for word in ("quota", "disk", "storage")) else 422
         raise HTTPException(status_code=code, detail=message) from exc
     db.commit()
     db.refresh(reference)
@@ -133,25 +152,20 @@ def get_reference(reference_id: str, user: User = Depends(get_current_user), db:
 
 
 @router.get("/references/{reference_id}/content")
-def reference_content(reference_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
+def reference_content(reference_id: str, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
     reference = _reference_access(db, user, reference_id)
     blob = db.get(ImageBlob, reference.blob_id)
     if blob is None:
         raise HTTPException(status_code=410, detail="Reference image blob is unavailable")
-    path = Path(blob.storage_path)
-    if not path.is_file():
-        raise HTTPException(status_code=410, detail="Reference image content is unavailable")
+    path = _safe_blob_path(blob, request.app.state.settings.image_storage_path)
     return FileResponse(path=path, media_type=blob.media_type, headers={"Cache-Control": "private, no-store", "ETag": blob.sha256})
 
 
 @router.delete("/references/{reference_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_reference(reference_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
+def delete_reference(reference_id: str, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
     reference = _reference_access(db, user, reference_id)
-    if reference.project_id:
-        if reference.user_id != user.id:
-            require_project_role(db, user, reference.project_id, "manager")
-    elif reference.user_id != user.id:
-        raise HTTPException(status_code=404, detail="Image reference not found")
+    if reference.project_id and reference.user_id != user.id:
+        require_project_role(db, user, reference.project_id, "manager")
     active = db.scalar(
         select(func.count(ImageEditRequest.id)).where(
             ImageEditRequest.status.in_(["queued", "planning", "generating"]),
@@ -164,9 +178,19 @@ def delete_reference(reference_id: str, user: User = Depends(get_current_user), 
     ) or 0
     if int(active) > 0:
         raise HTTPException(status_code=409, detail="Reference is used by an active image edit")
-    reference.status = "deleted"
-    reference.deleted_at = utcnow()
-    db.commit()
+    try:
+        unlink_after_commit = delete_reference_bytes(db, reference, storage_root=request.app.state.settings.image_storage_path)
+        db.commit()
+    except ImageReferenceError as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if unlink_after_commit is not None:
+        try:
+            unlink_after_commit.unlink(missing_ok=True)
+        except OSError:
+            # DB ownership is already detached. A later maintenance sweep can
+            # remove the inaccessible orphan without risking a live reference.
+            pass
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -205,12 +229,7 @@ def generation_as_reference(
 
 
 @router.post("/edits", response_model=ImageEditCreateResponse, status_code=status.HTTP_202_ACCEPTED)
-def create_edit(
-    payload: ImageEditCreate,
-    request: Request,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> ImageEditCreateResponse:
+def create_edit(payload: ImageEditCreate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ImageEditCreateResponse:
     require_capability(db, user.id, "images")
     settings = request.app.state.settings
     source = _reference_access(db, user, payload.source_reference_id, "viewer")
@@ -234,7 +253,7 @@ def create_edit(
     if payload.identity_reference_id:
         identity = _reference_access(db, user, payload.identity_reference_id, "viewer")
         if identity.kind not in {"identity", "edit_source"}:
-            raise HTTPException(status_code=422, detail="identity_reference_id is not an identity-capable reference")
+            raise HTTPException(status_code=422, detail="identity_reference_id is not identity-capable")
         if identity.project_id and project_id and identity.project_id != project_id:
             raise HTTPException(status_code=409, detail="Project-scoped identity reference belongs to another project")
 
@@ -242,30 +261,28 @@ def create_edit(
     decision = evaluate_prompt(policy, payload.instruction)
     if not decision.allowed:
         raise HTTPException(status_code=422, detail={"code": "image_policy_blocked", "rule": decision.rule})
-
     try:
         resolved_mode = resolve_edit_mode(payload.mode, payload.instruction)
     except ImageEditError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if str(settings.image_edit_backend).lower() == "disabled":
-        raise HTTPException(status_code=503, detail="Local image editing is not configured")
-    has_local_model = bool(str(settings.image_edit_model_path).strip())
-    has_identity_model = bool(str(settings.image_edit_identity_model_path).strip())
-    has_vision = bool(str(settings.image_vision_qa_url).strip())
-    if not has_local_model and not has_identity_model:
-        raise HTTPException(status_code=503, detail="No local image editing model is configured")
-    if resolved_mode == "identity_recompose" and not has_identity_model:
-        raise HTTPException(status_code=503, detail="Identity-preserving scene editing model is not configured")
-    if resolved_mode in _LOCAL_EDIT_MODES and not has_local_model:
-        raise HTTPException(status_code=503, detail="Local inpainting model is not configured")
-    if resolved_mode == "identity_recompose" and payload.preserve_identity and not has_vision:
-        raise HTTPException(status_code=503, detail="Identity-preserving scene editing requires local vision QA")
-    if payload.strict_quality and settings.image_edit_require_vision_qa and not has_vision:
-        raise HTTPException(status_code=503, detail="Strict image editing requires local vision QA")
+
+    worker = image_worker_snapshot(db, stale_seconds=90)
+    caps = image_edit_capabilities(settings, worker_alive=bool(worker.get("alive")))
+    if str(caps["backend"]) == "disabled" or "unsupported_image_edit_backend" in caps["reasons"]:
+        raise HTTPException(status_code=503, detail="Local image editing backend is not configured")
+    if not caps["worker_alive"]:
+        raise HTTPException(status_code=503, detail="Image worker is not running")
+    if settings.image_edit_require_vision_qa and not caps["vision_ready"]:
+        raise HTTPException(status_code=503, detail="Image editing requires the trusted local Qwen Vision QA endpoint")
+    if resolved_mode == "identity_recompose" and not caps["identity_recompose"]:
+        raise HTTPException(status_code=503, detail="Identity-preserving scene editing is not configured")
+    if resolved_mode in _LOCAL_EDIT_MODES or resolved_mode == "auto":
+        if not caps["local_object_edit"]:
+            raise HTTPException(status_code=503, detail="Local object editing model is not configured")
     if payload.strict_quality and resolved_mode in {"remove_object", "replace_object", "add_object"} and not payload.preserve_outside_mask:
         raise HTTPException(status_code=422, detail="Strict local object editing requires preserve_outside_mask=true")
-    if resolved_mode == "auto" and not payload.mask_reference_id and not has_vision:
-        raise HTTPException(status_code=503, detail="Automatic edit intent/object localization requires local vision QA or an explicit edit mode with a mask")
+    if resolved_mode == "auto" and not payload.mask_reference_id and not caps["vision_ready"]:
+        raise HTTPException(status_code=503, detail="Automatic edit localization requires trusted local vision QA")
 
     try:
         ensure_disk_capacity(settings.image_storage_path, min_free_bytes=settings.image_storage_min_free_bytes, min_free_percent=settings.image_storage_min_free_percent)
@@ -290,6 +307,9 @@ def create_edit(
         raise HTTPException(status_code=422, detail="Image step budget exceeded")
     seed = payload.seed if payload.seed is not None else secrets.randbelow(2**31)
     model_name = settings.image_edit_identity_model_name if resolved_mode == "identity_recompose" else settings.image_edit_model_name
+    if resolved_mode == "identity_recompose" and not str(model_name or "").strip() and caps["backend"] == "qwen-image-edit":
+        model_name = settings.image_edit_model_name
+
     generation = ImageGeneration(
         user_id=user.id,
         project_id=project_id,
@@ -315,6 +335,7 @@ def create_edit(
             "strict_quality": payload.strict_quality,
             "preserve_identity": payload.preserve_identity,
             "preserve_outside_mask": payload.preserve_outside_mask,
+            "worker_heartbeat_at_admission": worker.get("last_checked_at"),
         },
     )
     db.add(generation)
@@ -355,11 +376,7 @@ def create_edit(
 
 
 @router.get("/edits", response_model=list[ImageEditRead])
-def list_edits(
-    project_id: str | None = None,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> list[ImageEditRequest]:
+def list_edits(project_id: str | None = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[ImageEditRequest]:
     if project_id:
         require_project_role(db, user, project_id, "viewer")
         stmt = select(ImageEditRequest).where(ImageEditRequest.project_id == project_id)
@@ -391,12 +408,3 @@ def cancel_edit(edit_id: str, user: User = Depends(get_current_user), db: Sessio
     db.commit()
     db.refresh(edit)
     return edit
-
-
-@router.get("/studio", response_class=HTMLResponse, include_in_schema=False)
-def image_studio() -> HTMLResponse:
-    nonce = secrets.token_urlsafe(18)
-    html = r'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OLYA AI — редактор фото</title>
-<style nonce="__NONCE__">:root{color-scheme:dark;--bg:#090b10;--card:#131821;--line:#2a3140;--text:#f4f6fa;--muted:#9aa5b4;--accent:#d34747;--ok:#69d69a;--bad:#ff8383}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 Inter,system-ui,Arial,sans-serif}.wrap{max-width:1100px;margin:auto;padding:28px 18px 50px}h1{font-size:34px;margin:0 0 6px}.lead{color:var(--muted);margin:0 0 24px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px}.drop{display:flex;align-items:center;justify-content:center;min-height:310px;border:1px dashed #465065;border-radius:13px;overflow:hidden;position:relative}.drop img,.result img{max-width:100%;max-height:520px;display:block}.drop input{position:absolute;inset:0;opacity:0;cursor:pointer}.placeholder{color:var(--muted);text-align:center;padding:30px}textarea{width:100%;min-height:110px;background:#0d1118;color:#fff;border:1px solid var(--line);border-radius:12px;padding:12px;resize:vertical;margin-top:12px}button{border:0;border-radius:10px;padding:11px 15px;background:var(--accent);color:white;font-weight:700;cursor:pointer}button:disabled{opacity:.5;cursor:default}.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px}.state{margin-top:12px;color:var(--muted);white-space:pre-wrap}.state.bad{color:var(--bad)}.state.ok{color:var(--ok)}.result{min-height:310px;display:flex;align-items:center;justify-content:center;background:#0d1118;border-radius:13px;overflow:hidden}.pill{font-size:12px;border:1px solid var(--line);border-radius:999px;padding:4px 8px;color:var(--muted)}label{color:#dfe5ef}@media(max-width:760px){.grid{grid-template-columns:1fr}.wrap{padding:18px 10px}h1{font-size:28px}}</style></head><body><div class="wrap"><h1>Редактор фото</h1><p class="lead">Загрузите фотографию и напишите, что нужно изменить. Локальные правки защищают пиксели вне редактируемой области; изменения человека проходят отдельную проверку сходства.</p><div class="grid"><section class="card"><div class="drop" id="drop"><div class="placeholder" id="ph">Нажмите или перетащите JPG/PNG/WebP<br>Исходник останется локальным в OLYA AI</div><img id="source" hidden alt="Исходное фото"><input id="file" type="file" accept="image/png,image/jpeg,image/webp"></div><textarea id="instruction" maxlength="6000" placeholder="Например: убери корабль на заднем фоне"></textarea><div class="row"><label><input id="strict" type="checkbox" checked> Строгая проверка</label><span class="pill">Auto edit</span><button id="run" disabled>Изменить фото</button></div><div class="state" id="state">Проверяем доступность редактора…</div></section><section class="card"><div class="result" id="result"><div class="placeholder">Здесь появится только изображение, прошедшее QA</div></div><div class="state" id="qa"></div></section></div></div>
-<script nonce="__NONCE__">const token=sessionStorage.getItem('x1_access_token');if(!token){location.replace('/login')}const $=id=>document.getElementById(id);let sourceRef=null,sourceUrl=null,resultUrl=null,busy=false;const auth=()=>({Authorization:'Bearer '+token});function detail(d,s){if(d&&typeof d.detail==='string')return d.detail;if(d&&d.detail&&d.detail.message)return d.detail.message;return s===503?'Редактор изображений пока не настроен на этом сервере.':'Операция не выполнена.'}async function json(path,opt={}){const h={...auth(),...(opt.headers||{})};if(opt.body&&typeof opt.body==='string')h['Content-Type']='application/json';const r=await fetch(path,{...opt,headers:h,credentials:'omit'});let d=null;try{d=await r.json()}catch{}if(r.status===401){sessionStorage.clear();location.replace('/login');throw new Error('Сессия завершена')}if(!r.ok)throw new Error(detail(d,r.status));return d}async function blob(path){const r=await fetch(path,{headers:auth(),credentials:'omit'});if(!r.ok)throw new Error('Не удалось загрузить изображение');return r.blob()}function status(t,kind=''){const e=$('state');e.textContent=t;e.className='state '+kind}async function readiness(){try{const d=await json('/v1/images/status');const e=d.editing||{};if(!e.available){status('Редактор пока недоступен: '+(e.strict_quality_ready===false?'не настроена локальная проверка качества':'не настроена локальная модель редактирования'),'bad')}else status('Готово. Для локальных правок исходные пиксели вне области редактирования будут сохранены.','ok')}catch(e){status(e.message,'bad')}}async function upload(file){busy=true;$('run').disabled=true;status('Загружаем и нормализуем исходник…');try{const q=new URLSearchParams({filename:file.name,kind:'edit_source'});const r=await fetch('/v1/images/references?'+q,{method:'POST',headers:{...auth(),'Content-Type':file.type||'application/octet-stream'},body:file,credentials:'omit'});let d=null;try{d=await r.json()}catch{}if(!r.ok)throw new Error(detail(d,r.status));sourceRef=d;if(sourceUrl)URL.revokeObjectURL(sourceUrl);sourceUrl=URL.createObjectURL(file);$('source').src=sourceUrl;$('source').hidden=false;$('ph').hidden=true;status('Фото загружено. Опишите изменение.','ok')}catch(e){sourceRef=null;status(e.message,'bad')}finally{busy=false;$('run').disabled=!sourceRef}}$('file').addEventListener('change',e=>{const f=e.target.files&&e.target.files[0];if(f)upload(f)});$('instruction').addEventListener('input',()=>{$('run').disabled=busy||!sourceRef||!$('instruction').value.trim()});async function poll(editId,generationId){for(let i=0;i<600;i++){await new Promise(r=>setTimeout(r,1500));const edit=await json('/v1/images/edits/'+editId);status('Статус: '+edit.status+(edit.status==='generating'?' — выполняется локальная генерация и QA':''));if(edit.status==='failed')throw new Error(edit.error_message||'Результат отклонён проверкой качества');if(edit.status==='cancelled')throw new Error('Редактирование отменено');if(edit.status==='ready'){const b=await blob('/v1/images/generations/'+generationId+'/content?variant=preferred');if(resultUrl)URL.revokeObjectURL(resultUrl);resultUrl=URL.createObjectURL(b);const img=document.createElement('img');img.src=resultUrl;img.alt='Отредактированное фото';$('result').replaceChildren(img);const q=edit.qa_summary||{};$('qa').textContent='QA: пройдено. Режим: '+(q.mode||'edit')+', попыток: '+(q.attempts||1)+'.';$('qa').className='state ok';status('Готово — показан только QA-прошедший результат.','ok');return}}throw new Error('Редактирование превысило безопасное время ожидания')}$('run').onclick=async()=>{if(busy||!sourceRef)return;const instruction=$('instruction').value.trim();if(!instruction)return;busy=true;$('run').disabled=true;$('qa').textContent='';$('result').innerHTML='<div class="placeholder">Редактируем и проверяем…</div>';try{const r=await json('/v1/images/edits',{method:'POST',body:JSON.stringify({source_reference_id:sourceRef.id,instruction,mode:'auto',preserve_identity:true,preserve_outside_mask:true,strict_quality:$('strict').checked})});status('Задача принята. Планируем область изменения…');await poll(r.edit.id,r.generation_id)}catch(e){status(e.message,'bad');$('qa').textContent='Результат не выдан: проверка или выполнение не завершились успешно.';$('qa').className='state bad'}finally{busy=false;$('run').disabled=!sourceRef||!$('instruction').value.trim()}};readiness();</script></body></html>'''.replaceAll("__NONCE__", nonce)
-    return HTMLResponse(html, headers={"Content-Security-Policy": f"default-src 'self'; img-src 'self' blob: data:; style-src 'nonce-{nonce}'; script-src 'nonce-{nonce}'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'", "Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow, noarchive"})
