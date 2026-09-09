@@ -271,7 +271,7 @@ async def graceful_overload_admission(request: Request, call_next):
 async def privacy_headers(request: Request, call_next):
     response = await call_next(request)
     path = request.url.path
-    if path.startswith(("/v1/", "/admin", "/media-admin", "/app")):
+    if path.startswith(("/v1/", "/admin", "/media-admin", "/app", "/studio")):
         response.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive, nosnippet"
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
@@ -284,7 +284,7 @@ async def privacy_headers(request: Request, call_next):
 
 @app.get("/robots.txt", include_in_schema=False)
 def robots() -> PlainTextResponse:
-    return PlainTextResponse("User-agent: *\nDisallow: /v1/\nDisallow: /app\nDisallow: /admin\nDisallow: /media-admin\n", headers={"Cache-Control": "public, max-age=86400"})
+    return PlainTextResponse("User-agent: *\nDisallow: /v1/\nDisallow: /app\nDisallow: /studio\nDisallow: /admin\nDisallow: /media-admin\n", headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.exception_handler(StaleDataError)
@@ -337,6 +337,7 @@ for module in (
     "app.api.routes.beta",
     "app.api.routes.beta_ops",
     "app.api.routes.launch",
+    "app.image_studio_ui",
     "app.beta_admin_ui",
     "app.launch_admin_ui",
 ):
