@@ -10,13 +10,7 @@ from app.services.image_editing import ImageEditError
 
 
 class QwenImageEditBackend:
-    """Local-files-only adapter for Qwen-Image-Edit / Qwen-Image-Edit-2509.
-
-    The adapter deliberately exposes the same two operations used by the edit
-    runtime. Local-object edits still run through server-side mask compositing,
-    while identity recomposition may use the 2509 Plus pipeline's multi-image
-    input (identity reference + scene/source image).
-    """
+    """Local-files-only adapter for Qwen-Image-Edit / Qwen-Image-Edit-2509."""
 
     def __init__(self, *, model_path: str, identity_model_path: str = "", require_cuda: bool = True):
         self.model_path = str(model_path or "").strip()
@@ -51,6 +45,25 @@ class QwenImageEditBackend:
             raise ImageEditError("torch is unavailable in image worker") from exc
         return torch
 
+    def preflight(self) -> dict:
+        """Validate files/device before the worker advertises a healthy heartbeat."""
+        local_path, local_class = self._validate_path(self.model_path)
+        identity_path, identity_class = (local_path, local_class)
+        if self.identity_model_path != self.model_path:
+            identity_path, identity_class = self._validate_path(self.identity_model_path)
+        torch = self._torch()
+        cuda = bool(torch.cuda.is_available())
+        if self.require_cuda and not cuda:
+            raise ImageEditError("Qwen Image Edit requires a CUDA image worker")
+        return {
+            "local_path": str(local_path),
+            "identity_path": str(identity_path),
+            "local_class": local_class,
+            "identity_class": identity_class,
+            "cuda": cuda,
+            "cuda_devices": int(torch.cuda.device_count()) if cuda else 0,
+        }
+
     def _load(self, path_value: str):
         path, class_name = self._validate_path(path_value)
         try:
@@ -60,7 +73,6 @@ class QwenImageEditBackend:
                 raise ImageEditError("Qwen Image Edit requires a CUDA image worker in the current production profile")
             dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
             kwargs = {"torch_dtype": dtype, "local_files_only": True}
-            # device_map avoids a second full copy for large/quantized checkpoints.
             if torch.cuda.is_available():
                 kwargs["device_map"] = "cuda"
             pipe = DiffusionPipeline.from_pretrained(str(path), **kwargs)
@@ -80,8 +92,6 @@ class QwenImageEditBackend:
 
     def _identity_pipe(self):
         if self._identity is None:
-            # Reuse the loaded object when both capabilities point at exactly the
-            # same checkpoint. This matters for 20B-class edit models.
             if self.identity_model_path == self.model_path and self._local is not None:
                 self._identity, self._identity_class = self._local, self._local_class
             else:
@@ -111,9 +121,6 @@ class QwenImageEditBackend:
         return images[0].convert("RGB")
 
     def edit_local(self, *, source: Image.Image, mask: Image.Image, prompt: str, negative_prompt: str, steps: int, seed: int) -> Image.Image:
-        # Qwen performs instruction-based appearance editing. The mask is enforced
-        # after generation by server-side compositing, so Qwen cannot modify exact
-        # pixels outside the allowed region even though it sees the whole source.
         _ = mask
         pipe = self._local_pipe()
         kwargs = {
