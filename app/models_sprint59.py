@@ -23,7 +23,8 @@ class ImageReference(Base):
     The bytes live in the existing content-addressed ImageBlob store. Ownership
     and project access are deliberately separate from ImageBlob because blobs are
     globally deduplicated and therefore must never be used as an authorization
-    primitive.
+    primitive. `blob_id` becomes null after privacy deletion while this metadata
+    row remains available for edit provenance/audit.
     """
 
     __tablename__ = "image_references"
@@ -37,7 +38,7 @@ class ImageReference(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     project_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True, index=True)
-    blob_id: Mapped[str] = mapped_column(String(36), ForeignKey("image_blobs.id", ondelete="RESTRICT"), nullable=False)
+    blob_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("image_blobs.id", ondelete="RESTRICT"), nullable=True)
     kind: Mapped[str] = mapped_column(String(24), nullable=False, default="edit_source")
     original_name: Mapped[str] = mapped_column(String(240), nullable=False, default="image.png")
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="ready")
