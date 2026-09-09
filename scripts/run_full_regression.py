@@ -101,7 +101,10 @@ def main() -> int:
     args = parser.parse_args()
     try:
         restore_legacy_suite()
+        # Validate opaque historical source transfers before importing pytest/app.
+        # Wrapper-shape checks alone cannot detect a truncated gzip/base85 payload.
         for module, extra in (
+            ("scripts.canonical_source_audit", []),
             ("scripts.model_regression_lab", ["--validate-only"]),
             ("scripts.rc_security_audit", []),
         ):
