@@ -29,6 +29,14 @@ def main() -> int:
     legacy_code = read("app/api/routes/code.py")
     jobs = read("app/services/jobs.py")
     safety = read("app/services/safety.py")
+    image_endpoint = read("app/services/image_vision_endpoint.py")
+    image_editing = read("app/services/image_editing.py")
+    image_runtime = read("app/services/image_edit_runtime.py")
+    image_refs = read("app/services/image_references.py")
+    image_routes = read("app/api/routes/image_editing.py")
+    image_worker = read("scripts/image_worker.py")
+    qwen_image = read("app/services/qwen_image_edit_backend.py")
+    image_gpu = read("docker-compose.image-gpu.yml")
 
     check("docker_socket_single_boundary", compose.count("/var/run/docker.sock:/var/run/docker.sock") == 1)
     sandbox_block = compose.split("  sandbox-worker:", 1)[1].split("  document-worker:", 1)[0]
@@ -65,6 +73,20 @@ def main() -> int:
     check("durable_job_idempotency_savepoint", "with db.begin_nested()" in jobs and "except IntegrityError" in jobs)
     check("safety_service_is_reviewable_source", "b85decode" not in safety and "exec(compile" not in safety)
 
+    # Private image editing is a separate trust boundary because raw user photos
+    # are more sensitive than generated outputs. The verifier must never be an
+    # arbitrary remote URL and the generative backend cannot authorize delivery.
+    check("image_vision_private_origin", "configured internal llama.cpp origin" in image_endpoint and "parsed.username" in image_endpoint)
+    check("image_vision_no_env_proxy", "trust_env=False" in image_editing)
+    check("image_local_pixels_restored", "composite_preserving_outside" in image_runtime and "outside_mask_change_score" in image_runtime)
+    check("image_identity_requires_semantic_qa", "Identity-preserving scene editing requires local semantic vision QA" in image_runtime)
+    check("image_policy_qa_fail_closed", "Image editing policy requires local semantic vision QA" in image_runtime)
+    check("image_worker_is_durable_and_observable", 'kinds={"image.generate", "image.edit"}' in image_worker and "write_image_worker_heartbeat" in image_worker and "preflight" in image_worker)
+    check("image_reference_privacy_delete", "reference.blob_id = None" in image_refs and "db.delete(blob)" in image_refs and "unlink_after_commit" in image_routes)
+    check("image_qwen_local_files_only", "local_files_only" in qwen_image and "requires a CUDA image worker" in qwen_image)
+    check("image_qwen_gpu_is_explicit", "runtime: nvidia" in image_gpu and "NVIDIA_VISIBLE_DEVICES" in image_gpu)
+    check("image_content_streaming", "FileResponse" in image_routes and "read_bytes()" not in image_routes)
+
     check("db_pool_bounded", all(marker in db for marker in ("pool_size", "max_overflow", "pool_timeout", "pool_pre_ping")))
     check("db_statement_deadline", "statement_timeout" in db)
     check("db_lock_deadline", "lock_timeout" in db)
@@ -74,7 +96,7 @@ def main() -> int:
     check("canary_auto_rollback_present", "public_launch_auto_rollback" in launch and "rollback_rollout" in launch)
 
     failed = [item["name"] for item in checks if item["status"] != "passed"]
-    payload = {"format": "x1-rc-security-audit-v3", "status": "passed" if not failed else "failed", "critical_failures": failed, "checks": checks}
+    payload = {"format": "x1-rc-security-audit-v4", "status": "passed" if not failed else "failed", "critical_failures": failed, "checks": checks}
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if payload["status"] == "passed" else 2
 
