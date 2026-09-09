@@ -27,7 +27,8 @@ image = [
   "diffusers>=0.35,<1",
   "transformers>=4.55,<6",
   "safetensors>=0.5,<1",
-  "torch>=2.8,<3"
+  "torch>=2.8,<3",
+  "accelerate>=1.10,<2"
 ]
 
 [tool.pytest.ini_options]
