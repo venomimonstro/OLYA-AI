@@ -94,6 +94,12 @@ def create_session(db: Session, user: User) -> tuple[str, AuthSession]:
 def _expensive_public_request(request: Request) -> bool:
     """Identify public operations that can consume scarce CPU/RAM/disk/network."""
     path = request.url.path.rstrip("/")
+    # Recovery/status/cancel are lifecycle controls for work that was already
+    # admitted. They must remain available if rollout exposure changes or a user
+    # circuit breaker opens after the run started; otherwise the user can neither
+    # retrieve nor explicitly stop their already accepted local inference.
+    if path.startswith("/v1/chat/runs/"):
+        return False
     if path.startswith(
         (
             "/v1/chat",
