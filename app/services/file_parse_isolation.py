@@ -17,6 +17,23 @@ class FileParseBusyError(FileParseError):
     pass
 
 
+def _safe_parse_error(detail: str) -> str:
+    folded = detail.casefold()
+    if "unsupported file type" in folded:
+        return "Unsupported file type"
+    if "not been decrypted" in folded or "file has not been decrypted" in folded or "encrypted" in folded:
+        return "Encrypted files are not supported"
+    if "no readable text" in folded:
+        return "No readable text found"
+    if "too many pages" in folded:
+        return "PDF has too many pages"
+    if "compression ratio is unsafe" in folded or "uncompressed content is too large" in folded:
+        return "Office document is too large or has an unsafe compression ratio"
+    if "extracted text exceeds limit" in folded:
+        return "Extracted text exceeds the safe limit"
+    return "File could not be parsed safely"
+
+
 # Single-node X1 intentionally keeps one hostile-document parser process at a
 # time. Without this boundary, a burst of 20 MB PDFs could spawn many 768 MB
 # parser processes and OOM the same host that serves inference.
@@ -65,7 +82,7 @@ def parse_file_isolated(
             raise FileParseError("Isolated file parser could not start") from exc
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "File parser failed")[-1000:].strip()
-            raise FileParseError(detail or "File parser failed")
+            raise FileParseError(_safe_parse_error(detail))
         try:
             payload = json.loads(result.stdout)
             rows = payload.get("segments") or []

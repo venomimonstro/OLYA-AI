@@ -19,7 +19,6 @@ from app.models import (
     DocumentRevision,
     ImageEditRequest,
     ImageGeneration,
-    ProjectFile,
     SearchQueryCache,
     SystemCheckpoint,
     SystemHealthSnapshot,
@@ -119,20 +118,9 @@ def _recover_stale_file_processing(db: Session, settings, *, now: datetime) -> i
     # Parsing is killable and normally bounded by file_parse_timeout_seconds.
     # Five extra minutes cover queueing, DB scheduling and slow filesystem flushes.
     timeout = max(900, int(getattr(settings, "file_parse_timeout_seconds", 45)) + 300)
-    cutoff = now - timedelta(seconds=timeout)
-    rows = list(
-        db.scalars(
-            select(ProjectFile)
-            .where(ProjectFile.status == "processing", ProjectFile.created_at < cutoff)
-            .order_by(ProjectFile.created_at)
-            .limit(200)
-        ).all()
-    )
-    for row in rows:
-        row.status = "error"
-        row.error_message = "File processing was interrupted by a process/server restart; upload again to retry"
-        row.is_current = False
-    return len(rows)
+    from app.services.files import recover_stale_processing
+
+    return recover_stale_processing(db, timeout_seconds=timeout, now=now)
 
 
 def _recover_stale_document_qa(db: Session, settings, *, now: datetime) -> int:

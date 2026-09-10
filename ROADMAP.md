@@ -104,7 +104,7 @@ Recoverable exactly-once logical chat requests, disconnect/reconnect, explicit S
 
 Projects as Product Core: bounded project workspace, project-scoped chat history, role-aware instructions and unified previews for Files, Memory, Tasks and Development.
 
-## Sprint 64 — NEXT
+## Sprint 64 — DONE
 
 Files & RAG UX:
 

@@ -26,3 +26,12 @@ class FileChunkRead(BaseModel):
     page_number: int | None
     content: str
     score: float | None = None
+
+
+class FileCitationRead(BaseModel):
+    file_id: str
+    logical_name: str
+    version: int
+    chunk: int
+    page_number: int | None = None
+    excerpt: str

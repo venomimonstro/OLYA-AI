@@ -2,6 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.schemas.files import FileCitationRead
+
 
 ChatMode = Literal["auto", "fast", "work", "deep"]
 VerificationMode = Literal["off", "auto", "strict"]
@@ -102,6 +104,7 @@ class ChatResponse(BaseModel):
     # a new logical prompt and recover the committed result after reconnect.
     run_id: str | None = None
     client_request_id: str | None = None
+    file_citations: list[FileCitationRead] = Field(default_factory=list)
 
 
 class ChatRunStatus(BaseModel):

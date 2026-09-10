@@ -307,6 +307,14 @@ Services:
 - `file_parse_isolation.py` — killable child parser + queue + RLIMIT;
 - `rag_v2.py` — hybrid lexical scoring/diversity/neighbors;
 - `file_context.py` — bounded context + FILE_REF + prompt-injection quarantine + secret redaction.
+- `file_citations.py` — resolves model-emitted FILE_REF values against project/file/chunk rows and returns bounded source fragments; model-authored metadata is never trusted.
+
+Lifecycle recovery:
+
+- failed, timed-out and restart-interrupted rows remain visible as `error` and outside RAG;
+- manager retry reuses the stored immutable upload and rebuilds chunks transactionally;
+- manager can select any `ready` version as current or delete a version;
+- current-only listing still includes failed/processing rows so errors cannot disappear from the UI.
 
 Storage: `data/files/...`.
 
@@ -1075,6 +1083,8 @@ upload
  → ProjectContextBuilder
  → Chat
  → FILE_REF citations in model context
+ → database-validated ChatResponse.file_citations
+ → bounded source fragment in user UI
 ```
 
 ## 13.4 Автономная разработка

@@ -6,7 +6,7 @@ X1 — self-hosted AI-платформа с локальным inference на Qw
 
 ## Текущая версия
 
-**0.40.0 + Sprints 41–63 — Qwen3.6, streaming, memory/RAG, verification, coding proof, production hardening, onboarding, recoverable chat и project-centric workspace.**
+**0.40.0 + Sprints 41–64 — Qwen3.6, streaming, memory/RAG, verification, coding proof, production hardening, onboarding, recoverable chat, project-centric workspace и управляемый Files/RAG UX.**
 
 GitHub `main` является каноническим исходным кодом. Production-конфигурация fail-closed: дефолтные секреты, SQLite в production, сломанные обязательные routers, красный release gate, неподтверждённый GGUF или небезопасный memory budget не считаются рабочей установкой.
 
@@ -90,6 +90,8 @@ Sprint 43 заменяет имитацию streaming через heartbeat + о�
 После установки публичный сайт находится на `/`, регистрация — `/register`, вход — `/login`, рабочее пространство пользователя — `/app`.
 
 После регистрации/входа пользователь сразу переводится в `/app`. Там доступны канонические серверные диалоги, Auto/Fast/Work/Deep, Auto/Strict/Off verification, internet research `Авто / Всегда / Выкл`, streaming-ответы со Stop, проекты и другие продуктовые контуры.
+
+Files показывает обработку, готовность и ошибки, историю версий, безопасный повтор индексации и manager-only управление. Ответ Chat возвращает только проверенные по БД файловые ссылки с фактически использованными фрагментами; поддельный `FILE_REF` не становится citation.
 
 Ответы по-прежнему вставляются в DOM через `textContent`, а не через небезопасный HTML. CSP использует nonce, access token браузерной сессии хранится в `sessionStorage`.
 

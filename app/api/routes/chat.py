@@ -33,6 +33,7 @@ from app.services.conditional_verification import (
 )
 from app.services.diagnostics import detect_repeat_query, observe_usage
 from app.services.freshness import classify_freshness
+from app.services.file_citations import citations_from_answer
 from app.services.project_context import ProjectContextBuilder
 from app.services.quality import AnswerQualityEngine
 from app.services.quota import QuotaExceededError, ensure_compute_available
@@ -694,6 +695,8 @@ async def _chat_impl(
         output_tokens=primary.output_tokens if primary is not None else 0,
         tokens_per_second=primary.tokens_per_second if primary is not None else None,
     )
+    evidence_context = "\n".join(message.content for message in compiled)
+    file_citations = citations_from_answer(db, project.id if project else None, text_out, evidence_context)
     db.commit()
     return ChatResponse(
         text=text_out,
@@ -716,6 +719,7 @@ async def _chat_impl(
         conversation_id=conversation.id,
         run_id=getattr(request.state, "x1_chat_run_id", None),
         client_request_id=payload.client_request_id,
+        file_citations=file_citations,
     )
 
 

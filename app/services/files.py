@@ -6,6 +6,7 @@ import re
 import unicodedata
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from xml.etree import ElementTree
@@ -317,3 +318,27 @@ def retrieve_chunks(
     limit: int = 6,
 ) -> list[tuple[FileChunk, ProjectFile, float]]:
     return [(hit.chunk, hit.file, hit.score) for hit in retrieve(db, project_id, query, limit=limit)]
+
+
+def recover_stale_processing(
+    db: Session,
+    *,
+    project_id: str | None = None,
+    timeout_seconds: int = 900,
+    now: datetime | None = None,
+) -> int:
+    """Make interrupted parser jobs visible and safely retryable."""
+    current = now or datetime.now(timezone.utc)
+    cutoff = current - timedelta(seconds=max(60, int(timeout_seconds)))
+    stmt = select(ProjectFile).where(
+        ProjectFile.status == "processing",
+        ProjectFile.created_at < cutoff,
+    )
+    if project_id is not None:
+        stmt = stmt.where(ProjectFile.project_id == project_id)
+    rows = list(db.scalars(stmt.order_by(ProjectFile.created_at).limit(200)).all())
+    for row in rows:
+        row.status = "error"
+        row.error_message = "File processing was interrupted or timed out; use Retry to process the stored file again"
+        row.is_current = False
+    return len(rows)

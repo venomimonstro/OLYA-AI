@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -17,7 +17,7 @@ from app.schemas.files import FileChunkRead, FileRead
 from app.services.access import require_project_role
 from app.services.auth import get_current_user
 from app.services.file_parse_isolation import FileParseBusyError, FileParseError, parse_file_isolated
-from app.services.files import chunk_segments, next_file_version, retrieve_chunks, safe_filename, sha256_bytes, storage_path
+from app.services.files import chunk_segments, next_file_version, recover_stale_processing, retrieve_chunks, safe_filename, sha256_bytes, storage_path
 
 router = APIRouter(prefix="/v1/projects", tags=["files"])
 
@@ -62,22 +62,81 @@ def _ensure_storage_capacity(db: Session, user: User, root: Path, incoming_bytes
         raise HTTPException(status_code=507, detail="User file storage quota reached")
 
 
-def _remove_failed_processing_file(db: Session, file: ProjectFile, destination: Path) -> None:
+async def _process_stored_file(db: Session, file: ProjectFile, settings) -> ProjectFile:
+    destination = Path(file.storage_path)
+    if not destination.is_file():
+        file.status = "error"
+        file.error_message = "Stored file content is unavailable; upload a new version"
+        file.is_current = False
+        db.commit()
+        db.refresh(file)
+        return file
     try:
+        segments = await asyncio.to_thread(
+            parse_file_isolated,
+            destination,
+            file.original_name,
+            max_pdf_pages=int(settings.max_pdf_pages),
+            max_docx_unpacked_bytes=int(settings.max_docx_unpacked_bytes),
+            max_extracted_chars=int(settings.file_max_extracted_chars),
+            timeout_seconds=int(settings.file_parse_timeout_seconds),
+            memory_mb=int(settings.file_parse_memory_mb),
+            queue_timeout_seconds=float(settings.file_parse_queue_timeout_seconds),
+        )
+    except FileParseBusyError as exc:
         row = db.get(ProjectFile, file.id)
         if row is not None:
-            db.delete(row)
+            row.status = "error"
+            row.error_message = "File parser is at safe capacity; retry shortly"
+            row.is_current = False
             db.commit()
-    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail="File parser is at safe capacity; retry shortly",
+            headers={"Retry-After": "3"},
+        ) from exc
+    except FileParseError as exc:
+        row = db.get(ProjectFile, file.id)
+        if row is not None:
+            row.status = "error"
+            row.error_message = str(exc)[:1000]
+            row.is_current = False
+            db.commit()
+            db.refresh(row)
+            return row
+        raise HTTPException(status_code=422, detail="File parsing failed") from exc
+
+    chunks = chunk_segments(
+        segments,
+        max_chars=settings.file_chunk_chars,
+        overlap_chars=settings.file_chunk_overlap_chars,
+    )
+    db.execute(select(Project.id).where(Project.id == file.project_id).with_for_update())
+    row = db.get(ProjectFile, file.id)
+    if row is None:
         db.rollback()
-    try:
-        if destination.is_file():
-            destination.unlink()
-        parent = destination.parent
-        if parent.is_dir() and not any(parent.iterdir()):
-            parent.rmdir()
-    except OSError:
-        pass
+        raise HTTPException(status_code=409, detail="File state disappeared during parsing")
+    db.execute(delete(FileChunk).where(FileChunk.file_id == row.id))
+    if not chunks:
+        row.status = "error"
+        row.error_message = "No readable text found"
+        row.is_current = False
+        db.commit()
+        db.refresh(row)
+        return row
+    for ordinal, item in enumerate(chunks):
+        db.add(FileChunk(file_id=row.id, ordinal=ordinal, page_number=item.page_number, content=item.text, content_sha256=sha256_bytes(item.text.encode("utf-8")), char_count=len(item.text)))
+    newer_current = db.scalar(select(ProjectFile.id).where(ProjectFile.project_id == row.project_id, ProjectFile.logical_name == row.logical_name, ProjectFile.version > row.version, ProjectFile.is_current.is_(True)).limit(1))
+    if newer_current is None:
+        db.execute(update(ProjectFile).where(ProjectFile.project_id == row.project_id, ProjectFile.logical_name == row.logical_name, ProjectFile.id != row.id, ProjectFile.is_current.is_(True)).values(is_current=False))
+        row.is_current = True
+    else:
+        row.is_current = False
+    row.status = "ready"
+    row.error_message = ""
+    db.commit()
+    db.refresh(row)
+    return row
 
 
 @router.post("/{project_id}/files", response_model=FileRead, status_code=status.HTTP_201_CREATED)
@@ -119,40 +178,61 @@ async def upload_file(project_id: str, request: Request, filename: str = Query(m
         raise HTTPException(status_code=507, detail="File storage is temporarily unavailable") from exc
     file.storage_path = str(destination)
     db.commit()
-    try:
-        segments = await asyncio.to_thread(parse_file_isolated, destination, filename, max_pdf_pages=int(settings.max_pdf_pages), max_docx_unpacked_bytes=int(settings.max_docx_unpacked_bytes), max_extracted_chars=int(settings.file_max_extracted_chars), timeout_seconds=int(settings.file_parse_timeout_seconds), memory_mb=int(settings.file_parse_memory_mb), queue_timeout_seconds=float(settings.file_parse_queue_timeout_seconds))
-    except FileParseBusyError as exc:
-        _remove_failed_processing_file(db, file, destination)
-        raise HTTPException(status_code=503, detail="File parser is at safe capacity; retry shortly", headers={"Retry-After": "3"}) from exc
-    except FileParseError as exc:
-        row = db.get(ProjectFile, file.id)
-        if row is not None:
-            row.status = "error"; row.error_message = str(exc)[:1000]; row.is_current = False; db.commit(); db.refresh(row); return row
-        raise HTTPException(status_code=422, detail="File parsing failed") from exc
-    chunks = chunk_segments(segments, max_chars=settings.file_chunk_chars, overlap_chars=settings.file_chunk_overlap_chars)
-    db.execute(select(Project.id).where(Project.id == project_id).with_for_update())
-    row = db.get(ProjectFile, file.id)
-    if row is None:
-        db.rollback(); raise HTTPException(status_code=409, detail="File upload state disappeared during parsing")
-    if not chunks:
-        row.status = "error"; row.error_message = "No readable text found"; row.is_current = False; db.commit(); db.refresh(row); return row
-    for ordinal, item in enumerate(chunks):
-        db.add(FileChunk(file_id=row.id, ordinal=ordinal, page_number=item.page_number, content=item.text, content_sha256=sha256_bytes(item.text.encode("utf-8")), char_count=len(item.text)))
-    newer_current = db.scalar(select(ProjectFile.id).where(ProjectFile.project_id == project_id, ProjectFile.logical_name == name, ProjectFile.version > row.version, ProjectFile.is_current.is_(True)).limit(1))
-    if newer_current is None:
-        db.execute(update(ProjectFile).where(ProjectFile.project_id == project_id, ProjectFile.logical_name == name, ProjectFile.id != row.id, ProjectFile.is_current.is_(True)).values(is_current=False))
-        row.is_current = True
-    else:
-        row.is_current = False
-    row.status = "ready"; row.error_message = ""; db.commit(); db.refresh(row); return row
+    return await _process_stored_file(db, file, settings)
 
 
 @router.get("/{project_id}/files", response_model=list[FileRead])
-def list_files(project_id: str, include_history: bool = False, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[ProjectFile]:
+def list_files(project_id: str, request: Request, include_history: bool = False, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[ProjectFile]:
     require_project_role(db, user, project_id, "viewer")
+    timeout = max(900, int(request.app.state.settings.file_parse_timeout_seconds) + 300)
+    if recover_stale_processing(db, project_id=project_id, timeout_seconds=timeout):
+        db.commit()
     stmt = select(ProjectFile).where(ProjectFile.project_id == project_id)
-    if not include_history: stmt = stmt.where(ProjectFile.is_current.is_(True))
+    if not include_history:
+        # Failed/interrupted uploads must remain visible even though they are
+        # intentionally excluded from the current RAG version.
+        stmt = stmt.where(or_(ProjectFile.is_current.is_(True), ProjectFile.status != "ready"))
     return list(db.scalars(stmt.order_by(ProjectFile.logical_name, ProjectFile.version.desc())).all())
+
+
+@router.post("/{project_id}/files/{file_id}/retry", response_model=FileRead)
+async def retry_file(project_id: str, file_id: str, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ProjectFile:
+    require_project_role(db, user, project_id, "manager")
+    db.execute(select(Project.id).where(Project.id == project_id).with_for_update())
+    file = db.scalar(select(ProjectFile).where(ProjectFile.id == file_id, ProjectFile.project_id == project_id).with_for_update())
+    if file is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    if file.status == "ready":
+        db.commit()
+        return file
+    if file.status == "processing":
+        db.rollback()
+        raise HTTPException(status_code=409, detail="File is already processing")
+    if file.status != "error":
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Only failed files can be retried")
+    file.status = "processing"
+    file.error_message = ""
+    file.is_current = False
+    db.commit()
+    return await _process_stored_file(db, file, request.app.state.settings)
+
+
+@router.post("/{project_id}/files/{file_id}/make-current", response_model=FileRead)
+def make_file_current(project_id: str, file_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ProjectFile:
+    require_project_role(db, user, project_id, "manager")
+    db.execute(select(Project.id).where(Project.id == project_id).with_for_update())
+    file = db.get(ProjectFile, file_id)
+    if file is None or file.project_id != project_id:
+        raise HTTPException(status_code=404, detail="File not found")
+    if file.status != "ready":
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Only a ready file version can be current")
+    db.execute(update(ProjectFile).where(ProjectFile.project_id == project_id, ProjectFile.logical_name == file.logical_name, ProjectFile.id != file.id, ProjectFile.is_current.is_(True)).values(is_current=False))
+    file.is_current = True
+    db.commit()
+    db.refresh(file)
+    return file
 
 
 @router.get("/{project_id}/files/{file_id}", response_model=FileRead)
@@ -183,10 +263,28 @@ def search_files(project_id: str, q: str = Query(min_length=2, max_length=1000),
 @router.delete("/{project_id}/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_file(project_id: str, file_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
     require_project_role(db, user, project_id, "manager")
+    db.execute(select(Project.id).where(Project.id == project_id).with_for_update())
     file = db.get(ProjectFile, file_id)
     if file is None or file.project_id != project_id: raise HTTPException(status_code=404, detail="File not found")
     path = Path(file.storage_path)
-    db.delete(file); db.commit()
+    logical_name = file.logical_name
+    was_current = bool(file.is_current)
+    db.delete(file)
+    db.flush()
+    if was_current:
+        replacement = db.scalar(
+            select(ProjectFile)
+            .where(
+                ProjectFile.project_id == project_id,
+                ProjectFile.logical_name == logical_name,
+                ProjectFile.status == "ready",
+            )
+            .order_by(ProjectFile.version.desc())
+            .limit(1)
+        )
+        if replacement is not None:
+            replacement.is_current = True
+    db.commit()
     try:
         if path.is_file(): path.unlink()
     except OSError:
