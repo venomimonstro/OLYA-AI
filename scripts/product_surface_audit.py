@@ -32,6 +32,7 @@ ESSENTIAL_PATHS = {
     "/v1/chat/runs/{client_request_id}",
     "/v1/chat/runs/{client_request_id}/cancel",
     "/v1/projects",
+    "/v1/projects/{project_id}/workspace",
     "/v1/documents",
     "/v1/images/status",
     "/v1/images/generations",

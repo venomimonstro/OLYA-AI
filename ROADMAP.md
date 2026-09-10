@@ -63,7 +63,7 @@ Closed-Beta Operations & Adaptive Capacity Control:
 
 Final Free/X1/Pro/Max/Business numeric limits are deliberately **not fabricated** in Sprint 37. They must be calculated from the actual target node plus the required real beta sample.
 
-## Sprint 38 — NEXT
+## Sprint 38 — DONE
 
 Progressive Public Launch & Measured Plan Finalization:
 - convert the completed closed-beta measurements into final measured Free/X1/Pro/Max/Business resource envelopes and unit economics;
@@ -75,3 +75,42 @@ Progressive Public Launch & Measured Plan Finalization:
 - operator incident runbook and launch dashboard for capacity, queue, quality, complaints and rollback state;
 - require a fresh Sprint 35–37 release/capacity/restore evidence set before each public expansion step;
 - after sufficient real data, persist the production tariff limits as a versioned commercial capacity policy rather than static assumptions.
+
+## Sprints 39–40 — DONE (implementation; target-node acceptance still required)
+
+One-command install/runtime chaos, release recovery guards, security/load closure and final acceptance orchestration.
+
+## Sprints 41–58 — DONE
+
+Adaptive Qwen3.6 routing, immutable model migration, real streaming/Stop, scope lock, long-term memory, RAG 2.0, freshness research, conditional verification, tool reliability, coding proof, autonomous development, document QA, budget transparency, graceful overload, measured server profiles, trusted UI, model regression and installer hardening.
+
+## Sprint 59 — DONE
+
+Local image editing with reference privacy, identity/vision QA and bounded worker execution.
+
+## Sprint 60 — DONE
+
+Unified user product shell for Chat, Projects, Files, Images, API and Account.
+
+## Sprint 61 — DONE
+
+Server-owned onboarding and measurable first value.
+
+## Sprint 62 — DONE (implementation; target-node acceptance still required)
+
+Recoverable exactly-once logical chat requests, disconnect/reconnect, explicit Stop, restart recovery and atomic canonical result commit.
+
+## Sprint 63 — DONE
+
+Projects as Product Core: bounded project workspace, project-scoped chat history, role-aware instructions and unified previews for Files, Memory, Tasks and Development.
+
+## Sprint 64 — NEXT
+
+Files & RAG UX:
+
+- explicit upload/processing/ready/error states;
+- safe retry and manager-only delete/version management;
+- current/history version navigation;
+- visible file citations and source fragments used by Chat;
+- recovery after parsing timeout, application restart and stale processing state;
+- clear unsupported/empty/encrypted-file errors without pretending the file is available to RAG.

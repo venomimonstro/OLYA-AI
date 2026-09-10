@@ -3,7 +3,7 @@
 > **ОБЯЗАТЕЛЬНО ПРОЧИТАТЬ ПЕРЕД ИЗМЕНЕНИЕМ ПРОЕКТА.**  
 > Этот файл — навигационная карта проекта для разработчиков и ИИ-агентов. Он отвечает на вопросы: **куда приходит запрос, какой контроллер его принимает, какой service выполняет бизнес-логику, какие ORM-модели/файлы/воркеры затрагиваются и где проходит граница безопасности**.
 >
-> Актуальность карты: 2026-09-08. Карта составлена по `main` после Sprint 58 и финального hardening-pass.  
+> Актуальность карты: 2026-09-10. Карта составлена по `main` после Sprint 63.
 > **Правило проекта:** если в том же commit добавляется/удаляется controller, worker API, основной service, route prefix или меняется важная межмодульная связь — этот файл должен обновляться в том же commit.
 
 ---
@@ -170,17 +170,21 @@ auth controller
 
 ### `app/api/routes/projects.py` — `/v1/projects`
 
-Назначение: CRUD проектов и участников.
+Назначение: CRUD проектов и участников, а также bounded project workspace snapshot.
 
 Связи:
 
 ```text
 projects controller
  → access.py
+ → project_workspace.py
  → Project / ProjectMember / User
+ → Conversation / ProjectFile / ProjectMemory / Task / DevelopmentPlan
 ```
 
 Owner создаёт проект. `viewer` читает, `member` работает, `manager` управляет проектом; membership меняет только owner.
+
+`GET /v1/projects/{project_id}/workspace` — центральный Sprint 63 overview. Он возвращает только bounded previews и счётчики, не загружая Message, FileChunk, evidence или полный development plan. Все выборки выполняются после canonical project RBAC.
 
 ### `app/api/routes/conversations.py` — `/v1/conversations`
 
@@ -724,7 +728,7 @@ Models: `PublicRollout`, `MeasuredPlanCatalog`, `CircuitBreakerEvent`, `BetaPart
 | Файл | Route | Назначение |
 |---|---|---|
 | `app/public_ui.py` | `/`, `/login`, `/register` | Публичный сайт и auth pages. |
-| `app/user_ui.py` | `/app` | Основной ChatGPT-подобный workspace UI; использует Auth, Conversations, Usage, Research, Chat stream. |
+| `app/user_ui.py` | `/app` | Основной workspace UI; Chat и project-centric обзор инструкций, чатов, файлов, памяти, задач и разработки через существующие API. |
 | `app/admin_ui.py` | `/admin` | Общий operations/reliability/admin console. |
 | `app/media_admin_ui.py` | `/admin/media` | Media moderation, policy, training/datasets. |
 | `app/beta_admin_ui.py` | `/admin/beta` | Closed-beta waves/capacity/feedback. |
@@ -878,6 +882,7 @@ Worker execution находится в `scripts/image_worker.py`.
 ```text
 budget_transparency.py
 commerce.py
+project_workspace.py
 measured_plans.py
 capacity.py
 adaptive_capacity.py

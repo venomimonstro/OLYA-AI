@@ -6,8 +6,10 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import Project, ProjectMember, User
 from app.schemas.projects import MemberResponse, MemberUpsert, ProjectCreate, ProjectResponse, ProjectUpdate
+from app.schemas.project_workspace import ProjectWorkspaceResponse
 from app.services.access import list_accessible_projects, project_role, require_project_role
 from app.services.auth import get_current_user, normalize_email
+from app.services.project_workspace import build_project_workspace
 
 router = APIRouter(prefix="/v1/projects", tags=["projects"])
 
@@ -47,6 +49,16 @@ def list_projects(user: User = Depends(get_current_user), db: Session = Depends(
 def get_project(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ProjectResponse:
     project, _ = require_project_role(db, user, project_id, "viewer")
     return _response(db, user, project)
+
+
+@router.get("/{project_id}/workspace", response_model=ProjectWorkspaceResponse)
+def get_project_workspace(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ProjectWorkspaceResponse:
+    project, role = require_project_role(db, user, project_id, "viewer")
+    return build_project_workspace(db, project, role)
 
 
 @router.patch("/{project_id}", response_model=ProjectResponse)
