@@ -29,6 +29,8 @@ ESSENTIAL_PATHS = {
     "/v1/account/onboarding",
     "/v1/chat",
     "/v1/chat/stream",
+    "/v1/chat/runs/{client_request_id}",
+    "/v1/chat/runs/{client_request_id}/cancel",
     "/v1/projects",
     "/v1/documents",
     "/v1/images/status",
