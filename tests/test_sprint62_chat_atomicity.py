@@ -97,6 +97,31 @@ def test_atomicity_survives_intermediate_verification_flush(register_user, db_se
     ChatResponse.model_validate(persisted.result_json)
 
 
+def test_old_assistant_cannot_make_new_usage_look_successful(register_user, db_session):
+    data, _ = register_user("sprint62-stale-assistant@example.com")
+    conversation = Conversation(owner_id=data["user_id"], title="Stale guard")
+    db_session.add(conversation)
+    db_session.commit()
+
+    db_session.add(Message(conversation_id=conversation.id, role="assistant", content="older answer"))
+    db_session.commit()
+    run = _run(
+        db_session,
+        user_id=data["user_id"],
+        conversation_id=conversation.id,
+        request_id="ui_stale_123456",
+    )
+
+    # Malformed future code that records success without a current assistant
+    # must fail closed instead of reusing the previous turn's assistant message.
+    db_session.add(_usage(user_id=data["user_id"], conversation_id=conversation.id, request_id=run.id))
+    db_session.commit()
+    db_session.expire_all()
+    persisted = db_session.get(ChatRun, run.id)
+    assert persisted.status == "running"
+    assert persisted.result_json == {}
+
+
 def test_failed_usage_does_not_fake_success(register_user, db_session):
     data, _ = register_user("sprint62-atomic-failed@example.com")
     conversation = Conversation(owner_id=data["user_id"], title="Failed")
@@ -149,3 +174,4 @@ def test_atomicity_guard_is_registered_from_canonical_model_registry():
     assert callable(guard._compact_result)
     source = (guard.__file__ and __import__("pathlib").Path(guard.__file__).read_text("utf-8")) or ""
     assert "Verification can flush AnswerAudit before UsageEvent" in source
+    assert "Message.created_at >= run.created_at" in source
