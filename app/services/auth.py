@@ -193,6 +193,11 @@ def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials
     last_seen = session.last_seen_at if session.last_seen_at.tzinfo else session.last_seen_at.replace(tzinfo=timezone.utc)
     if (now - last_seen).total_seconds() > 300:
         session.last_seen_at = now
-        db.commit()
+    # A FastAPI yield dependency lives until a StreamingResponse closes. End the
+    # authentication transaction unconditionally so long chat/SSE connections do
+    # not pin a PostgreSQL connection for the duration of local inference. The
+    # Session object remains reusable by normal handlers and starts a fresh
+    # transaction on their next DB operation.
+    db.commit()
     request.state.auth_session_id = session.id
     return user
