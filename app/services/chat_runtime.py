@@ -22,10 +22,27 @@ _CHAT_RUN_RETENTION = timedelta(hours=24)
 _CHAT_RUN_STALE_AFTER = timedelta(minutes=15)
 _CHAT_RUN_PRUNE_INTERVAL_SECONDS = 3600.0
 _MAX_TRANSIENT_RUNS_PER_USER = 256
+_MAX_RUN_ATTEMPTS = 3
 
 
 class ChatRunConflict(RuntimeError):
     pass
+
+
+def _retryable(status: str, error_code: str) -> bool:
+    if status == "interrupted":
+        return True
+    if status == "cancelled":
+        return False
+    if status != "failed":
+        return False
+    if error_code.startswith("http_"):
+        try:
+            code = int(error_code.split("_", 1)[1])
+        except ValueError:
+            return True
+        return code == 429 or code >= 500
+    return error_code not in {"resume_attempts_exhausted"}
 
 
 @dataclass(frozen=True)
@@ -81,7 +98,7 @@ class ActiveChatJob:
             result=self.result,
             error_code=self.error_code,
             error_detail=self.error_detail,
-            retryable=self.status in {"failed", "cancelled", "interrupted"},
+            retryable=_retryable(self.status, self.error_code),
         )
 
     def _publish_nowait(self, event: str, data: dict) -> None:
@@ -157,6 +174,14 @@ class ChatExecutionManager:
         self._next_prune_at = 0.0
         self._closing = False
 
+    def startup(self) -> None:
+        """Begin a new application lifespan with a fresh runtime identity."""
+        if self._jobs:
+            raise RuntimeError("Cannot start chat runtime while old jobs are still active")
+        self.runtime_id = str(uuid4())
+        self._closing = False
+        self._next_prune_at = 0.0
+
     @staticmethod
     def _client_id(payload: ChatRequest) -> str:
         return payload.client_request_id or ("srv_" + uuid4().hex)
@@ -172,7 +197,7 @@ class ChatExecutionManager:
             result=result,
             error_code=row.error_code or "",
             error_detail=row.error_detail or "",
-            retryable=row.status in {"failed", "cancelled", "interrupted"},
+            retryable=_retryable(row.status, row.error_code or ""),
         )
 
     @staticmethod
@@ -293,6 +318,16 @@ class ChatExecutionManager:
             # not the state the transport callback merely attempted to write.
             return self._snapshot_from_row(row)
 
+    @staticmethod
+    def _exhaust_resume(row: ChatRun) -> ChatRunSnapshot:
+        now = utcnow()
+        row.status = "failed"
+        row.error_code = "resume_attempts_exhausted"
+        row.error_detail = "Chat recovery stopped after repeated application interruptions. Submit the prompt again as a new request."
+        row.updated_at = now
+        row.completed_at = now
+        return ChatExecutionManager._snapshot_from_row(row)
+
     def _activate_row(
         self,
         row: ChatRun,
@@ -329,6 +364,46 @@ class ChatExecutionManager:
         self._jobs[key] = job
         job.task = asyncio.create_task(self._execute(key, job, runner), name=f"x1-chat-run-{row.id}")
         return job
+
+    def _interrupt_or_reject_other_conversation_run(
+        self,
+        db,
+        *,
+        user_id: str,
+        conversation_id: str | None,
+        client_request_id: str,
+    ) -> None:
+        if not conversation_id:
+            return
+        for other in self._jobs.values():
+            if (
+                other.user_id == user_id
+                and other.conversation_id == conversation_id
+                and other.client_request_id != client_request_id
+                and other.status == "running"
+            ):
+                raise ChatRunConflict("Conversation already has an active chat request")
+        rows = list(
+            db.scalars(
+                select(ChatRun).where(
+                    ChatRun.user_id == user_id,
+                    ChatRun.conversation_id == conversation_id,
+                    ChatRun.status == "running",
+                    ChatRun.client_request_id != client_request_id,
+                ).limit(8)
+            ).all()
+        )
+        for row in rows:
+            if (row.user_id, row.client_request_id) in self._jobs:
+                raise ChatRunConflict("Conversation already has an active chat request")
+            # In the supported single-worker topology an unowned running row is
+            # left by an older/lost runtime. Mark it recoverable before admitting
+            # a new turn so transcript order cannot become user,user,assistant.
+            row.status = "interrupted"
+            row.error_code = "superseded_after_runtime_loss"
+            row.error_detail = "A newer request was accepted after the previous runtime was no longer active."
+            row.updated_at = utcnow()
+            row.completed_at = utcnow()
 
     async def start_or_attach(
         self,
@@ -371,23 +446,17 @@ class ChatExecutionManager:
                         row.completed_at = utcnow()
                         db.commit()
                         return self._snapshot_from_row(row)
-                    if row.status == "running" and row.runtime_id != self.runtime_id:
-                        # Single-worker deployment: another runtime id means the
-                        # old app process is gone. Reuse the same logical request
-                        # id and increment attempt rather than creating a duplicate
-                        # conversation/run record after restart.
-                        job = self._activate_row(
-                            row,
+                    if row.status in {"running", "interrupted"}:
+                        if int(row.attempt or 0) >= _MAX_RUN_ATTEMPTS:
+                            snapshot = self._exhaust_resume(row)
+                            db.commit()
+                            return snapshot
+                        self._interrupt_or_reject_other_conversation_run(
+                            db,
                             user_id=user_id,
+                            conversation_id=row.conversation_id or payload.conversation_id,
                             client_request_id=client_request_id,
-                            fingerprint=fingerprint,
-                            payload=payload,
-                            runner=runner,
-                            key=key,
                         )
-                        db.commit()
-                        return job
-                    if row.status == "interrupted":
                         job = self._activate_row(
                             row,
                             user_id=user_id,
@@ -401,6 +470,12 @@ class ChatExecutionManager:
                         return job
                     return self._snapshot_from_row(row)
 
+                self._interrupt_or_reject_other_conversation_run(
+                    db,
+                    user_id=user_id,
+                    conversation_id=payload.conversation_id,
+                    client_request_id=client_request_id,
+                )
                 self._trim_user_runs(db, user_id)
                 row = ChatRun(
                     user_id=user_id,
@@ -558,7 +633,6 @@ class ChatExecutionManager:
                 # task. Their durable rows remain recoverable/interrupted rather
                 # than being falsely recorded as a user-requested cancellation.
                 pass
-        self._closing = False
 
 
 chat_execution_manager = ChatExecutionManager()
