@@ -304,6 +304,13 @@ class ChatExecutionManager:
         runner: Runner,
         key: tuple[str, str],
     ) -> ActiveChatJob:
+        # The first attempt may have created/bound a canonical conversation before
+        # the old process died. Mutate the current request object to that durable
+        # scope before spawning the runner; its closure references this same
+        # Pydantic instance. Without this, an API client that originally omitted
+        # conversation_id could create a second conversation on restart.
+        if row.conversation_id is not None and payload.conversation_id is None:
+            payload.conversation_id = row.conversation_id
         row.status = "running"
         row.runtime_id = self.runtime_id
         row.attempt = max(1, int(row.attempt or 0) + 1)
