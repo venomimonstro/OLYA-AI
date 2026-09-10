@@ -174,6 +174,11 @@ async def lifespan(app: FastAPI):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+        # A process restart is not the same thing as the user pressing Stop.
+        # Interrupt managed chat jobs explicitly before closing llama.cpp so the
+        # durable ChatRun can be resumed with the same logical request id.
+        from app.services.chat_runtime import chat_execution_manager
+        await chat_execution_manager.shutdown()
         await app.state.llama.close()
 
 
