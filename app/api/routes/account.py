@@ -19,13 +19,41 @@ from app.models import (
     UsageEvent,
     User,
 )
+from app.schemas.onboarding import OnboardingStatus
 from app.services.auth import get_current_user
+from app.services.onboarding import dismiss_onboarding, onboarding_payload, reconcile_onboarding, reopen_onboarding
 
 router = APIRouter(prefix="/v1/account", tags=["account"])
 
 
 def _iso(value):
     return value.isoformat() if value is not None else None
+
+
+@router.get("/onboarding", response_model=OnboardingStatus)
+def onboarding_status(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> OnboardingStatus:
+    row = reconcile_onboarding(db, user)
+    payload = onboarding_payload(row)
+    db.commit()
+    return OnboardingStatus.model_validate(payload)
+
+
+@router.post("/onboarding/dismiss", response_model=OnboardingStatus)
+def onboarding_dismiss(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> OnboardingStatus:
+    reconcile_onboarding(db, user)
+    row = dismiss_onboarding(db, user)
+    payload = onboarding_payload(row)
+    db.commit()
+    return OnboardingStatus.model_validate(payload)
+
+
+@router.post("/onboarding/reopen", response_model=OnboardingStatus)
+def onboarding_reopen(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> OnboardingStatus:
+    reconcile_onboarding(db, user)
+    row = reopen_onboarding(db, user)
+    payload = onboarding_payload(row)
+    db.commit()
+    return OnboardingStatus.model_validate(payload)
 
 
 @router.get("/export")
