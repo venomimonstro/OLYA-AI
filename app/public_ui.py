@@ -6,7 +6,10 @@ import secrets
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
+from app.onboarding_ui import router as onboarding_ui_router
+
 router = APIRouter(tags=["public-site"])
+router.include_router(onboarding_ui_router)
 
 
 def _page(title: str, body: str, *, script: str = "") -> HTMLResponse:
@@ -72,7 +75,8 @@ def _auth_form(kind: str) -> HTMLResponse:
     script = f"""
 const existing=sessionStorage.getItem('x1_access_token');if(existing)location.replace('/app');
 const form=document.getElementById('auth-form');const statusBox=document.getElementById('status');
-form.addEventListener('submit',async(e)=>{{e.preventDefault();statusBox.className='status';statusBox.textContent='Проверяем данные…';const payload={{email:document.getElementById('email').value,password:document.getElementById('password').value}};const name=document.getElementById('name');if(name)payload.display_name=name.value;try{{const r=await fetch('{endpoint}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(payload),credentials:'omit'}});let data={{}};try{{data=await r.json()}}catch(_e){{}}if(!r.ok){{const detail=typeof data.detail==='string'?data.detail:'Не удалось выполнить запрос';throw new Error(detail)}}sessionStorage.setItem('x1_access_token',data.access_token);sessionStorage.setItem('x1_user_id',data.user_id);statusBox.className='status ok';statusBox.textContent='Готово. Открываю X1…';form.reset();location.assign('/app');}}catch(err){{statusBox.className='status err';statusBox.textContent=err&&err.message?err.message:'Ошибка соединения';}}}});
+async function destination(token){{try{{const r=await fetch('/v1/account/onboarding',{{headers:{{Authorization:'Bearer '+token}},credentials:'omit'}});if(r.ok){{const s=await r.json();if(s&&s.visible)return '/welcome';}}}}catch(_e){{}}return '/app';}}
+form.addEventListener('submit',async(e)=>{{e.preventDefault();statusBox.className='status';statusBox.textContent='Проверяем данные…';const payload={{email:document.getElementById('email').value,password:document.getElementById('password').value}};const name=document.getElementById('name');if(name)payload.display_name=name.value;try{{const r=await fetch('{endpoint}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(payload),credentials:'omit'}});let data={{}};try{{data=await r.json()}}catch(_e){{}}if(!r.ok){{const detail=typeof data.detail==='string'?data.detail:'Не удалось выполнить запрос';throw new Error(detail)}}sessionStorage.setItem('x1_access_token',data.access_token);sessionStorage.setItem('x1_user_id',data.user_id);statusBox.className='status ok';statusBox.textContent='Готово. Открываю X1…';form.reset();location.assign(await destination(data.access_token));}}catch(err){{statusBox.className='status err';statusBox.textContent=err&&err.message?err.message:'Ошибка соединения';}}}});
 """
     response = _page(f"{title} — X1 AI", body, script=script)
     response.headers["Cache-Control"] = "no-store"
