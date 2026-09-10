@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy.orm import sessionmaker
 
 from app.models import ChatRun, Conversation
@@ -66,7 +67,6 @@ def test_restart_resume_reuses_durably_bound_conversation(register_user, db_sess
     manager = ChatExecutionManager()
 
     async def runner(job: ActiveChatJob) -> ChatResponse:
-        # _activate_row must restore the durable scope before this closure runs.
         assert payload.conversation_id == conversation.id
         assert job.conversation_id == conversation.id
         return _response(job, "resumed without duplicate conversation")
@@ -182,8 +182,9 @@ def test_shutdown_is_interrupted_not_user_cancel_and_startup_reopens(register_us
         assert interrupted.error_code == "runtime_shutdown"
         assert interrupted.retryable is True
 
-        with pytest.raises(Exception):
+        with pytest.raises(HTTPException) as exc:
             await manager.start_or_attach(user_id=data["user_id"], payload=payload, runner=quick_runner)
+        assert exc.value.status_code == 503
 
         manager.startup()
         resumed = await manager.start_or_attach(user_id=data["user_id"], payload=payload, runner=quick_runner)
@@ -271,3 +272,24 @@ def test_application_lifecycle_opens_and_interrupts_chat_runtime():
     assert 'code = "runtime_shutdown"' in runtime
     assert "_MAX_RUN_ATTEMPTS = 3" in runtime
     assert "_MAX_TRANSIENT_RUNS_PER_USER = 256" in runtime
+    assert ".with_for_update()" in runtime
+    assert 'row.status == "succeeded" and status != "succeeded"' in runtime
+
+
+def test_browser_transport_failure_keeps_same_logical_request_for_recovery():
+    source = (ROOT / "app/user_ui.py").read_text("utf-8")
+    assert "const pendingKey='x1_pending_chat_run'" in source
+    assert "savePending(body)" in source
+    assert "snapshot=await api('/v1/chat/runs/'" in source
+    assert "'Восстановить'" in source
+    assert "e.transport=true" in source
+    assert "Повторная проверка использует тот же request-id" in source
+    assert "Не отправляйте запрос повторно" in source
+
+
+def test_stop_does_not_drop_pending_state_when_cancel_cannot_be_confirmed():
+    source = (ROOT / "app/user_ui.py").read_text("utf-8")
+    stop = source[source.index("async function stopActive") : source.index("function switchView")]
+    assert "clearPending(id)" in stop
+    assert "finally{clearPending(id)}" not in stop
+    assert "Сохраняю запрос для проверки состояния" in stop
