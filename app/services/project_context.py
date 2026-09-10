@@ -34,7 +34,10 @@ class ProjectContextBuilder:
         best_length = 0
         for start in range(len(incoming)):
             max_length = min(len(stored), len(incoming) - start)
-            for length in range(max_length, 1, -1):
+            # A one-message overlap is meaningful for Sprint 62: after a failed
+            # or cancelled run the accepted user turn is already canonical, and
+            # retrying that same logical turn must not duplicate it in context.
+            for length in range(max_length, 0, -1):
                 if length <= best_length:
                     break
                 left = stored[-length:]
