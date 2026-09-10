@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from time import perf_counter
 from uuid import uuid4
 
@@ -11,13 +12,19 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.inference.client import LlamaGeneration, LlamaUnavailable
 from app.inference.router import choose_route
 from app.models import AnswerAudit, Conversation, Message, Project, Task, UsageEvent, User
-from app.schemas.chat import ChatMessage, ChatRequest, ChatResponse, ChatUsage, QualityReport
+from app.schemas.chat import ChatMessage, ChatRequest, ChatResponse, ChatRunStatus, ChatUsage, QualityReport
 from app.services.access import require_project_role
 from app.services.auth import get_current_user
+from app.services.chat_runtime import (
+    ActiveChatJob,
+    ChatRunConflict,
+    ChatRunSnapshot,
+    chat_execution_manager,
+)
 from app.services.conditional_verification import (
     audit_with_critic_issues,
     critic_has_repairable_issue,
@@ -154,11 +161,40 @@ async def _primary_generation(
     reasoning: bool,
     on_token: TokenSink | None,
 ) -> LlamaGeneration:
-    """Use Sprint 43 streaming transport, with a narrow legacy-test fallback."""
+    """Use streaming inference and retry once only before visible output.
+
+    A short llama.cpp restart/connect race before TTFT is safe to replay. Once a
+    token has reached the caller, replaying a generation could concatenate two
+    different continuations, so post-TTFT failures remain explicit/retryable.
+    """
     llama = request.app.state.llama
     generate = getattr(llama, "generate", None)
     if callable(generate):
-        return await generate(messages, max_tokens=max_tokens, reasoning=reasoning, on_token=on_token)
+        emitted = False
+
+        async def guarded_sink(text: str) -> None:
+            nonlocal emitted
+            emitted = True
+            if on_token is not None:
+                await on_token(text)
+
+        try:
+            return await generate(
+                messages,
+                max_tokens=max_tokens,
+                reasoning=reasoning,
+                on_token=guarded_sink if on_token is not None else None,
+            )
+        except LlamaUnavailable:
+            if emitted:
+                raise
+            await asyncio.sleep(0.75)
+            return await generate(
+                messages,
+                max_tokens=max_tokens,
+                reasoning=reasoning,
+                on_token=guarded_sink if on_token is not None else None,
+            )
     chat = getattr(llama, "chat", None)
     if not callable(chat):
         raise LlamaUnavailable("local inference backend does not expose generate or chat")
@@ -223,6 +259,8 @@ async def _chat_impl(
                 quality=None,
                 development=dev.state.model_dump(mode="json"),
                 conversation_id=getattr(dev.state, "conversation_id", None) or payload.conversation_id,
+                run_id=getattr(request.state, "x1_chat_run_id", None),
+                client_request_id=payload.client_request_id,
             )
 
     repeat_query = detect_repeat_query(db, payload.conversation_id, user_text)
@@ -289,7 +327,7 @@ async def _chat_impl(
 
     db.commit()
 
-    request_id = str(uuid4())
+    request_id = str(getattr(request.state, "x1_chat_run_id", "") or uuid4())
     total_started = perf_counter()
     queue_started = perf_counter()
     inference_started = 0.0
@@ -380,9 +418,6 @@ async def _chat_impl(
                                     "Автоматическая коррекция недоступна; сохранён первичный ответ с найденными дефектами."
                                 )
 
-                        # Recalculate after a deterministic repair: a clean low-risk
-                        # answer should not pay for a critic just because the first
-                        # draft contained a mechanically repairable defect.
                         plan = plan_verification(
                             verification=payload.verification,
                             user_text=user_text,
@@ -556,6 +591,9 @@ async def _chat_impl(
     if last_user is not None:
         db.add(Message(conversation_id=conversation.id, role="user", content=last_user.content))
     db.add(Message(conversation_id=conversation.id, role="assistant", content=text_out))
+    # Recent-chat ordering must reflect completed turns, not only conversation
+    # creation time. This also makes reconnect/retry behavior deterministic in UI.
+    conversation.updated_at = datetime.now(timezone.utc)
 
     quality_report = None
     quality_status = "unchecked"
@@ -646,7 +684,48 @@ async def _chat_impl(
         ),
         quality=quality_report,
         conversation_id=conversation.id,
+        run_id=getattr(request.state, "x1_chat_run_id", None),
+        client_request_id=payload.client_request_id,
     )
+
+
+async def _managed_runner(payload: ChatRequest, request: Request, user_id: str, job: ActiveChatJob) -> ChatResponse:
+    # The execution owns its DB session instead of borrowing the HTTP request
+    # dependency. Therefore a browser disconnect can close the response/session
+    # while the accepted local generation safely reaches a durable terminal row.
+    with SessionLocal() as job_db:
+        job_user = job_db.get(User, user_id)
+        if job_user is None:
+            raise HTTPException(status_code=401, detail="Account is no longer available")
+        request.state.x1_chat_run_id = job.run_id
+        managed_payload = payload.model_copy(update={"client_request_id": job.client_request_id})
+        result = await _chat_impl(
+            managed_payload,
+            request,
+            job_user,
+            job_db,
+            on_token=job.token,
+            on_replace=job.replace,
+        )
+        result.run_id = job.run_id
+        result.client_request_id = job.client_request_id
+        return result
+
+
+def _snapshot_response(snapshot: ChatRunSnapshot) -> ChatResponse:
+    if snapshot.status == "succeeded" and snapshot.result:
+        return ChatResponse.model_validate(snapshot.result)
+    if snapshot.status == "cancelled":
+        raise HTTPException(status_code=409, detail="Chat run was cancelled")
+    if snapshot.status == "interrupted":
+        raise HTTPException(status_code=503, detail=snapshot.error_detail or "Chat run was interrupted", headers={"Retry-After": "1"})
+    status_code = 503
+    if snapshot.error_code.startswith("http_"):
+        try:
+            status_code = int(snapshot.error_code.split("_", 1)[1])
+        except ValueError:
+            status_code = 503
+    raise HTTPException(status_code=status_code, detail=snapshot.error_detail or "Chat run failed")
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -656,11 +735,53 @@ async def chat(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ChatResponse:
-    return await _chat_impl(payload, request, user, db)
+    _ = db
+
+    async def runner(job: ActiveChatJob) -> ChatResponse:
+        return await _managed_runner(payload, request, user.id, job)
+
+    try:
+        execution = await chat_execution_manager.start_or_attach(user_id=user.id, payload=payload, runner=runner)
+    except ChatRunConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(execution, ChatRunSnapshot):
+        return _snapshot_response(execution)
+    # Shield the accepted job from transport cancellation. HTTP disconnect is not
+    # a user Stop; clients recover it through the run-status endpoint.
+    try:
+        await asyncio.shield(execution.task)
+    except asyncio.CancelledError:
+        raise
+    snapshot = await chat_execution_manager.status(user_id=user.id, client_request_id=execution.client_request_id)
+    return _snapshot_response(snapshot)
 
 
 def _sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+
+@router.get("/chat/runs/{client_request_id}", response_model=ChatRunStatus)
+async def chat_run_status(
+    client_request_id: str,
+    user: User = Depends(get_current_user),
+) -> ChatRunStatus:
+    try:
+        snapshot = await chat_execution_manager.status(user_id=user.id, client_request_id=client_request_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Chat run not found") from exc
+    return ChatRunStatus.model_validate(snapshot.as_dict())
+
+
+@router.post("/chat/runs/{client_request_id}/cancel", response_model=ChatRunStatus)
+async def cancel_chat_run(
+    client_request_id: str,
+    user: User = Depends(get_current_user),
+) -> ChatRunStatus:
+    try:
+        snapshot = await chat_execution_manager.cancel(user_id=user.id, client_request_id=client_request_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Chat run not found") from exc
+    return ChatRunStatus.model_validate(snapshot.as_dict())
 
 
 @router.post("/chat/stream")
@@ -670,36 +791,91 @@ async def chat_stream(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _ = db
+
+    async def runner(job: ActiveChatJob) -> ChatResponse:
+        return await _managed_runner(payload, request, user.id, job)
+
     async def events():
-        outbound: asyncio.Queue[tuple[str, dict]] = asyncio.Queue(maxsize=128)
-
-        async def emit_token(text: str) -> None:
-            await outbound.put(("token", {"text": text}))
-
-        async def emit_replace(text: str) -> None:
-            await outbound.put(("replace", {"text": text}))
-
-        task = asyncio.create_task(
-            _chat_impl(payload, request, user, db, on_token=emit_token, on_replace=emit_replace),
-            name="x1-chat-stream",
-        )
-        heartbeat_at = perf_counter()
-        yield _sse(
-            "status",
-            {"state": "accepted", "queue_waiting": int(getattr(request.app.state.governor, "waiting", 0))},
-        )
+        queue: asyncio.Queue | None = None
+        job: ActiveChatJob | None = None
+        legacy_disconnect_cancels = payload.client_request_id is None
         try:
+            try:
+                snapshot, queue, job = await chat_execution_manager.attach_stream(
+                    user_id=user.id,
+                    payload=payload,
+                    runner=runner,
+                )
+            except ChatRunConflict as exc:
+                yield _sse("error", {"status_code": 409, "detail": str(exc), "retryable": False})
+                return
+
+            yield _sse(
+                "status",
+                {
+                    "state": snapshot.status,
+                    "run_id": snapshot.run_id,
+                    "client_request_id": snapshot.client_request_id,
+                    "conversation_id": snapshot.conversation_id,
+                    "resumed": bool(snapshot.partial_text),
+                    "queue_waiting": int(getattr(request.app.state.governor, "waiting", 0)),
+                },
+            )
+            if snapshot.partial_text:
+                yield _sse(
+                    "replace",
+                    {
+                        "text": snapshot.partial_text,
+                        "run_id": snapshot.run_id,
+                        "client_request_id": snapshot.client_request_id,
+                        "reason": "reconnect_snapshot",
+                    },
+                )
+            if snapshot.status == "succeeded" and snapshot.result:
+                yield _sse("result", snapshot.result)
+                return
+            if snapshot.status in {"failed", "interrupted"}:
+                yield _sse(
+                    "error",
+                    {
+                        "status_code": 503,
+                        "detail": snapshot.error_detail or "Chat run failed",
+                        "retryable": snapshot.retryable,
+                    },
+                )
+                return
+            if snapshot.status == "cancelled":
+                yield _sse("cancelled", {"detail": snapshot.error_detail or "Chat run was cancelled"})
+                return
+
+            heartbeat_at = perf_counter()
             while True:
                 if await request.is_disconnected():
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
+                    # Sprint 62 clients use an explicit cancel endpoint. Preserve
+                    # backward compatibility for old clients that only signal
+                    # Stop by aborting their SSE request.
+                    if legacy_disconnect_cancels:
+                        await chat_execution_manager.cancel(
+                            user_id=user.id,
+                            client_request_id=snapshot.client_request_id,
+                        )
                     return
-                if task.done() and outbound.empty():
-                    break
                 try:
-                    event, data = await asyncio.wait_for(outbound.get(), timeout=0.25)
+                    event, data = await asyncio.wait_for(queue.get(), timeout=0.25)
                 except TimeoutError:
+                    if job is not None and job.task is not None and job.task.done():
+                        terminal = await chat_execution_manager.status(
+                            user_id=user.id,
+                            client_request_id=snapshot.client_request_id,
+                        )
+                        if terminal.status == "succeeded" and terminal.result:
+                            yield _sse("result", terminal.result)
+                        elif terminal.status == "cancelled":
+                            yield _sse("cancelled", {"detail": terminal.error_detail})
+                        else:
+                            yield _sse("error", {"status_code": 503, "detail": terminal.error_detail or "Chat run failed", "retryable": terminal.retryable})
+                        return
                     now = perf_counter()
                     if now - heartbeat_at >= 2.0:
                         heartbeat_at = now
@@ -707,29 +883,24 @@ async def chat_stream(
                             "heartbeat",
                             {
                                 "state": "working",
+                                "run_id": snapshot.run_id,
+                                "client_request_id": snapshot.client_request_id,
                                 "queue_waiting": int(getattr(request.app.state.governor, "waiting", 0)),
                             },
                         )
                     continue
                 yield _sse(event, data)
-
-            result = await task
-            yield _sse("result", result.model_dump(mode="json"))
+                if event in {"result", "error", "cancelled"}:
+                    return
         except asyncio.CancelledError:
-            if not task.done():
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
+            # ASGI transport cancellation is not equivalent to user intent for
+            # Sprint 62 clients. The accepted job owns its independent DB session.
+            if legacy_disconnect_cancels and job is not None:
+                with contextlib.suppress(Exception):
+                    await chat_execution_manager.cancel(user_id=user.id, client_request_id=job.client_request_id)
             raise
-        except HTTPException as exc:
-            yield _sse("error", {"status_code": exc.status_code, "detail": exc.detail})
-        except Exception:
-            yield _sse("error", {"status_code": 500, "detail": "Chat processing failed"})
         finally:
-            if not task.done():
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
+            chat_execution_manager.detach(job, queue)
 
     return StreamingResponse(
         events(),
