@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import (
     AuthSession,
+    ChatRun,
     Conversation,
     FileChunk,
     Message,
@@ -76,6 +77,7 @@ def export_account_data(user: User = Depends(get_current_user), db: Session = De
     tasks = list(db.scalars(select(Task).where(Task.created_by == user.id)).all())
     evidence = list(db.scalars(select(TaskEvidence).where(TaskEvidence.created_by == user.id)).all())
     usage = list(db.scalars(select(UsageEvent).where(UsageEvent.user_id == user.id).order_by(UsageEvent.created_at)).all())
+    chat_runs = list(db.scalars(select(ChatRun).where(ChatRun.user_id == user.id).order_by(ChatRun.created_at)).all())
     onboarding = db.get(UserOnboarding, user.id)
     product_events = list(
         db.scalars(select(ProductEvent).where(ProductEvent.user_id == user.id).order_by(ProductEvent.created_at)).all()
@@ -97,6 +99,23 @@ def export_account_data(user: User = Depends(get_current_user), db: Session = De
         "product_events": [
             {"event_name": x.event_name, "project_id": x.project_id, "metadata": x.metadata_json, "created_at": _iso(x.created_at)}
             for x in product_events
+        ],
+        "chat_runs": [
+            {
+                "id": x.id,
+                "client_request_id": x.client_request_id,
+                "project_id": x.project_id,
+                "conversation_id": x.conversation_id,
+                "input_hash": x.input_hash,
+                "status": x.status,
+                "attempt": x.attempt,
+                "error_code": x.error_code,
+                "error_detail": x.error_detail,
+                "created_at": _iso(x.created_at),
+                "updated_at": _iso(x.updated_at),
+                "completed_at": _iso(x.completed_at),
+            }
+            for x in chat_runs
         ],
         "owned_projects": [
             {"id": x.id, "name": x.name, "description": x.description, "instructions": x.instructions, "created_at": _iso(x.created_at)}
