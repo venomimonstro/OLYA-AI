@@ -124,6 +124,10 @@ async def lifespan(app: FastAPI):
     if settings.database_auto_create_schema:
         init_db()
     app.state.settings = settings
+    # Re-open the process-local chat coordinator for this application lifespan.
+    # shutdown() deliberately leaves it closed so no request can race teardown.
+    from app.services.chat_runtime import chat_execution_manager
+    chat_execution_manager.startup()
     app.state.capacity_boot_max_context_tokens = int(settings.max_context_tokens)
     app.state.capacity_boot_deep_context_tokens = int(settings.deep_context_tokens)
     app.state.capacity_boot_max_concurrent_generations = int(settings.max_concurrent_generations)
@@ -177,7 +181,6 @@ async def lifespan(app: FastAPI):
         # A process restart is not the same thing as the user pressing Stop.
         # Interrupt managed chat jobs explicitly before closing llama.cpp so the
         # durable ChatRun can be resumed with the same logical request id.
-        from app.services.chat_runtime import chat_execution_manager
         await chat_execution_manager.shutdown()
         await app.state.llama.close()
 
