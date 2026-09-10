@@ -2,7 +2,7 @@ from pathlib import Path
 
 from sqlalchemy import func, select
 
-from app.models import ProductEvent, Project, UserOnboarding
+from app.models import ProductEvent, UserOnboarding
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -84,6 +84,22 @@ def test_dismiss_and_reopen_are_server_persisted(register_user, client):
     assert reloaded.json()["visible"] is True
 
 
+def test_account_export_contains_onboarding_and_bounded_product_events(register_user, client):
+    _, headers = register_user("onboarding-export@example.com")
+    assert client.get("/v1/account/onboarding", headers=headers).status_code == 200
+
+    exported = client.get("/v1/account/export", headers=headers)
+    assert exported.status_code == 200, exported.text
+    payload = exported.json()
+    assert payload["onboarding"] is not None
+    names = [item["event_name"] for item in payload["product_events"]]
+    assert names.count("registered") == 1
+    # User prompts and assistant answer text are not copied into first-value events.
+    for item in payload["product_events"]:
+        assert "content" not in item
+        assert "prompt" not in item
+
+
 def test_welcome_page_is_registered_and_private(client):
     response = client.get("/welcome")
     assert response.status_code == 200
@@ -113,6 +129,8 @@ def test_sprint61_migration_is_linear_and_models_are_registered():
     assert '"user_onboarding"' in migration
     assert '"product_events"' in migration
     assert "from app.models_sprint61 import *" in registry
+    assert 'sa.UniqueConstraint("dedupe_key")' not in migration
+    assert '"ix_product_events_dedupe_key"' in migration
 
 
 def test_onboarding_reconciliation_reads_authoritative_product_facts():
