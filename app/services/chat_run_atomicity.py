@@ -3,21 +3,21 @@ from __future__ import annotations
 """Transactional safety net for recoverable chat execution.
 
 The transport manager owns request idempotency, while the canonical chat route
-owns the assistant Message and UsageEvent transaction.  A process can die after
+owns the assistant Message and UsageEvent transaction. A process can die after
 that transaction commits but before the manager gets a chance to persist its
-terminal ChatRun snapshot.  This listener closes that crash window: a successful
+terminal ChatRun snapshot. This listener closes that crash window: a successful
 UsageEvent whose request id is a ChatRun id makes the ChatRun terminal in the
-same SQLAlchemy flush as the canonical assistant message.
+same database transaction as the canonical assistant message.
 
 The manager may subsequently replace the compact recovery result with the full
-ChatResponse payload.  If the process dies first, the compact payload is still a
+ChatResponse payload. If the process dies first, the compact payload is still a
 valid ChatResponse and, critically, the same logical request cannot be inferred
 or billed a second time after restart.
 """
 
 from datetime import datetime, timezone
 
-from sqlalchemy import event, inspect
+from sqlalchemy import event, inspect, select
 from sqlalchemy.orm import Session
 
 
@@ -44,9 +44,9 @@ def _restore_sticky_success(row) -> bool:
 def _compact_result(*, run, usage, assistant) -> dict:
     """Return a schema-valid minimum result for crash recovery.
 
-    Fine-grained verification telemetry is deliberately not guessed here.  In a
+    Fine-grained verification telemetry is deliberately not guessed here. In a
     healthy process ChatExecutionManager immediately replaces this compact
-    snapshot with the complete ChatResponse.  After a crash, canonical answer
+    snapshot with the complete ChatResponse. After a crash, canonical answer
     text and measured UsageEvent data are enough to restore the user's result
     without re-running inference.
     """
@@ -82,7 +82,7 @@ def _install_listener() -> None:
 
     @event.listens_for(Session, "before_flush")
     def _chat_run_commit_guard(session: Session, flush_context, instances) -> None:  # noqa: ARG001
-        # Once canonical success is committed it is immutable.  A user pressing
+        # Once canonical success is committed it is immutable. A user pressing
         # Stop during the tiny post-commit manager window must not turn an
         # already persisted successful answer into cancelled/failed.
         for item in tuple(session.dirty):
@@ -97,11 +97,9 @@ def _install_listener() -> None:
         if not successful_usage:
             return
 
-        assistants = [
+        new_assistants = [
             item for item in tuple(session.new) if isinstance(item, Message) and item.role == "assistant"
         ]
-        if not assistants:
-            return
 
         for usage in successful_usage:
             run = session.get(ChatRun, str(usage.request_id))
@@ -111,10 +109,25 @@ def _install_listener() -> None:
                 continue
             if run.conversation_id not in {None, usage.conversation_id}:
                 continue
+
             assistant = next(
-                (item for item in reversed(assistants) if item.conversation_id == usage.conversation_id),
+                (item for item in reversed(new_assistants) if item.conversation_id == usage.conversation_id),
                 None,
             )
+            if assistant is None:
+                # Verification can flush AnswerAudit before UsageEvent is added.
+                # In that case the assistant Message is already INSERTed but is
+                # still part of this uncommitted transaction and therefore safe
+                # to read here. Never infer success without a canonical answer.
+                assistant = session.scalar(
+                    select(Message)
+                    .where(
+                        Message.conversation_id == usage.conversation_id,
+                        Message.role == "assistant",
+                    )
+                    .order_by(Message.created_at.desc())
+                    .limit(1)
+                )
             if assistant is None:
                 continue
 
