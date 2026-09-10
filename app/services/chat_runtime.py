@@ -113,9 +113,6 @@ class ActiveChatJob:
             try:
                 queue.put_nowait((event, payload))
             except asyncio.QueueFull:
-                # A slow/reconnecting browser must never backpressure local
-                # inference. Replace its stale event backlog with one complete
-                # text snapshot, from which rendering can continue losslessly.
                 try:
                     while True:
                         queue.get_nowait()
@@ -160,12 +157,7 @@ def request_fingerprint(user_id: str, payload: ChatRequest) -> str:
 
 
 class ChatExecutionManager:
-    """One-worker execution manager for chat reconnect/idempotency.
-
-    X1 deliberately runs a single Uvicorn worker on its low-cost node. Active
-    generation state therefore remains process-local while PostgreSQL provides a
-    durable run ledger across browser reconnects and application restarts.
-    """
+    """One-worker execution manager for chat reconnect/idempotency."""
 
     def __init__(self) -> None:
         self.runtime_id = str(uuid4())
@@ -175,7 +167,6 @@ class ChatExecutionManager:
         self._closing = False
 
     def startup(self) -> None:
-        """Begin a new application lifespan with a fresh runtime identity."""
         if self._jobs:
             raise RuntimeError("Cannot start chat runtime while old jobs are still active")
         self.runtime_id = str(uuid4())
@@ -254,7 +245,6 @@ class ChatExecutionManager:
                 ).all()
             )
             for row in stale:
-                # Never rewrite a process-local job that is actually still alive.
                 if (row.user_id, row.client_request_id) in self._jobs:
                     continue
                 row.status = "interrupted"
@@ -273,7 +263,6 @@ class ChatExecutionManager:
             db.commit()
 
     def _trim_user_runs(self, db, user_id: str) -> None:
-        """Keep the transport ledger bounded without touching active executions."""
         ids = list(
             db.scalars(
                 select(ChatRun.id)
@@ -296,14 +285,16 @@ class ChatExecutionManager:
         error_detail: str = "",
     ) -> ChatRunSnapshot:
         with SessionLocal() as db:
-            row = db.get(ChatRun, job.run_id)
+            # Serialize the transport terminal write with the canonical
+            # assistant+UsageEvent transaction. Without this row lock, a Stop
+            # racing the final answer commit could read `running` first and then
+            # overwrite a just-committed `succeeded` row afterwards.
+            row = db.scalar(select(ChatRun).where(ChatRun.id == job.run_id).with_for_update())
             if row is None:
                 return job.snapshot()
+            if row.status == "succeeded" and status != "succeeded":
+                return self._snapshot_from_row(row)
             row.status = status
-            # A run without an initial conversation id can bind one inside the
-            # worker before inference. Never erase that durable binding merely
-            # because cancellation happened before the worker returned a final
-            # ChatResponse and copied it back into ActiveChatJob.
             if job.conversation_id is not None:
                 row.conversation_id = job.conversation_id
             row.result_json = result or {}
@@ -313,9 +304,6 @@ class ChatExecutionManager:
             row.completed_at = utcnow()
             db.commit()
             db.refresh(row)
-            # chat_run_atomicity may have restored a previously committed
-            # success. Always return the state that actually reached PostgreSQL,
-            # not the state the transport callback merely attempted to write.
             return self._snapshot_from_row(row)
 
     @staticmethod
@@ -339,11 +327,6 @@ class ChatExecutionManager:
         runner: Runner,
         key: tuple[str, str],
     ) -> ActiveChatJob:
-        # The first attempt may have created/bound a canonical conversation before
-        # the old process died. Mutate the current request object to that durable
-        # scope before spawning the runner; its closure references this same
-        # Pydantic instance. Without this, an API client that originally omitted
-        # conversation_id could create a second conversation on restart.
         if row.conversation_id is not None and payload.conversation_id is None:
             payload.conversation_id = row.conversation_id
         row.status = "running"
@@ -396,9 +379,6 @@ class ChatExecutionManager:
         for row in rows:
             if (row.user_id, row.client_request_id) in self._jobs:
                 raise ChatRunConflict("Conversation already has an active chat request")
-            # In the supported single-worker topology an unowned running row is
-            # left by an older/lost runtime. Mark it recoverable before admitting
-            # a new turn so transcript order cannot become user,user,assistant.
             row.status = "interrupted"
             row.error_code = "superseded_after_runtime_loss"
             row.error_detail = "A newer request was accepted after the previous runtime was no longer active."
@@ -436,9 +416,6 @@ class ChatExecutionManager:
                     if row.input_hash != fingerprint:
                         raise ChatRunConflict("client_request_id was already used for a different chat request")
                     if row.status == "running" and row.runtime_id == self.runtime_id:
-                        # A same-runtime durable row without its process-local job
-                        # is an impossible normal state. Fail closed instead of
-                        # risking duplicate inference/side effects.
                         row.status = "interrupted"
                         row.error_code = "runtime_state_lost"
                         row.error_detail = "The in-memory execution state was lost before completion."
@@ -616,7 +593,6 @@ class ChatExecutionManager:
         return await self.status(user_id=user_id, client_request_id=client_request_id)
 
     async def shutdown(self) -> None:
-        """Interrupt in-flight work without misreporting process shutdown as Stop."""
         self._closing = True
         async with self._lock:
             tasks: list[asyncio.Task] = []
@@ -629,9 +605,6 @@ class ChatExecutionManager:
             try:
                 await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=10.0)
             except TimeoutError:
-                # Event-loop teardown will finish cancelling any non-responsive
-                # task. Their durable rows remain recoverable/interrupted rather
-                # than being falsely recorded as a user-requested cancellation.
                 pass
 
 
