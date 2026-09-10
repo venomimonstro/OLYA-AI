@@ -10,12 +10,13 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal, get_db
 from app.inference.client import LlamaGeneration, LlamaUnavailable
 from app.inference.router import choose_route
-from app.models import AnswerAudit, Conversation, Message, Project, Task, UsageEvent, User
+from app.models import AnswerAudit, ChatRun, Conversation, Message, Project, Task, UsageEvent, User
 from app.schemas.chat import ChatMessage, ChatRequest, ChatResponse, ChatRunStatus, ChatUsage, QualityReport
 from app.services.access import require_project_role
 from app.services.auth import get_current_user
@@ -75,6 +76,27 @@ def _resolve_scope(db: Session, user: User, payload: ChatRequest) -> tuple[Proje
     db.add(conversation)
     db.flush()
     return project, conversation, task
+
+
+def _persist_accepted_user_turn(db: Session, conversation: Conversation, message: ChatMessage | None) -> Message | None:
+    if message is None:
+        return None
+    latest = db.scalar(
+        select(Message)
+        .where(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at.desc())
+        .limit(1)
+    )
+    # A failed/cancelled attempt already owns this canonical user turn. Reusing
+    # it on retry preserves the transcript without manufacturing duplicate user
+    # messages. After a successful assistant turn, identical user text is a new
+    # intentional turn and is therefore persisted normally.
+    if latest is not None and latest.role == "user" and latest.content == message.content:
+        return latest
+    row = Message(conversation_id=conversation.id, role="user", content=message.content)
+    db.add(row)
+    db.flush()
+    return row
 
 
 def _estimated_reserve_seconds(mode: str, extra_inferences: int = 0) -> int:
@@ -325,9 +347,22 @@ async def _chat_impl(
     freshness_required = FRESHNESS_SENTINEL in verified_urls
     quality_urls = {url for url in verified_urls if url != FRESHNESS_SENTINEL}
 
+    last_user = next((message for message in reversed(payload.messages) if message.role == "user"), None)
+    _persist_accepted_user_turn(db, conversation, last_user)
+    conversation.updated_at = datetime.now(timezone.utc)
+    run_id = str(getattr(request.state, "x1_chat_run_id", "") or "")
+    if run_id:
+        run_row = db.get(ChatRun, run_id)
+        if run_row is not None and run_row.user_id == user.id:
+            run_row.conversation_id = conversation.id
+            run_row.project_id = project.id if project else None
+            run_row.updated_at = datetime.now(timezone.utc)
+    # The accepted user turn and resolved run scope are durable before entering
+    # the scarce inference queue. A transport failure can no longer erase what
+    # the user actually submitted.
     db.commit()
 
-    request_id = str(getattr(request.state, "x1_chat_run_id", "") or uuid4())
+    request_id = run_id or str(uuid4())
     total_started = perf_counter()
     queue_started = perf_counter()
     inference_started = 0.0
@@ -587,12 +622,7 @@ async def _chat_impl(
         raise HTTPException(status_code=503, detail="Local inference is unavailable") from exc
 
     duration_ms = int((perf_counter() - total_started) * 1000)
-    last_user = next((message for message in reversed(payload.messages) if message.role == "user"), None)
-    if last_user is not None:
-        db.add(Message(conversation_id=conversation.id, role="user", content=last_user.content))
     db.add(Message(conversation_id=conversation.id, role="assistant", content=text_out))
-    # Recent-chat ordering must reflect completed turns, not only conversation
-    # creation time. This also makes reconnect/retry behavior deterministic in UI.
     conversation.updated_at = datetime.now(timezone.utc)
 
     quality_report = None
@@ -690,9 +720,6 @@ async def _chat_impl(
 
 
 async def _managed_runner(payload: ChatRequest, request: Request, user_id: str, job: ActiveChatJob) -> ChatResponse:
-    # The execution owns its DB session instead of borrowing the HTTP request
-    # dependency. Therefore a browser disconnect can close the response/session
-    # while the accepted local generation safely reaches a durable terminal row.
     with SessionLocal() as job_db:
         job_user = job_db.get(User, user_id)
         if job_user is None:
@@ -746,8 +773,6 @@ async def chat(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if isinstance(execution, ChatRunSnapshot):
         return _snapshot_response(execution)
-    # Shield the accepted job from transport cancellation. HTTP disconnect is not
-    # a user Stop; clients recover it through the run-status endpoint.
     try:
         await asyncio.shield(execution.task)
     except asyncio.CancelledError:
@@ -852,9 +877,6 @@ async def chat_stream(
             heartbeat_at = perf_counter()
             while True:
                 if await request.is_disconnected():
-                    # Sprint 62 clients use an explicit cancel endpoint. Preserve
-                    # backward compatibility for old clients that only signal
-                    # Stop by aborting their SSE request.
                     if legacy_disconnect_cancels:
                         await chat_execution_manager.cancel(
                             user_id=user.id,
@@ -893,8 +915,6 @@ async def chat_stream(
                 if event in {"result", "error", "cancelled"}:
                     return
         except asyncio.CancelledError:
-            # ASGI transport cancellation is not equivalent to user intent for
-            # Sprint 62 clients. The accepted job owns its independent DB session.
             if legacy_disconnect_cancels and job is not None:
                 with contextlib.suppress(Exception):
                     await chat_execution_manager.cancel(user_id=user.id, client_request_id=job.client_request_id)
