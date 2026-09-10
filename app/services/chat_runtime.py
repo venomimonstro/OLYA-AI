@@ -1,0 +1,361 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Awaitable, Callable
+from uuid import uuid4
+
+from fastapi import HTTPException
+from sqlalchemy import select
+
+from app.db import SessionLocal
+from app.models import ChatRun
+from app.schemas.chat import ChatRequest, ChatResponse
+
+
+TERMINAL_CHAT_RUN_STATES = frozenset({"succeeded", "failed", "cancelled", "interrupted"})
+
+
+class ChatRunConflict(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class ChatRunSnapshot:
+    run_id: str
+    client_request_id: str
+    status: str
+    conversation_id: str | None
+    partial_text: str = ""
+    result: dict | None = None
+    error_code: str = ""
+    error_detail: str = ""
+    retryable: bool = False
+
+    def as_dict(self) -> dict:
+        return {
+            "run_id": self.run_id,
+            "client_request_id": self.client_request_id,
+            "status": self.status,
+            "conversation_id": self.conversation_id,
+            "partial_text": self.partial_text,
+            "result": self.result,
+            "error_code": self.error_code,
+            "error_detail": self.error_detail,
+            "retryable": self.retryable,
+        }
+
+
+@dataclass
+class ActiveChatJob:
+    run_id: str
+    user_id: str
+    client_request_id: str
+    input_hash: str
+    conversation_id: str | None = None
+    partial_text: str = ""
+    status: str = "running"
+    result: dict | None = None
+    error_code: str = ""
+    error_detail: str = ""
+    sequence: int = 0
+    subscribers: set[asyncio.Queue] = field(default_factory=set)
+    task: asyncio.Task | None = None
+
+    def snapshot(self) -> ChatRunSnapshot:
+        return ChatRunSnapshot(
+            run_id=self.run_id,
+            client_request_id=self.client_request_id,
+            status=self.status,
+            conversation_id=self.conversation_id,
+            partial_text=self.partial_text,
+            result=self.result,
+            error_code=self.error_code,
+            error_detail=self.error_detail,
+            retryable=self.status in {"failed", "cancelled", "interrupted"},
+        )
+
+    def _publish_nowait(self, event: str, data: dict) -> None:
+        self.sequence += 1
+        payload = {**data, "run_id": self.run_id, "client_request_id": self.client_request_id, "sequence": self.sequence}
+        for queue in tuple(self.subscribers):
+            try:
+                queue.put_nowait((event, payload))
+            except asyncio.QueueFull:
+                # A slow/reconnecting browser must not backpressure local
+                # inference. Replace its stale event backlog with one complete
+                # text snapshot, from which rendering can continue losslessly.
+                try:
+                    while True:
+                        queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    queue.put_nowait(
+                        (
+                            "replace",
+                            {
+                                "text": self.partial_text,
+                                "run_id": self.run_id,
+                                "client_request_id": self.client_request_id,
+                                "sequence": self.sequence,
+                                "reason": "subscriber_resync",
+                            },
+                        )
+                    )
+                except asyncio.QueueFull:
+                    pass
+
+    async def token(self, text: str) -> None:
+        self.partial_text += text
+        self._publish_nowait("token", {"text": text})
+
+    async def replace(self, text: str) -> None:
+        self.partial_text = text
+        self._publish_nowait("replace", {"text": text})
+
+
+Runner = Callable[[ActiveChatJob], Awaitable[ChatResponse]]
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def request_fingerprint(user_id: str, payload: ChatRequest) -> str:
+    material = payload.model_dump(mode="json", exclude={"client_request_id"})
+    canonical = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256((user_id + "\0" + canonical).encode("utf-8")).hexdigest()
+
+
+class ChatExecutionManager:
+    """One-worker execution manager for chat stream reconnect/idempotency.
+
+    X1 deliberately runs a single Uvicorn worker on its low-cost node. Active
+    generation state therefore remains process-local while PostgreSQL provides a
+    durable run ledger across browser reconnects and application restarts.
+    """
+
+    def __init__(self) -> None:
+        self.runtime_id = str(uuid4())
+        self._jobs: dict[tuple[str, str], ActiveChatJob] = {}
+        self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _client_id(payload: ChatRequest) -> str:
+        return payload.client_request_id or ("srv_" + uuid4().hex)
+
+    @staticmethod
+    def _snapshot_from_row(row: ChatRun) -> ChatRunSnapshot:
+        result = dict(row.result_json or {}) if row.status == "succeeded" else None
+        return ChatRunSnapshot(
+            run_id=row.id,
+            client_request_id=row.client_request_id,
+            status=row.status,
+            conversation_id=row.conversation_id,
+            result=result,
+            error_code=row.error_code or "",
+            error_detail=row.error_detail or "",
+            retryable=row.status in {"failed", "cancelled", "interrupted"},
+        )
+
+    def _load_row(self, user_id: str, client_request_id: str) -> ChatRun | None:
+        with SessionLocal() as db:
+            return db.scalar(
+                select(ChatRun).where(
+                    ChatRun.user_id == user_id,
+                    ChatRun.client_request_id == client_request_id,
+                )
+            )
+
+    def _persist_terminal(
+        self,
+        job: ActiveChatJob,
+        *,
+        status: str,
+        result: dict | None = None,
+        error_code: str = "",
+        error_detail: str = "",
+    ) -> None:
+        with SessionLocal() as db:
+            row = db.get(ChatRun, job.run_id)
+            if row is None:
+                return
+            row.status = status
+            row.conversation_id = job.conversation_id
+            row.result_json = result or {}
+            row.error_code = error_code[:64]
+            row.error_detail = error_detail[:2000]
+            row.updated_at = utcnow()
+            row.completed_at = utcnow()
+            db.commit()
+
+    def _interrupt_stale_row(self, row_id: str) -> ChatRunSnapshot:
+        with SessionLocal() as db:
+            row = db.get(ChatRun, row_id)
+            if row is None:
+                raise ChatRunConflict("chat run disappeared during recovery")
+            if row.status == "running" and row.runtime_id != self.runtime_id:
+                row.status = "interrupted"
+                row.error_code = "runtime_restarted"
+                row.error_detail = "The application runtime restarted before this chat run completed."
+                row.updated_at = utcnow()
+                row.completed_at = utcnow()
+                db.commit()
+            return self._snapshot_from_row(row)
+
+    async def start_or_attach(self, *, user_id: str, payload: ChatRequest, runner: Runner) -> ActiveChatJob | ChatRunSnapshot:
+        client_request_id = self._client_id(payload)
+        fingerprint = request_fingerprint(user_id, payload)
+        key = (user_id, client_request_id)
+        async with self._lock:
+            existing = self._jobs.get(key)
+            if existing is not None:
+                if existing.input_hash != fingerprint:
+                    raise ChatRunConflict("client_request_id was already used for a different chat request")
+                return existing
+
+            with SessionLocal() as db:
+                row = db.scalar(
+                    select(ChatRun).where(
+                        ChatRun.user_id == user_id,
+                        ChatRun.client_request_id == client_request_id,
+                    )
+                )
+                if row is not None:
+                    if row.input_hash != fingerprint:
+                        raise ChatRunConflict("client_request_id was already used for a different chat request")
+                    if row.status == "running":
+                        # With the documented one-worker deployment, a running
+                        # row owned by another runtime can only be a process
+                        # restart residue. Never silently claim it succeeded.
+                        if row.runtime_id != self.runtime_id:
+                            row_id = row.id
+                        else:
+                            row.status = "interrupted"
+                            row.error_code = "runtime_state_lost"
+                            row.error_detail = "The in-memory execution state was lost before completion."
+                            row.updated_at = utcnow()
+                            row.completed_at = utcnow()
+                            db.commit()
+                            return self._snapshot_from_row(row)
+                    else:
+                        return self._snapshot_from_row(row)
+                else:
+                    row = ChatRun(
+                        user_id=user_id,
+                        project_id=payload.project_id,
+                        conversation_id=payload.conversation_id,
+                        client_request_id=client_request_id,
+                        input_hash=fingerprint,
+                        status="running",
+                        runtime_id=self.runtime_id,
+                        attempt=1,
+                        result_json={},
+                        error_code="",
+                        error_detail="",
+                        created_at=utcnow(),
+                        updated_at=utcnow(),
+                    )
+                    db.add(row)
+                    db.commit()
+                    db.refresh(row)
+                    job = ActiveChatJob(
+                        run_id=row.id,
+                        user_id=user_id,
+                        client_request_id=client_request_id,
+                        input_hash=fingerprint,
+                        conversation_id=payload.conversation_id,
+                    )
+                    self._jobs[key] = job
+                    job.task = asyncio.create_task(self._execute(key, job, runner), name=f"x1-chat-run-{row.id}")
+                    return job
+
+        # This branch intentionally runs outside the DB session/manager lock.
+        return self._interrupt_stale_row(row_id)
+
+    async def _execute(self, key: tuple[str, str], job: ActiveChatJob, runner: Runner) -> None:
+        try:
+            response = await runner(job)
+            result = response.model_dump(mode="json")
+            job.status = "succeeded"
+            job.result = result
+            job.conversation_id = response.conversation_id
+            job.partial_text = response.text
+            self._persist_terminal(job, status="succeeded", result=result)
+            job._publish_nowait("result", result)
+        except asyncio.CancelledError:
+            job.status = "cancelled"
+            job.error_code = "cancelled_by_user"
+            job.error_detail = "Generation was cancelled by the user."
+            self._persist_terminal(job, status="cancelled", error_code=job.error_code, error_detail=job.error_detail)
+            job._publish_nowait("cancelled", {"detail": job.error_detail})
+        except HTTPException as exc:
+            job.status = "failed"
+            job.error_code = f"http_{exc.status_code}"
+            detail = exc.detail if isinstance(exc.detail, str) else "Chat processing failed"
+            job.error_detail = detail[:2000]
+            self._persist_terminal(job, status="failed", error_code=job.error_code, error_detail=job.error_detail)
+            job._publish_nowait("error", {"status_code": exc.status_code, "detail": job.error_detail, "retryable": exc.status_code >= 429})
+        except Exception:
+            job.status = "failed"
+            job.error_code = "chat_processing_failed"
+            job.error_detail = "Chat processing failed"
+            self._persist_terminal(job, status="failed", error_code=job.error_code, error_detail=job.error_detail)
+            job._publish_nowait("error", {"status_code": 500, "detail": job.error_detail, "retryable": True})
+        finally:
+            # Keep the terminal job object until subscribers consume its final
+            # event. Future HTTP reconnects are served from the durable row.
+            await asyncio.sleep(0)
+            async with self._lock:
+                self._jobs.pop(key, None)
+
+    async def attach_stream(
+        self, *, user_id: str, payload: ChatRequest, runner: Runner
+    ) -> tuple[ChatRunSnapshot, asyncio.Queue | None, ActiveChatJob | None]:
+        execution = await self.start_or_attach(user_id=user_id, payload=payload, runner=runner)
+        if isinstance(execution, ChatRunSnapshot):
+            return execution, None, None
+        queue: asyncio.Queue = asyncio.Queue(maxsize=128)
+        execution.subscribers.add(queue)
+        return execution.snapshot(), queue, execution
+
+    @staticmethod
+    def detach(job: ActiveChatJob | None, queue: asyncio.Queue | None) -> None:
+        if job is not None and queue is not None:
+            job.subscribers.discard(queue)
+
+    async def status(self, *, user_id: str, client_request_id: str) -> ChatRunSnapshot:
+        key = (user_id, client_request_id)
+        async with self._lock:
+            job = self._jobs.get(key)
+            if job is not None:
+                return job.snapshot()
+        row = self._load_row(user_id, client_request_id)
+        if row is None:
+            raise KeyError(client_request_id)
+        if row.status == "running" and row.runtime_id != self.runtime_id:
+            return self._interrupt_stale_row(row.id)
+        return self._snapshot_from_row(row)
+
+    async def cancel(self, *, user_id: str, client_request_id: str) -> ChatRunSnapshot:
+        key = (user_id, client_request_id)
+        async with self._lock:
+            job = self._jobs.get(key)
+            if job is not None and job.task is not None and not job.task.done():
+                task = job.task
+                task.cancel()
+            else:
+                task = None
+        if task is not None:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        return await self.status(user_id=user_id, client_request_id=client_request_id)
+
+
+chat_execution_manager = ChatExecutionManager()
