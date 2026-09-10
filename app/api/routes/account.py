@@ -10,6 +10,7 @@ from app.models import (
     Conversation,
     FileChunk,
     Message,
+    ProductEvent,
     Project,
     ProjectFile,
     ProjectMember,
@@ -18,6 +19,7 @@ from app.models import (
     TaskEvidence,
     UsageEvent,
     User,
+    UserOnboarding,
 )
 from app.schemas.onboarding import OnboardingStatus
 from app.services.auth import get_current_user
@@ -74,10 +76,28 @@ def export_account_data(user: User = Depends(get_current_user), db: Session = De
     tasks = list(db.scalars(select(Task).where(Task.created_by == user.id)).all())
     evidence = list(db.scalars(select(TaskEvidence).where(TaskEvidence.created_by == user.id)).all())
     usage = list(db.scalars(select(UsageEvent).where(UsageEvent.user_id == user.id).order_by(UsageEvent.created_at)).all())
+    onboarding = db.get(UserOnboarding, user.id)
+    product_events = list(
+        db.scalars(select(ProductEvent).where(ProductEvent.user_id == user.id).order_by(ProductEvent.created_at)).all()
+    )
 
     return {
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "account": {"id": user.id, "email": user.email, "display_name": user.display_name, "created_at": _iso(user.created_at)},
+        "onboarding": None if onboarding is None else {
+            "started_at": _iso(onboarding.started_at),
+            "first_chat_at": _iso(onboarding.first_chat_at),
+            "first_successful_answer_at": _iso(onboarding.first_successful_answer_at),
+            "first_project_at": _iso(onboarding.first_project_at),
+            "first_file_at": _iso(onboarding.first_file_at),
+            "completed_at": _iso(onboarding.completed_at),
+            "dismissed_at": _iso(onboarding.dismissed_at),
+            "reopened_at": _iso(onboarding.reopened_at),
+        },
+        "product_events": [
+            {"event_name": x.event_name, "project_id": x.project_id, "metadata": x.metadata_json, "created_at": _iso(x.created_at)}
+            for x in product_events
+        ],
         "owned_projects": [
             {"id": x.id, "name": x.name, "description": x.description, "instructions": x.instructions, "created_at": _iso(x.created_at)}
             for x in projects
