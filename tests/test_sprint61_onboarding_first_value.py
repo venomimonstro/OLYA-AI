@@ -2,7 +2,7 @@ from pathlib import Path
 
 from sqlalchemy import func, select
 
-from app.models import ProductEvent, UserOnboarding
+from app.models import Conversation, ProductEvent, UsageEvent, UserOnboarding
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +31,46 @@ def test_new_account_gets_server_owned_onboarding(register_user, client, db_sess
             ProductEvent.user_id == data["user_id"], ProductEvent.event_name == "registered"
         )
     ) == 1
+
+
+def test_successful_usage_event_is_first_ai_value(register_user, client, db_session):
+    data, headers = register_user("onboarding-answer@example.com")
+    conversation = Conversation(owner_id=data["user_id"], project_id=None, title="First chat")
+    db_session.add(conversation)
+    db_session.flush()
+    db_session.add(
+        UsageEvent(
+            user_id=data["user_id"],
+            project_id=None,
+            conversation_id=conversation.id,
+            mode="fast",
+            raw_chars=10,
+            compiled_chars=10,
+            output_chars=20,
+            duration_ms=100,
+            inference_ms=80,
+            queue_ms=0,
+            success=True,
+            request_id="sprint61-first-answer",
+        )
+    )
+    db_session.commit()
+
+    response = client.get("/v1/account/onboarding", headers=headers)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["milestones"]["chat_started"] is not None
+    assert payload["milestones"]["successful_answer"] is not None
+    assert payload["completed"] is True
+    assert payload["visible"] is False
+    names = list(
+        db_session.scalars(
+            select(ProductEvent.event_name).where(ProductEvent.user_id == data["user_id"])
+        ).all()
+    )
+    assert "first_chat_started" in names
+    assert "first_successful_answer" in names
+    assert "onboarding_completed" in names
 
 
 def test_onboarding_reconciles_real_project_and_completes(register_user, client, db_session):
