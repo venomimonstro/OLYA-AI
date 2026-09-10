@@ -111,19 +111,27 @@ def _install_listener() -> None:
                 continue
 
             assistant = next(
-                (item for item in reversed(new_assistants) if item.conversation_id == usage.conversation_id),
+                (
+                    item
+                    for item in reversed(new_assistants)
+                    if item.conversation_id == usage.conversation_id
+                    and (item.created_at is None or item.created_at >= run.created_at)
+                ),
                 None,
             )
             if assistant is None:
                 # Verification can flush AnswerAudit before UsageEvent is added.
                 # In that case the assistant Message is already INSERTed but is
                 # still part of this uncommitted transaction and therefore safe
-                # to read here. Never infer success without a canonical answer.
+                # to read here. Restrict the fallback to this run's lifetime so
+                # an older answer can never make a malformed future UsageEvent
+                # look like a successful current run.
                 assistant = session.scalar(
                     select(Message)
                     .where(
                         Message.conversation_id == usage.conversation_id,
                         Message.role == "assistant",
+                        Message.created_at >= run.created_at,
                     )
                     .order_by(Message.created_at.desc())
                     .limit(1)
