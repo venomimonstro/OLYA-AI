@@ -227,7 +227,12 @@ class ChatExecutionManager:
             if row is None:
                 return
             row.status = status
-            row.conversation_id = job.conversation_id
+            # A run without an initial conversation id can bind one inside the
+            # worker before inference. Never erase that durable binding merely
+            # because cancellation happened before the worker returned a final
+            # ChatResponse and copied it back into ActiveChatJob.
+            if job.conversation_id is not None:
+                row.conversation_id = job.conversation_id
             row.result_json = result or {}
             row.error_code = error_code[:64]
             row.error_detail = error_detail[:2000]
