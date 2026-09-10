@@ -30,3 +30,8 @@ from app.models_sprint53 import *  # noqa: F401,F403,E402
 from app.models_sprint59 import *  # noqa: F401,F403,E402
 from app.models_sprint61 import *  # noqa: F401,F403,E402
 from app.models_sprint62 import *  # noqa: F401,F403,E402
+
+# Sprint 62 transaction invariant: successful canonical assistant/usage writes
+# make the matching ChatRun terminal in the same flush, closing the restart
+# window between business commit and the transport manager's terminal snapshot.
+import app.services.chat_run_atomicity  # noqa: F401,E402
