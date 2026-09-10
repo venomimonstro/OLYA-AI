@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, model_validator
 ChatMode = Literal["auto", "fast", "work", "deep"]
 VerificationMode = Literal["off", "auto", "strict"]
 RequirementKind = Literal["contains", "not_contains", "max_chars", "min_chars", "valid_json"]
+ChatRunState = Literal["running", "succeeded", "failed", "cancelled", "interrupted"]
 
 
 class ChatMessage(BaseModel):
@@ -42,6 +43,9 @@ class ChatRequest(BaseModel):
     task_id: str | None = None
     research_source_ids: list[str] = Field(default_factory=list, max_length=10)
     development_command: Literal["auto", "status", "continue", "pause", "resume", "rollback"] | None = None
+    # Sprint 62 idempotency/reconnect key. Browser clients generate one per
+    # logical submission and reuse it only while reconnecting that same run.
+    client_request_id: str | None = Field(default=None, min_length=12, max_length=80, pattern=r"^[A-Za-z0-9_.:-]+$")
 
     @model_validator(mode="after")
     def reject_client_system_messages(self):
@@ -94,3 +98,19 @@ class ChatResponse(BaseModel):
     # Without it a UI must resend client-authored assistant text and loses the
     # canonical history/trust boundary on every message.
     conversation_id: str | None = None
+    # Durable run identity allows clients to distinguish a transport retry from
+    # a new logical prompt and recover the committed result after reconnect.
+    run_id: str | None = None
+    client_request_id: str | None = None
+
+
+class ChatRunStatus(BaseModel):
+    run_id: str
+    client_request_id: str
+    status: ChatRunState
+    conversation_id: str | None = None
+    partial_text: str = ""
+    result: ChatResponse | None = None
+    error_code: str = ""
+    error_detail: str = ""
+    retryable: bool = False
