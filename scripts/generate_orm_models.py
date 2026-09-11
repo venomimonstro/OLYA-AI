@@ -66,7 +66,10 @@ TABLE_CLASSES = {
 # These tables are owned by models_core.py or an explicit models_sprint*.py
 # extension. Every other table created by Alembic must be generated here.
 EXTERNAL_TABLES = {
-    "users",
+    "users", "auth_sessions", "projects", "project_members", "project_memories",
+    "project_files", "file_chunks", "tasks", "task_criteria", "task_evidence",
+    "task_checkpoints", "conversations", "messages", "usage_events",
+    "user_quotas", "background_jobs",
     "api_keys", "api_rate_limit_windows", "api_request_telemetry",
     "autonomous_development_checkpoints", "autonomous_development_ledgers",
     "beta_participants", "beta_snapshots", "beta_waves", "capacity_plans",
@@ -160,6 +163,23 @@ class _Batch:
     def create_index(self, name: str, columns: list[str], unique: bool = False, **_kwargs) -> None:
         self.recorder.create_index(name, self.table, columns, unique=unique)
 
+    def create_foreign_key(
+        self,
+        name: str,
+        referent_table: str,
+        local_columns: list[str],
+        remote_columns: list[str],
+        **kwargs: Any,
+    ) -> None:
+        self.recorder.create_foreign_key(
+            name,
+            self.table,
+            referent_table,
+            local_columns,
+            remote_columns,
+            **kwargs,
+        )
+
     def __getattr__(self, _name: str):
         return lambda *_args, **_kwargs: None
 
@@ -185,6 +205,25 @@ class _Recorder:
 
     def batch_alter_table(self, table: str, *_args, **_kwargs) -> _Batch:
         return _Batch(table, self)
+
+    def create_foreign_key(
+        self,
+        name: str,
+        source_table: str,
+        referent_table: str,
+        local_columns: list[str],
+        remote_columns: list[str],
+        **kwargs: Any,
+    ) -> None:
+        references = [f"{referent_table}.{column}" for column in remote_columns]
+        constraint = sa.ForeignKeyConstraint(
+            local_columns,
+            references,
+            name=name,
+            ondelete=kwargs.get("ondelete"),
+            onupdate=kwargs.get("onupdate"),
+        )
+        self.tables.setdefault(source_table, []).append(constraint)
 
     def __getattr__(self, _name: str):
         return lambda *_args, **_kwargs: None

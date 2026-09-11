@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.routing import request_response
 from sqlalchemy.exc import OperationalError, TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -15,6 +16,7 @@ from app.api.routes.account import router as account_router
 from app.admin_ui import router as admin_ui_router
 from app.media_admin_ui import router as media_admin_ui_router
 from app.public_ui import router as public_ui_router
+from app.onboarding_ui import router as onboarding_ui_router
 from app.user_ui import router as user_ui_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.safety_admin import router as safety_admin_router
@@ -33,6 +35,7 @@ from app.api.routes.diagnostics import router as diagnostics_router
 from app.api.routes.documents import router as documents_router
 from app.api.routes.code import router as code_router
 from app.api.routes.images import router as images_router
+from app.api.routes.image_editing import router as image_editing_router
 from app.api.routes.media_admin import router as media_admin_router
 from app.api.routes.runtime import router as runtime_router
 from app.api.routes.development import router as development_router
@@ -313,6 +316,26 @@ async def database_operational_error_handler(request: Request, exc: OperationalE
     return JSONResponse(status_code=503, content={"detail": "Database is temporarily unavailable; retry shortly"}, headers={"Retry-After": "2"})
 
 
+def _include_router_eager(router) -> None:
+    """Register concrete routes for stable runtime/audit introspection.
+
+    FastAPI 0.141 stores include_router() calls as lazy private wrapper objects.
+    X1's release gates intentionally inspect app.routes, so an empty include
+    context is flattened here while router-owned paths, dependencies and tags
+    remain attached to each concrete route.
+    """
+    if router.on_startup or router.on_shutdown:
+        raise RuntimeError("X1 routers must use the application lifespan")
+    concrete = list(router.routes)
+    if any(not hasattr(route, "path") for route in concrete):
+        raise RuntimeError("Nested lazy routers must be registered explicitly")
+    for route in concrete:
+        if hasattr(route, "dependency_overrides_provider"):
+            route.dependency_overrides_provider = app
+            route.app = request_response(route.get_route_handler())
+    app.router.routes.extend(concrete)
+
+
 def _include_product_router(module: str) -> None:
     try:
         imported = __import__(module, fromlist=["router"])
@@ -324,18 +347,18 @@ def _include_product_router(module: str) -> None:
             raise
         logger.exception("Optional development router unavailable: %s", module)
         return
-    app.include_router(router)
+    _include_router_eager(router)
 
 
 for router in (
-    public_ui_router, user_ui_router, health_router, admin_ui_router, media_admin_ui_router, admin_router, operations_router,
+    public_ui_router, onboarding_ui_router, user_ui_router, health_router, admin_ui_router, media_admin_ui_router, admin_router, operations_router,
     safety_admin_router, account_router, auth_router, projects_router, memory_router,
     files_router, conversations_router, usage_router, diagnostics_router, documents_router,
-    code_router, images_router, media_admin_router, runtime_router, development_router,
+    code_router, images_router, image_editing_router, media_admin_router, runtime_router, development_router,
     engineering_router, execution_router, sandbox_router, git_router, development_chat_router,
     quality_router, research_router, tasks_router, chat_router,
 ):
-    app.include_router(router)
+    _include_router_eager(router)
 
 for module in (
     "app.api.routes.complaints",

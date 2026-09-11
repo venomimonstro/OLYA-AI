@@ -1,3 +1,394 @@
-# Restored losslessly from the canonical cumulative source.
-import base64 as _b64, zlib as _zlib
-exec(compile(_zlib.decompress(_b64.b85decode('c-qZ8YjfL1lHd6&aM;>fz@ZUIPO>@KNL{?~y1bQ5yzy18>QpKe2n<D7AOHiPXsu5B+poK)=Lt}vy}5_0ED|$4Gd=z8o&nc=yA85zy&HGE$g-f?c5OcfdDFCGK2~irEEe3h$%jo{t<+=Hs&9SXl<ihM4V&Fq)r&PwT;`(~tF2Je;`dV2W3IdNqRxjw3<^RwNr)~VaZT0x79M5Cc-vLYm2U6bu`SwqAv@o``BC+}+2&VbDL?+SX}f{H|Ip`q{`w9!x(wDLM-uS5!-qPri;dXcs)^RSrdS4TpDlwy)S?)Dz(jm3^s3D$uKH@cebx7EKY?uft%7_fh5@L|i056GY+Inv;NbtVZdZ)#Yte|F7{d*J`~KC9XhyY{d@aV?w{2Y&x7_q=-d8yS?8c&L_hz9%^fy%@hNMEUtfN6{-J*rhL1bdRhP_rd&=2D}m`3$9;wrZ~7K;V(O)mP&u0dYY_9OctK3@dzuR{(m7XPN%9RXT@7ft%_{Z7O@6Yo`&G^HF^v_RTsJP%g4BQOh_K%}ZX1A!3d!7%ng8icf?FT3U{d~^{e;xA&@)uTa9l(0k#5`_)xswqL*hV!7VhVi1Tit&<{9{Z|*c5KoVcqg_%@T%acBPE@@_fo6_kb~kn0zq0YgC|RGS4)3Oz&l_T6PjBjyRu=|iQekK-G_1T^gC~3L6Rgci(cl%wP;EoyC&btMdb!j7&EsG@xNl$m@PQSd9uN+`>Gr_=Rt+SxDnOWX5@!q6y2b{3nV>!rA>Gu;OyduYRFeLckyn_9*__vLxkR5h)4(b^5lA-_gBN*`ZNar^?5aj8Bq^^Y>T`ONdAJA#3`tT0IVr8d0kzBjVZ%eZ-U@|sMc%b@Zjts48xy0)O46|y{qfnr!`H^(<Z@RaYG=SHJH!sZUC!Y_aZNE1Mv~WG-w+T%i%f+d9Q{lyc#HnqCu8bO*Lj2(?F66jW4s#lLIMbh8ze9ZD^h&Gd2d3*nw}r#iBR?<J#6YB8v5}YE6Ve*rXb=vH~zO>Ctqi6=APESgN+a4a!zXiW40|vmS0PG57(-_%YYbw6Y%BUgC)l?ue|bI#E{*4*02Ughkc5%}XMwwJq4RH;m;2$9lUL;F1~-TtkfgtqZQ4Y}*$br$ahh#dZZJr4Holtv@q(GSQ*$K{z6KkPp~;By-+0!<g4~Fm8ZuN`(JF%=!ZmrUU5}O;G`t#uiPR!3|6oAq#66;WFf%pqwBySQ)UxIXnWf$3F7d94`Y>oQyOjYn%F(Jit;?Dl5^>ru02o1INZ^XYt(P>T5E#QCM`la0&%JbwrzY1+qS5tGv&o(noBG*z+6|p9zmy0(ATTwE>=^i`)f?x~1B4vdBocXg?&qU#pg=6c~)8lCTLl&>e6Laf$GcnYi7J-EOpK70E58Dn9YHo_f!y$f#*djg<Z>a-{MDCfRMlBCbUbaw;++PfCB6W)rFYHnC_|0%A&#M2YN@1Ck+J($b$}<CHIv0wGFRM)rgbX@D+Oo4mv*;?2)d{G7=pL%iYQ<T4p@Fu^S%wT3V>AJg#dPp<(n)YEPCcV9$V09`S_@d@nlCa-s3&y6?xYg=4T-7z?zAH*p7E%=xL;v$HmfXI6ywcZ$D69CrZ0J#TjQxYN=w(Yf$(b5p0=1#oX7M7gz?;lT}V%Jkir2jX1(?imda>kVWLLZ)hOMa(PAd*Jxqwts4FM&gmBdTE4BA6_}so*~_<=NRXI6M0aIzFvEHfuxAUM-CoQi6XX!pH?mM)7fsqSJ4d!Ra?JGv|iMu*uK9{)SaD0p$UnfPf?$@v*Ex0>>!6I6wX7a*1I}oknM0e+@|RpZH->CN%!1<QHWF9xKdPArRS$2HngM9b`R7&NlyOK)D&)y6Pija7Gr4V+Zp<69(V8gV89-+5Mi!L(X+bZGo8#-M1)*;Le%pzWWG@x2;q_q;YxTF3s3K9_q?v2|QTsN}wmNOaZR5#P5S|tu4aS(bF4N$PjmhO*hq0fj5P0Dfl*2+ygKyVPMFc6?vBzkbXlr(Ds<z_HC<_85vhK*}4}ZqjXDgPBlV8RZucU!2od((>sYWPNX7Td-4ZkT~LP=sx$&p!+ryyh>U%)E1^Jjh+?vR68c|K?(6a%u`!;PC$oF0b2muCAqy}G5rWzx0+p!PI|SH>01|8szLYaScmu&3NX6;NNpcb+6YX}84G}<xVz4#A3y-kKa%a64Qz9QL2TW^-<n~YZprbv=YJUytor7~IpM&AvE8C7L03r1#Fa*i_s=f_Y5CC3lv1FTY7t)R-uHm`8OYqoc8@dadR1f11eSN!wEZS~d2G8PqmdZ>PS0I*XBR9(@!5Vj6EiOp@*rD{7k|s`czpp@vq(f*SdX6l^$dkq~hUnGy%1;Tdk{i)i>su=}`|Q~q2ZZ(+W*@-jy2-|t1PlA5g+?(TBONEZu0!=$SV_h!`aqufDaJvGc<IMNIWW8->#brUH;bTh3LteyXq?;iA>ij<-oCOL-*<vq|Krumx2AP3Rvor}|LdDSo7ViMT8H=ONg~)abmv`HR|SdSmu)eM@hLD=<Xczp95QmThs6cRGk__`Kwwu<xjI+%K{8u2#%xBUbj46o5<D{O-1E<h&9+}=reK6dF-i&05P#;BPeEoK>51cHzk$fuH1M=RipD38wei=p&1Sev4F$BANSIv*1B7N&Ng+KFa}8I4LkV-&;wrYj@2pnhDz+;2T5QE;i@ydF083U?qgZ;-A7~fwJQ(vHy`yvhU}u3y7w2b}@NFI5!NdI>Y~fx8sS=j$da}L7qKJGLIBO+>W$m>U>2TV?W0f~Cq#m~&rd+Zc)ju0{>vi=p;wJeNd;wbn&=67HcFDf4Mz(>P;IgL|U7Z(#hf5q#WL4~lLJ>)!Na4d~WNK6Lp%e@ai(EXd!AL0tj2d8WpJKkxSi}eHCJ6FMT!G_hK+Ykb^wKZr&dV}F^kctcUGIiXG>Ik=*0y18x&Pd%qx@#tG^0^7^&+&G2lY!@n9|O~SfxJXkzav+f^yaYqN2>~7+5!2!SGDE`C!=`NO5ub`3??JkBNh$d}^Nn9C*5svZe3Cc^@+|J`UE=pK}Oqmchkch<OXydFfUpozOxI0^R9&i=7300c&4lJ7`2+^;qM99#qVG$Z_uO<He(X6S(SSb{P9bF7+pbw}e=cIRWp31$~44zHgf=E1UVW4X}Z`TFoV+Y6~zDg4t1^%>YoaTcBg){B3@OF=j@?b&4IJtHma78c|0fFiI{njQOb6!2`Jj|3omO?7pExtb)SZ9c0W10c|muP{>)L(`A4*LN{x_(2Fg)Kg0}{<px&h^0vvhpaYZ*^TeAfcnUElRU_&aI8uRttBG*6XB_$Fbw`eMW<#bwo8J}n*<f1%5lkxcjmV5lu>IoXQrmb<g%`nDa)NP{yN4ISSINmSg3*Y)hZrMou0Ka4022%E7f6$1799b}LAtWfU;B4~TS^j;cLw{sZ_p@Gfhc%0s(2$020n@liaM{h!MMrsY&&RI??IUmtf(u%vrMGGlq3i&QLu)um|uR0S&_s9BYn}ca20*qMG=l)2J$aXLi2qQoU)?>(ZZJ4?_|5cy)3+|wl77Wq1L$i_v2hC2&*U0{kn}c1%@NV2trZ|7fqVzDSm&dG2zFUi!>(=Lb5zCtE$VuSrMewB2)&CtYqFu*&i!?25CYGldWW9Km{l<wwq2b-At5MHj6mu+M289CgAUaXD2kdHNkf_z!OllZ;uggBwCi^SviPvwgE!=^37s85pQxkEZ<58U>A9F8?7(Q43`)Y7$qSawMO%#aEk3SX^M!6yRZU_ODOpZ4JybAl}XWwtZKj{7Wy3nqk)`OhBPKYgPA6VF+_G3HSG*&7~le$c9~=!bmes5%A{Iq3N00NRMAML?A?fm4T7@Ewyz*o%<FU3Ile$rfQ(Ra&}pa0hs?H=5cCLY0?z?TDTRJL(;NVrRuXWG0ao<Q$R3VfVO{~PQO@pHVgtL*w~%`_SILjx|MaK-{P`XGxN5ytx=Pny5^Ryj8WF_htB1TVf;x$-bWqv>BV*@0FtzKdY9_0|%*#<$lYQy}K*1^P2jB&WyIW=*s!~u(@Lv@7@=>c*L*clUP~;Md;sm*ATy2KnIyJM{)~R9%a6>IlHUc-QGA1B?%oS5Y&g5DWVBGAst0u4NC{i$HEAeA|o7TS<rnW-Va%w5^#saB4lMgh8zul{?(BM>8HslzX24xZK7-+_(EurI^dz&=Vf;*Ku^eqYdRt}QUsjM$PCANo6!Ny8EMrTR2*rQTi%@^_l5>=CT(UEmJquqMSrCQDraK>jTXJ7#?dVz-mD(z%B9;W4)b_c6b>E_(Nw>49?LF{P>E;0kI5V_%5l(?zHK66Dr4Zc1-BT=V3%D&ablFm!p*Dx$>5<6pd3I^6VynulR<aT;|umbmv#;K!8O#HVM5CVMLJj<<hh}GC=bK25W*=1{?q<?unvwM?Gl1`uoTuAx8gwQIwkoCGtl77D5m&mJEA=P$bDLxk*Vxvc;iO{Rc87=E824LUR*ihy6(zQz_T!0x_4{^@uUxCTrehvTO^N;ZP#}ls_F}c)Xsn^m7wr5in{n(OfBkC434rjx9k3i~cH@{x<qAyZQYNrE%I9T;{F+GF_(EPErVO=8l;xHZb?C2H&)&b>elvhu6l`*v+bS*V?YKvMG+Wo;Q4ojm`$l<ocQp2n&sitEoW>vbEG?QxxR1jz#;*GEDPMZ3<-J_|$598Qp4&pUi3o=OC3q&qHsgI0m*A0kJdH@@iw$y3XTuJ$J8TeK>m9ZQ%@v9gz7cRm9!t%i{yjgZYMcxR@r)$z^YUxl7k86vx6;d6Q%}sqH?5^@p2$qMaGw=VVaD@sHDtnu9y+UOoPX@=&ktLgQMy6aOlqiM#q+|#gb3l9?F1upHT~kr=L`cCoA%Fx?zJJr=UFVMChF+922Q!D<zKRp({MOt-jm`_mi&?W?YTv|Dq9@U_+ZOZ2Vl+7YydMYj#F13r&~r5`$t9J>qABJHGjL*aXyCz1i|$?&sZDwPcfn7X(Sp8RTgSQ>!1cj<JmMeQ0MRZs9B?K!d$1^DW(Qdkw`rYkS7jam`DMl=PYqQ5(eIkfoD5^F+hL#SI-lOKe<G#W;cGtP$@0UMZxatwEH(|o61=F(M=MJFa5(bg!2-QsmQM}-$$X{QhTwY9!aDb`Um}PsI)UO^15s^x<0*eGDQnyfpviP!J|uTUyGUe<46ed8Btg(^vhb9lCRw@aP)WK()I#HfER60@MUGr{F>{o|vLr{T>mwgUv4b$*toDg=!Z+TW%k>9?f8VAZp9jeCvVJtE_S2=Vbb_p$`)?r3B+cFy^z|f**i32E@~WZCQtXJ2p#p+<|Ne+<;k9!w1Lp&sY^eA(;jm$^wa9Z1qDSc_YR$KUsgy6fL{k^QuerE(&wXvio|HQH-59imK8?J7DSJ8v@ZX-H<bD3dny8zuE_-ae^;<XAOx~TvxrscGnUhjhYMA!Ku65$|7}o$ENOVx@97A{jZU+iV*LpqXL5n#Iq}x#nBThV&#5=x5!F&NK;N6@@=nR7ja;NJHS*N`;RnzE0t}PI9^+T?cLCP0NI_yGieCc1#?;U=49GXPx7D_Xrx<4E0S@OOGcL!NHc!Wq^TE1`rvF>`)g4~68c&~@pYsHsd*5I=t^7sHVDY`xlPUGPBL3H-y$+J^0AyWQIy^f-9*7CjU>6>Hz&1`=whaB1=KgRcOQ^yF<9c|o3s`nWGR+%BYnb`!9<06SOR&V`%pj9FWKJIZr_&9wk7e`-$+BM4Yb6v(d_jOVIKu4l8VUcY!WaLAM;KcR2(-|{?(x9$JSabnJ<5%jAD>x|W`_5K;Bp;pW;i<?}H;rCfY8@Z5pv44M8(x2K%?jECvs2EI5Gx?3^@KPc*s!&dPT8zE6TH6WEaEzonQ4r-gvf{k9>-a(F^=3QZ>gN(q3I|T$+i&k$eW~m_fk&m2ByK^z7G#g1F=W7mIa}^Cr_fe9w5}+Js$Mvhz<|PbfiezVJ2cF`;eu+KX75^xeD>j+V1;TI#xQI$9OTk#ivIidGmG;pFOAcf?R*}icQW9DQhYFvXu1>XgUcJ=3WR*Wm94`QJOC!AQ>fx@!Vyoe<CUPz?%rwp2OKhLG?bCDrmTAvY@-%bisQS$6IJ>5gymdhlV&AiJfwMg2p}se}n>mk`im7#5?p5ko#)<+pDsceM_MyT)m$lahx)%G6;sl2ajo-8jYo05Bhvv>`v$MwP}iWplrzHGg&=CEDscvmVu3zLOxy`FQw1j%)y>tLhCjk*vKTkK75P^aX{27TqYL8m#`cV=iMv?Wf~Wch+fD;Ky>USmiYP?%waW~IZ^by><r-8BuZCnTS6ILdqZw8NNgK3jvEdQhF}w5y?7crOf1YGIyS{o7_)lAWEiXOZ%kuibCqKzEDnk3@){{X*shD(mQ(^}0nuPaJ~Wi6rg_uoc6TZp+?vjYcB}+D1brb!hhFZ!yiR>>h2SpkLacYfw;L*as_j>@iNE8W609&&8y}KcXXQ7EKCK9SU8iop@m>~W?NY22jXY$I!{gq5nAOkYL%in?;eeN>VX^q){Osi9<Z>~+KTN!?t@^-x1<kU^vWiAAimX{Gb1Fk4r<Nw6N~(uZHL6l?0<od4O1jL@w|l(%g_Ndqt_IQILY;F+@_J$&o%0f_o0rC85dJ#(VHGt6o`^#PL5X)9#|aQ5iuue9(7K;FNC&(pSB&}A8SQ8g`qTs(V%4KAVcZy@(uYCA+-cD4F6U2$lB&t<HSLYuILrhlM3XZp{Mj4Om%J83A>@<3!uQfO1rP(A#M9gCjDlPnqlFVynJ;RQH@hx_ytP8}(Tn%8aBakDddmWkg`gCJ(K5faUb5681j5nMr6;8d!Bg|QLlF)_j~<=)Q^o3qjy-Y;&upRtOfaINcB^^ri;`4bBEW?e@h$BDslXd<H9lO%%Y!pnYVHW;Q6qvEOqQi}<syrY5&WroOkxXHQREUz%*@3K`|Z4j$b9~AbmJtxkHj{IU_T{()oES7Ylv#-r&)$zi>*A3iul&yyg|e}aJV%k;xt#bYxKP%ewBbwAC7s$i(c7Pb$&3{uCRw;_!gHifiS&6y15<b5-F`h*P;Uu)CPYvz+waB@pWx(Sq=1i9nw?;=$J?Svb}}A?3c#ua}4mT%<y%+Zj(2e71BSXgx<OMKOQrI(=EhP8MO{rJ!~9L2&P1!xn>l6d3eZ<*uVWT`x=mw2>oMXMt?)1Tc+ca)|%+wp;aF-6rZ%d@Ay7zuqzh!9C1Q=7SUhHP)9g=v2AZCfjc?&wLdLXvR>$$Jo~QRY*oqsv83tG{jBvbC-tJ1mG!ZW2n}fl4qWTAQAl=8T{YL%IvklsKfik=Gu>bDE~owDZFYsMYIb5qHR!nixh9(~q#inmC9uVR1GdCX&H')), __file__, "exec"), globals())
+from __future__ import annotations
+
+import hashlib
+import io
+import random
+import shutil
+from datetime import timedelta
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+
+from PIL import Image, ImageChops, ImageDraw, ImageStat, features
+from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.models import ImageBlob, ImageGeneration, ImageQAEvent, ImageSafetyPolicy, ImageVariant, utcnow
+from app.services.image_policy import compose_effective_prompt, compose_negative_prompt
+
+
+class ImageRuntimeError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class GeneratedImage:
+    content: bytes
+    media_type: str = "image/png"
+
+
+@dataclass(frozen=True)
+class ImageQAResult:
+    passed: bool
+    findings: list[dict]
+    metrics: dict
+
+
+class SemanticImageQA(Protocol):
+    def check(self, *, content: bytes, media_type: str, user_prompt: str, policy_superprompt: str = "") -> ImageQAResult: ...
+
+
+class ImageBackend(Protocol):
+    name: str
+    model_name: str
+    def generate(self, *, prompt: str, negative_prompt: str, width: int, height: int, steps: int, seed: int) -> GeneratedImage: ...
+
+
+class DisabledImageBackend:
+    name = "disabled"
+    model_name = ""
+    def generate(self, **kwargs) -> GeneratedImage:
+        raise ImageRuntimeError("Local image backend is not configured")
+
+
+class LocalDiffusersBackend:
+    """Optional fully-local backend. Model files must already exist on disk."""
+    name = "diffusers"
+
+    def __init__(self, model_path: str, model_name: str = ""):
+        path = Path(model_path).expanduser().resolve()
+        if not path.is_dir():
+            raise ImageRuntimeError("Local image model directory does not exist")
+        self.model_path = path
+        self.model_name = model_name or path.name
+        self._pipeline = None
+
+    def _load(self):
+        if self._pipeline is not None:
+            return self._pipeline
+        try:
+            import torch
+            from diffusers import DiffusionPipeline
+        except ImportError as exc:
+            raise ImageRuntimeError("Install the optional 'image' dependencies to use diffusers") from exc
+        pipeline = DiffusionPipeline.from_pretrained(str(self.model_path), local_files_only=True, torch_dtype=torch.float32)
+        pipeline = pipeline.to("cpu")
+        pipeline.set_progress_bar_config(disable=True)
+        self._pipeline = pipeline
+        return pipeline
+
+    def generate(self, *, prompt: str, negative_prompt: str, width: int, height: int, steps: int, seed: int) -> GeneratedImage:
+        pipeline = self._load()
+        import torch
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        output = pipeline(prompt=prompt, negative_prompt=negative_prompt or None, width=width, height=height, num_inference_steps=steps, generator=generator)
+        if not getattr(output, "images", None):
+            raise ImageRuntimeError("Local image backend returned no image")
+        out = io.BytesIO(); output.images[0].save(out, format="PNG", optimize=True)
+        return GeneratedImage(out.getvalue())
+
+
+class MockImageBackend:
+    """Deterministic lightweight backend for tests and runtime smoke checks only."""
+    name = "mock"
+    model_name = "x1-mock-image"
+    def generate(self, *, prompt: str, negative_prompt: str, width: int, height: int, steps: int, seed: int) -> GeneratedImage:
+        rng = random.Random(seed)
+        image = Image.new("RGB", (width, height), (rng.randrange(32, 224), rng.randrange(32, 224), rng.randrange(32, 224)))
+        draw = ImageDraw.Draw(image)
+        draw.text((16, 16), hashlib.sha256(prompt.encode()).hexdigest()[:16], fill=(255, 255, 255))
+        out = io.BytesIO(); image.save(out, format="PNG", optimize=True)
+        return GeneratedImage(out.getvalue())
+
+
+def validate_dimensions(width: int, height: int, *, max_dimension: int, max_pixels: int) -> None:
+    if width > max_dimension or height > max_dimension:
+        raise ImageRuntimeError(f"Image dimension exceeds {max_dimension}px limit")
+    if width * height > max_pixels:
+        raise ImageRuntimeError("Image pixel budget exceeded")
+    if width % 8 or height % 8:
+        raise ImageRuntimeError("Image dimensions must be divisible by 8")
+
+
+def ensure_disk_capacity(storage_root: str, *, min_free_bytes: int, min_free_percent: float) -> dict:
+    root = Path(storage_root).expanduser().resolve()
+    probe = root
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    usage = shutil.disk_usage(probe)
+    free_percent = (usage.free / usage.total * 100.0) if usage.total else 0.0
+    if usage.free < min_free_bytes or free_percent < min_free_percent:
+        raise ImageRuntimeError("Image storage low-water mark reached; new generation is temporarily blocked")
+    return {"total_bytes": usage.total, "free_bytes": usage.free, "free_percent": round(free_percent, 3)}
+
+
+def _image_info(content: bytes) -> tuple[int, int, str]:
+    try:
+        with Image.open(io.BytesIO(content)) as img:
+            img.verify()
+        with Image.open(io.BytesIO(content)) as img:
+            width, height = img.size
+            fmt = (img.format or "PNG").upper()
+    except Exception as exc:
+        raise ImageRuntimeError("Backend returned an invalid image") from exc
+    media = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp", "AVIF": "image/avif"}.get(fmt, "application/octet-stream")
+    return width, height, media
+
+
+def persist_blob(db: Session, *, storage_root: str, content: bytes) -> ImageBlob:
+    sha = hashlib.sha256(content).hexdigest()
+    existing = db.scalar(select(ImageBlob).where(ImageBlob.sha256 == sha))
+    if existing is not None:
+        return existing
+    width, height, media_type = _image_info(content)
+    ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/avif": ".avif"}.get(media_type, ".bin")
+    root = Path(storage_root).resolve(); target = root / sha[:2] / f"{sha}{ext}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        tmp = target.with_suffix(target.suffix + ".tmp"); tmp.write_bytes(content); tmp.replace(target)
+    blob = ImageBlob(sha256=sha, media_type=media_type, width=width, height=height, size_bytes=len(content), storage_path=str(target))
+    try:
+        with db.begin_nested():
+            db.add(blob)
+            db.flush()
+        return blob
+    except IntegrityError:
+        existing = db.scalar(select(ImageBlob).where(ImageBlob.sha256 == sha))
+        if existing is None:
+            raise
+        return existing
+
+
+def deterministic_image_qa(content: bytes, *, expected_width: int, expected_height: int) -> ImageQAResult:
+    findings: list[dict] = []
+    try:
+        with Image.open(io.BytesIO(content)) as raw:
+            img = raw.convert("RGBA")
+    except Exception:
+        return ImageQAResult(False, [{"code": "invalid_image", "severity": "critical", "repairable": True}], {})
+    width, height = img.size
+    if (width, height) != (expected_width, expected_height):
+        findings.append({"code": "wrong_dimensions", "severity": "critical", "repairable": True})
+    rgb = Image.new("RGB", img.size, "white"); rgb.paste(img.convert("RGB"), mask=img.getchannel("A"))
+    stat = ImageStat.Stat(rgb)
+    variance = sum(stat.var) / max(1, len(stat.var))
+    extrema = rgb.getextrema()
+    dynamic_range = sum(hi - lo for lo, hi in extrema) / 3.0
+    alpha = img.getchannel("A")
+    alpha_stat = ImageStat.Stat(alpha)
+    alpha_mean = float(alpha_stat.mean[0])
+    if variance < 2.0 or dynamic_range < 4.0:
+        findings.append({"code": "near_blank", "severity": "critical", "repairable": True})
+    if alpha_mean < 3.0:
+        findings.append({"code": "transparent_blank", "severity": "critical", "repairable": True})
+    # Deterministic edge warning only. It is not a semantic claim that an object is clipped.
+    edge = max(1, min(width, height) // 100)
+    center = rgb.crop((edge, edge, max(edge + 1, width - edge), max(edge + 1, height - edge)))
+    border_mask = Image.new("L", (width, height), 255); ImageDraw.Draw(border_mask).rectangle((edge, edge, width-edge-1, height-edge-1), fill=0)
+    border_pixels = ImageStat.Stat(rgb, border_mask).var
+    center_var = sum(ImageStat.Stat(center).var) / 3.0 if center.size[0] and center.size[1] else 0.0
+    border_var = sum(border_pixels) / 3.0
+    if center_var > 30 and border_var > center_var * 2.8:
+        findings.append({"code": "edge_activity_high", "severity": "warning", "repairable": False})
+    critical = any(f["severity"] == "critical" for f in findings)
+    metrics = {"width": width, "height": height, "variance": round(variance, 3), "dynamic_range": round(dynamic_range, 3), "alpha_mean": round(alpha_mean, 3), "border_variance": round(border_var, 3), "center_variance": round(center_var, 3)}
+    return ImageQAResult(not critical, findings, metrics)
+
+
+def _perceptual_error(original: Image.Image, candidate: Image.Image) -> float:
+    a = original.convert("RGB")
+    b = candidate.convert("RGB")
+    if a.size != b.size:
+        b = b.resize(a.size, Image.Resampling.LANCZOS)
+    diff = ImageChops.difference(a, b)
+    stat = ImageStat.Stat(diff)
+    return float(sum(stat.mean) / max(1, len(stat.mean)))
+
+
+def _encode_variant(image: Image.Image, codec: str, quality: int, *, max_side: int | None = None) -> tuple[bytes, float]:
+    original = image.convert("RGB")
+    target = original.copy()
+    if max_side and max(target.size) > max_side:
+        target.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+    out = io.BytesIO()
+    fmt = codec.upper()
+    kwargs = {"quality": quality}
+    if fmt == "WEBP": kwargs.update({"method": 6})
+    target.save(out, format=fmt, **kwargs)
+    content = out.getvalue()
+    with Image.open(io.BytesIO(content)) as decoded:
+        reference = original if not max_side else target
+        error = _perceptual_error(reference, decoded)
+    return content, error
+
+
+def create_storage_variants(db: Session, *, source_blob: ImageBlob, storage_root: str, max_error: float = 4.0, preview_max_side: int = 512) -> list[ImageVariant]:
+    source_path = Path(source_blob.storage_path)
+    if not source_path.is_file():
+        raise ImageRuntimeError("Source image blob missing")
+    with Image.open(source_path) as opened:
+        original = opened.copy()
+    created: list[ImageVariant] = []
+    codecs = ["WEBP"] + (["AVIF"] if features.check("avif") else [])
+    for codec in codecs:
+        best: tuple[bytes, float, int] | None = None
+        for quality in (90, 85, 80, 75, 70):
+            try:
+                content, error = _encode_variant(original, codec, quality)
+            except Exception:
+                break
+            if error <= max_error:
+                best = (content, error, quality)
+            else:
+                break
+        if best:
+            content, error, quality = best
+            blob = persist_blob(db, storage_root=storage_root, content=content)
+            row = db.scalar(select(ImageVariant).where(ImageVariant.source_blob_id == source_blob.id, ImageVariant.kind == f"full_{codec.lower()}"))
+            if row is None:
+                row = ImageVariant(source_blob_id=source_blob.id, blob_id=blob.id, kind=f"full_{codec.lower()}", codec=codec.lower(), quality=quality, perceptual_error=round(error, 4)); db.add(row); db.flush()
+            created.append(row)
+    preview_content, preview_error = _encode_variant(original, "WEBP", 80, max_side=preview_max_side)
+    preview_blob = persist_blob(db, storage_root=storage_root, content=preview_content)
+    preview = db.scalar(select(ImageVariant).where(ImageVariant.source_blob_id == source_blob.id, ImageVariant.kind == "preview_webp"))
+    if preview is None:
+        preview = ImageVariant(source_blob_id=source_blob.id, blob_id=preview_blob.id, kind="preview_webp", codec="webp", quality=80, perceptual_error=round(preview_error, 4)); db.add(preview); db.flush()
+    created.append(preview)
+    return created
+
+
+def choose_preferred_blob(db: Session, source_blob: ImageBlob, variants: list[ImageVariant]) -> ImageBlob:
+    candidates = [source_blob]
+    for variant in variants:
+        if variant.kind.startswith("full_"):
+            blob = db.get(ImageBlob, variant.blob_id)
+            if blob is not None:
+                candidates.append(blob)
+    # Never make storage larger just to switch format.
+    return min(candidates, key=lambda b: b.size_bytes)
+
+
+def run_generation_qa(db: Session, generation: ImageGeneration, *, blob: ImageBlob, attempt: int) -> ImageQAResult:
+    content = Path(blob.storage_path).read_bytes()
+    result = deterministic_image_qa(content, expected_width=generation.width, expected_height=generation.height)
+    db.add(ImageQAEvent(generation_id=generation.id, attempt=attempt, status="passed" if result.passed else "failed", findings=result.findings, metrics=result.metrics))
+    generation.qa_status = "passed" if result.passed else "failed"
+    db.flush()
+    return result
+
+
+def execute_generation(db: Session, generation: ImageGeneration, *, backend: ImageBackend, storage_root: str, max_perceptual_error: float = 4.0, preview_max_side: int = 512, max_repairs: int = 1, semantic_qa: SemanticImageQA | None = None) -> ImageGeneration:
+    if generation.status not in {"queued", "generating"}:
+        raise ImageRuntimeError("Generation is not runnable")
+    generation.status = "generating"; generation.started_at = generation.started_at or utcnow(); db.flush()
+    policy = db.get(ImageSafetyPolicy, generation.safety_policy_id) if generation.safety_policy_id else None
+    effective_prompt = compose_effective_prompt(policy, generation.prompt)
+    policy_negative = compose_negative_prompt(policy, generation.negative_prompt)
+    try:
+        attempt = 0
+        final_blob: ImageBlob | None = None
+        qa: ImageQAResult | None = None
+        used_seed = generation.seed
+        while attempt <= max_repairs:
+            attempt += 1
+            repair_codes = [f["code"] for f in (qa.findings if qa else []) if f.get("repairable")]
+            retry_negative = policy_negative
+            if repair_codes:
+                retry_negative = ", ".join(filter(None, [retry_negative, "avoid " + ", ".join(repair_codes)]))
+                used_seed = (generation.seed + attempt - 1) % (2**31)
+            result = backend.generate(prompt=effective_prompt, negative_prompt=retry_negative, width=generation.width, height=generation.height, steps=generation.steps, seed=used_seed)
+            blob = persist_blob(db, storage_root=storage_root, content=result.content)
+            if blob.width != generation.width or blob.height != generation.height:
+                raise ImageRuntimeError("Backend returned unexpected image dimensions")
+            qa = run_generation_qa(db, generation, blob=blob, attempt=attempt)
+            final_blob = blob
+            if qa.passed:
+                break
+            if attempt > max_repairs or not any(f.get("repairable") for f in qa.findings):
+                break
+            generation.repair_attempts += 1
+        if final_blob is None or qa is None or not qa.passed:
+            generation.blob_id = final_blob.id if final_blob else None
+            generation.status = "qa_failed"; generation.finished_at = utcnow()
+            generation.error_message = "Image failed deterministic QA"
+            generation.manifest = {**(generation.manifest or {}), "qa_status": "failed", "qa_findings": qa.findings if qa else []}
+            db.flush(); return generation
+        if semantic_qa is not None:
+            content = Path(final_blob.storage_path).read_bytes()
+            semantic = semantic_qa.check(content=content, media_type=final_blob.media_type, user_prompt=generation.prompt, policy_superprompt=policy.superprompt if policy else "")
+            db.add(ImageQAEvent(generation_id=generation.id, attempt=attempt, qa_type="semantic", status="passed" if semantic.passed else "failed", findings=semantic.findings, metrics=semantic.metrics))
+            if not semantic.passed:
+                generation.blob_id = final_blob.id
+                generation.qa_status = "failed"
+                generation.status = "qa_failed"
+                generation.finished_at = utcnow()
+                generation.error_message = "Image failed semantic vision QA"
+                generation.manifest = {**(generation.manifest or {}), "qa_status": "failed", "semantic_findings": semantic.findings}
+                db.flush(); return generation
+        variants = create_storage_variants(db, source_blob=final_blob, storage_root=storage_root, max_error=max_perceptual_error, preview_max_side=preview_max_side)
+        preferred = choose_preferred_blob(db, final_blob, variants)
+        generation.blob_id = final_blob.id; generation.preferred_blob_id = preferred.id; generation.status = "ready"; generation.finished_at = utcnow(); generation.backend = backend.name; generation.model_name = backend.model_name
+        generation.manifest = {"backend": backend.name, "model": backend.model_name, "safety_policy_id": policy.id if policy else None, "safety_policy_version": policy.version if policy else None, "seed": generation.seed, "effective_seed": used_seed, "steps": generation.steps, "width": generation.width, "height": generation.height, "blob_sha256": final_blob.sha256, "preferred_sha256": preferred.sha256, "size_bytes": final_blob.size_bytes, "preferred_size_bytes": preferred.size_bytes, "qa_status": "passed", "repair_attempts": generation.repair_attempts, "variants": [{"kind": v.kind, "blob_id": v.blob_id, "codec": v.codec, "quality": v.quality, "perceptual_error": v.perceptual_error} for v in variants]}
+        generation.error_message = ""
+    except Exception as exc:
+        generation.status = "failed"; generation.finished_at = utcnow(); generation.error_message = str(exc)[:2000]
+        raise
+    finally:
+        db.flush()
+    return generation
+
+
+def user_image_storage_bytes(db: Session, user_id: str) -> int:
+    source_ids = {row[0] for row in db.execute(select(ImageGeneration.blob_id).where(ImageGeneration.user_id == user_id, ImageGeneration.blob_id.is_not(None))).all() if row[0]}
+    if not source_ids:
+        return 0
+    ids = set(source_ids)
+    ids.update(v for v in db.scalars(select(ImageVariant.blob_id).where(ImageVariant.source_blob_id.in_(source_ids))).all() if v)
+    return int(db.scalar(select(func.coalesce(func.sum(ImageBlob.size_bytes), 0)).where(ImageBlob.id.in_(ids))) or 0)
+
+
+def cleanup_expired_rejected_generations(db: Session, *, retention_days: int) -> int:
+    cutoff = utcnow() - timedelta(days=max(0, retention_days))
+    rows = list(db.scalars(select(ImageGeneration).where(
+        ImageGeneration.status.in_(["qa_failed", "failed", "cancelled"]),
+        ImageGeneration.finished_at.is_not(None),
+        ImageGeneration.finished_at < cutoff,
+        or_(ImageGeneration.blob_id.is_not(None), ImageGeneration.preferred_blob_id.is_not(None)),
+    )).all())
+    for generation in rows:
+        generation.blob_id = None
+        generation.preferred_blob_id = None
+        generation.manifest = {**(generation.manifest or {}), "storage_pruned_at": utcnow().isoformat()}
+    db.flush()
+    return len(rows)
+
+
+def prune_unreferenced_image_blobs(db: Session, *, storage_root: str, limit: int = 200) -> int:
+    """Prune variants and physical blobs only when no generation still references the source asset."""
+    referenced_sources = select(ImageGeneration.blob_id).where(ImageGeneration.blob_id.is_not(None))
+    orphan_variants = list(db.scalars(select(ImageVariant).where(~ImageVariant.source_blob_id.in_(referenced_sources))).all())
+    for variant in orphan_variants:
+        db.delete(variant)
+    db.flush()
+
+    rows = list(db.scalars(
+        select(ImageBlob).where(
+            ~ImageBlob.id.in_(select(ImageGeneration.blob_id).where(ImageGeneration.blob_id.is_not(None))),
+            ~ImageBlob.id.in_(select(ImageGeneration.preferred_blob_id).where(ImageGeneration.preferred_blob_id.is_not(None))),
+            ~ImageBlob.id.in_(select(ImageVariant.blob_id)),
+            ~ImageBlob.id.in_(select(ImageVariant.source_blob_id)),
+        ).limit(limit)
+    ).all())
+    removed = 0
+    root = Path(storage_root).resolve()
+    for blob in rows:
+        path = Path(blob.storage_path).resolve()
+        try:
+            if path.is_relative_to(root) and path.is_file():
+                path.unlink()
+        except (OSError, ValueError):
+            continue
+        db.delete(blob); removed += 1
+    db.flush()
+    return removed

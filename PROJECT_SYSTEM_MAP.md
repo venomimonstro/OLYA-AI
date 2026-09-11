@@ -3,7 +3,7 @@
 > **ОБЯЗАТЕЛЬНО ПРОЧИТАТЬ ПЕРЕД ИЗМЕНЕНИЕМ ПРОЕКТА.**  
 > Этот файл — навигационная карта проекта для разработчиков и ИИ-агентов. Он отвечает на вопросы: **куда приходит запрос, какой контроллер его принимает, какой service выполняет бизнес-логику, какие ORM-модели/файлы/воркеры затрагиваются и где проходит граница безопасности**.
 >
-> Актуальность карты: 2026-09-11. Карта составлена по `main` после Sprint 65.
+> Актуальность карты: 2026-09-11. Карта составлена по `main` после Sprint 66.
 > **Правило проекта:** если в том же commit добавляется/удаляется controller, worker API, основной service, route prefix или меняется важная межмодульная связь — этот файл должен обновляться в том же commit.
 
 ---
@@ -63,7 +63,7 @@ flowchart TD
 
 | Файл | Назначение |
 |---|---|
-| `app/main.py` | Единственная точка сборки FastAPI: lifespan, middleware, governors, router registration, background loops. |
+| `app/main.py` | Единственная точка сборки FastAPI: lifespan, middleware, governors, concrete router registration, background loops. |
 | `app/core/config.py` | Все runtime-настройки `X1_*`; лимиты CPU/RAM/context/files/research/sandbox/images/launch. |
 | `app/db.py` | SQLAlchemy engine, pool/deadlines, `SessionLocal`, `get_db`, `Base`. |
 | `app/models.py` | Канонический ORM registry: readable core, migration-derived models и Sprint extensions. |
@@ -102,9 +102,13 @@ models_sprint62.py
 
 `scripts/generate_orm_models.py --check` подтверждает, что `models_migrations.py` синхронизирован с Alembic. Все модули используют один `app.db.Base`. **Не создавайте второй SQLAlchemy Base и не импортируйте только часть model registry в production-код.**
 
+Alembic имеет один непрерывный граф от `bff29ea4eab8` до единственного head. Чистый `upgrade head` создаёт 94 application tables, а `alembic check` не допускает расхождение DDL и ORM metadata.
+
 ---
 
 ## 4. Что создаёт `app/main.py`
+
+Routers регистрируются как concrete routes через `_include_router_eager`. Это сохраняет dependency overrides FastAPI и одновременно делает `app.routes` полным источником для release-аудитов. Вложенные onboarding и image-editing routers подключаются явно, а не скрываются в lazy `_IncludedRouter`.
 
 При старте приложения создаются и кладутся в `app.state`:
 

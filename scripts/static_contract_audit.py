@@ -35,13 +35,6 @@ REQUIRED_FILES = (
     "searxng/settings.yml",
 )
 
-# Two historical source files are exact transfer wrappers around canonical
-# compressed source. They are not a general permission to use exec(). Any new
-# wrapper or any change to their narrow shape is a release-blocking finding.
-CANONICAL_EXEC_WRAPPERS = {
-    "app/services/engineering_execution.py",
-    "app/services/image_runtime.py",
-}
 ALLOWED_SETTINGS_ATTRIBUTES = {"model_dump", "model_copy", "model_fields"}
 
 
@@ -53,11 +46,18 @@ def _settings_fields() -> set[str]:
     tree = ast.parse((ROOT / "app/core/config.py").read_text("utf-8"), filename="app/core/config.py")
     for node in tree.body:
         if isinstance(node, ast.ClassDef) and node.name == "Settings":
-            return {
+            fields = {
                 child.target.id
                 for child in node.body
                 if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name)
             }
+            fields.update(
+                child.name
+                for child in node.body
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and any(isinstance(item, ast.Name) and item.id == "property" for item in child.decorator_list)
+            )
+            return fields
     return set()
 
 
@@ -102,7 +102,7 @@ def _audit_python(path: Path, settings_fields: set[str]) -> list[dict[str, Any]]
         name = _call_name(node.func)
         if name in {"eval", "builtins.eval", "os.system", "os.popen", "tempfile.mktemp"}:
             findings.append(issue("dangerous_execution_primitive", rel, node.lineno, name))
-        if name in {"exec", "builtins.exec"} and rel not in CANONICAL_EXEC_WRAPPERS:
+        if name in {"exec", "builtins.exec"}:
             findings.append(issue("unexpected_exec", rel, node.lineno, name))
         if name in {"pickle.loads", "pickle.load", "marshal.loads", "marshal.load"}:
             findings.append(issue("unsafe_deserialization", rel, node.lineno, name))
@@ -154,7 +154,8 @@ def _audit_compose() -> list[dict[str, Any]]:
         findings.append(issue("docker_socket_exposed_to_sandbox_worker", "docker-compose.yml"))
     if socket not in proxy:
         findings.append(issue("docker_runtime_proxy_missing_socket", "docker-compose.yml"))
-    if text.count(socket) != 1:
+    canonical_mount = f"{socket}:{socket}"
+    if text.count(canonical_mount) != 1 or text.count(socket) != 2:
         findings.append(issue("unexpected_docker_socket_reference_count", "docker-compose.yml", detail=str(text.count(socket))))
     if "X1_DOCKER_RUNTIME_PROXY_TOKEN" not in proxy:
         findings.append(issue("docker_runtime_proxy_token_missing", "docker-compose.yml"))
@@ -217,16 +218,6 @@ def _audit_model_contract() -> list[dict[str, Any]]:
     return findings
 
 
-def _audit_canonical_exec_wrappers() -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    marker = "# Restored losslessly from the canonical cumulative source."
-    for rel in sorted(CANONICAL_EXEC_WRAPPERS):
-        text = (ROOT / rel).read_text("utf-8", errors="replace")
-        if not text.startswith(marker) or text.count("exec(") != 1 or "b85decode" not in text or "zlib" not in text:
-            findings.append(issue("canonical_exec_wrapper_contract_changed", rel))
-    return findings
-
-
 def main() -> int:
     findings: list[dict[str, Any]] = []
     for rel in REQUIRED_FILES:
@@ -241,8 +232,6 @@ def main() -> int:
     findings.extend(_audit_versions())
     findings.extend(_audit_compose())
     findings.extend(_audit_model_contract())
-    findings.extend(_audit_canonical_exec_wrappers())
-
     models = (ROOT / "app/models.py").read_text("utf-8", errors="replace")
     required_model_imports = ("models_core", "models_migrations", "models_sprint62")
     if "exec(" in models or "_models_impl.py.gz" in models or not all(name in models for name in required_model_imports):

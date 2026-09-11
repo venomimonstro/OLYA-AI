@@ -120,7 +120,7 @@ def _ui_contract_errors(registered_paths: set[str]) -> list[dict]:
             attrs = match.group(1)
             if re.search(r"\bonclick\s*=", attrs, flags=re.IGNORECASE):
                 continue
-            if re.search(r"\btype\s*=\s*[\\\'\"]submit[\\\'\"]", attrs, flags=re.IGNORECASE):
+            if re.search(r"\btype\s*=\s*\\?[\\\'\"]submit\\?[\\\'\"]", attrs, flags=re.IGNORECASE):
                 continue
             id_match = re.search(r"\bid\s*=\s*[\\\'\"]([^\\\'\"]+)", attrs, flags=re.IGNORECASE)
             if not id_match:

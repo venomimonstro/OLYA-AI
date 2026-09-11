@@ -1,3 +1,299 @@
-# Restored losslessly from the canonical cumulative source.
-import base64 as _b64, zlib as _zlib
-exec(compile(_zlib.decompress(_b64.b85decode('c-qAqYj4~(^1FWptNS9g+pTkVJsdVwfgo{lJ)lj{IBgHEA#f$GSG68nQL@)H{NHb8I25VJI_o5dD~fhS4rhkLd6V8Wbt#f$)3sfrl0@X?u5MZ(tEz5go7a^-IpMLb)Y~Fo+t1&1UD@BQY&LnJPBw^bCtHNGsNTTm3D4YRvTF0xPW>#4JR>S+O;a}pNdHmDBHgO;&Vp^aDqRSz3YE5Fm}T9R7VfRm8gMZ&x!WzvI#Y$V^Wlkre_q1aFLiURcQREAaaLXBl~PS!U7hV!+95adqh~j&Y6nw4)rC6mnrcCa{fQ26ylLv+fn)gH=A{~czpdm>Z)-q!F7@?7bZuJIw~Ld=aj$WQQZLi3Z0#Oi!tWnopYlpg0hQyx!hc`x3RME*BxX2^bo;t%cU|kPR?SVGD!tUQ%GUM17pM88qgjZitCGA*(i%_!5g1|cB$Ye4&WpUwm7c+xg1nPkD{zavKLJLMN|VT<sBcvU#FVa!8wCV)o+(2-t;-T9BHfKj8dboK00bAp*jE1a>whGugbQ)o<gH3twV&JM&YVKhm}9W~q>YlWNb{+joSdYE)LOXHM?OQ)*v_yVt?1Bq00h99+JJ&KIVkj>Dp7V(n5|b<Enye+?P^xDBJt(7BFod(;8dt+TEwErbqgrqd}SdU9U2n|4=QK0yxpos89g7V<PdV%vzX+Wh-2h!nP;>x0-MTIldSI!Qv!MZ(Wxp`QM80p3!{jZHVWKGCGL9$f;<aWjC>&iPeBt>C_6iy0BCzuJ(L?*I0`M8j|1T^Sj`9QrrZF`_6q6d{UHy((Tohl!EkN>@MtisPV<cU;8B&_s0I(-o9xFt{8r^0Bi;z$l5MNXUCVR)1>>dMgB9##-dOV9h|m94R#z$k+sQXdTRfvtQ8(h^60ib)`6f@vTL3cM6|F@-H^u85wT;XRj3gi<-EVz3h--oXwSn{;V9XCAw+2NkTPHLg@OM<BQyakfLko9iZoVIY*>0B&XWf9I^1v3Ipf)Ep`OA?hla8*0ZqYSD7@(gcI|kHX#J&B_n6C{Wj~T9oSsI#TtZX5(Q1HVTG{ob>=G?<uLtbV|r(nkeL&m*?C?O*QJh}UaNaP#Z8-!K`-z+Tlpa*>4=Mdq*L3%>#s?{W9dK$bEIXE;F=$sQW0!BW%ip@@Z7K5?uz(?FDu%up;jm&|~ksl8{q=-Y59T>q{35x)JZ|X*gemg;ANkV2sWSu`jx!6(Pi#(Ny2F@Y}%YyVv<PZT-DFr({!Q_|^wTIY%>mFAy7h+h$=H_O+FKZci?Wo_kCF$+TXo;OLn!|CG__|VUI8K9xqBGcCdeAQ$rD<c)MxFwgIIhKyb*1nqykx@+zV95Ex8Yhm&`sS{8B5$)^PK#g*-ix+8!0Y?i(NG2g)+f0i^gsIavb-fiuos@^JNkDA2j9SQ_Lpkuo+W{gIxg`KA6eC<l;#HF*}D7ky(a*AbO4;o1)X((9FR^Lhc*PoiZHfebL3&*YMx_196`u^DuBYfPmeJkNB7zY9X%k$~qUbP5#IfWUK{zp*K6|Q7En9oDO5OM%#<g3562_!-51tjx4}sD)R-RJ0@FNh|}m3WoZ$r>uJOsSDA4J$Va&E34#VU0y6pv&#h9oXfe5lw7Qir8}1*ebRzIVnb;rTAws!sB;)`w^8h57elNd;Wh@e3h-WUhJzz&fHuUMmHgmN5iQ$Ji=@|cGPdc`l7oT;^{~zctksfFpjj+C{N@I#*bFZVd&W~!OT=Qj~3s}Ph&$%WXJmfW9u{c^D^~(V@jyrtbK5^nm=RC-hk9N+Z?D_xToGBdz21j*Vh~0<K`NyUPv0=#w`b$&Rr`k;;KqS6$X}M+!?s$g2VE&*cHa-vL=MX01S_l8Wg*I_dOyx_fNd_0eXe!|J+y!#l%0&9S!FhV&P_5=;(oEnHvPrkLOph&x{$Su$5BSfB`}pv#1XlY=3R=)kpn}Vbz)g>7v~?>BV6#<vcBMCubnMg&ti$Upk=+f-a~dy4_6q{XFYDCjqN#=U!s)PNWCT<a4rRo1qv2u1CEvj1j!k|Ooz^=wsd&cuI=Q>HgTm_qI~5n;0YO^hpZ)jcrBSxDhJqxoWD6D@k87-junAM(!LbcyAe#a>dwg9FWi1ys11m13jiYcMEu~I&wa)ip<btI~n*3crIB1E66S%mHE(tZNn0^}So;!n>FeGiAn1XzO9F`y^Tt#53fwQMwVTeXw=(o>8Ziyj4G>Qjv9(EJF>g9@b1PB$|Zmt$0R4Z|hh#y$0+>XQDkG3@E6Id{_G1D#>s2`#>rVQcRLbF1yyS&Iyn&~zvP1939rKRTSrq?&U#H^uVWyG?p4{PIcbiOn7aZwQye7D5(e!a$(A37fmn>a|gjtryyH%NX1p$U>HEy^6^2zev*rhIdmoCsRn#66JFS-)0e_&peIm)z22H%PvDC+~_{q7P)9Fn$*-p+S15y%m6A^+s^9`upjn+iWWvkfVr4E#nX=V;{K~WJm^jNd>D8N5;XWJ;UUhy2)W=1WjWorZ8HfC(Zv<;#={zuTPWH)6*fIM-1&dG%q-?wys5iIQ!0ly6Rv6Yz$boCf4s!?Qw_91O(ZPn%iN}wVN;h36`Z0Jydm2yA>ez@p4b9U&NwNRfx-@@#cNFZ^bj**b_Dvys+Mad<fnXAlqu6Dh2A(XY~*i%Df%1=&QpL)C{VI@IIjQV1<W>VXzNruGJqJkwg?MfL?_SJtX_!&|{No^})o@vIf|3;K6#piciMtcV9tOh)jTGF7db5wj7!d2a^@s+YA_~I{+9<oB^13w5#4`y*0gyP9V%=^=1QLM@3M-(GDrZkq8XvV0EKza&>#;dJ8<j;LF3FpD&iVJ~`H%9?T9A*PR}Uj@#46_PHO7!;{z!!b{L))|ERQvN|kmB`I~9=ka$E^bZ0~-L%QIy3_G_)8V(;$p+I49f!dJQ@d5b33`@aVM9K)_pM8#j3E$&V1&16VH7R5YHt8T>$UL;5LO+$@H3a8338kmXkKa~EBfJHR9?Icv6UPL`VP*t3>JcoAs*HQ!GG!wvVA4mtrEXJ!+SN454L|ur?9}tI*4O+RooG9nOAu!3*$G~g_U#z25~n-hk_n>>*XV4T_Tv$FXf%V%h?6ln6Q_Co>@`i^uxQi=R&31S}2)r4Sg=BBzmkJ)In&jW+<$>q99(Rz)lK+M-why)#T6fiuxS=wS+*6(AW=YDCX9c#!E{D7-b5P7``giV&Lq*fe@%uBaQt}2>oPsh?&5@-@g7))NASzmw4b9(otaMn3ry4<k{2ogt2Jz&Nq1R=FLy9e?EI9&VD_6`R@FCpz`+o#rfIlw<-X`LJRmp1iw|kRj=Qjzj=3V7<v2hUuQqOU>MIn3^Q})VYwP4hE^*VY!I9hg4t+gQbM!{Zt;D-7@hCRFGDze?MFt}G<3&=d|@VnR<_9@A_Vu~eCV?=-w*BvfL4fa#3>yTtotT5WA97ChQ=xQRs|9Q)ESf>(`cJJhl;kG9bwux<~fB5N$ThxHOlD1u!eksH@pPrVZiZNLVKH#DsYx&A@cD`p`+ou`O!0t$XG}EVVgx~3%j}LaR!kwP{7E2M1?82R@Swl$>rdBFa<QSxZq1osLp*cL8%naybcI)@r4QSmwr*^XNI)eSngPrj;WyNFbtAgX^zuk8P!eygYwNIu5>DQ=-wVH-TW=Xc2VF*&|xzC07Q!niYttg$~aCEufvZ>sSQHe|8wD=0h|*4@U7jPt8M-7cEugr__1wRg7#YcWbF9G8uFp#+6UK%AmG`W&8zF)XF$IkY<F^vHdNGwNIr3u##ZJEw4o`2#2>Rn|HzLsHIz?yq-8|MtE|Cj80{~1QOP*T^VIh7a*|}^Dho~!c&n!QG0GY|)M?i==I&#rg7Jz|S9sF>Ix31UJ&WeExM$!fCqbpBm4VzqdTvgzFJsVeVZ)`J@fLl1-94@HM6%$cwp9{@+>sb!`|XLt=#4GF3<cLC9luYB?Sg}SQqv})V;$T*S_NHM48#7XMQdEoY)SQTPRR8?S0C+Bp5Q#jZwtmQBw66UeVllY<M@j(ri2MLr07bz_~u$fYY6Wty&T2!M+<gUzwFv=4a#%3G#8dl4MCXblF**gIjriYq<3~%;<114rJDQMEYtO1?Xrh)CzBrB*;$u;q-91PkC`6yVf_lQ%;pK_)hyE}Aw<o-(DE@fXFF;Q1r`kTci1vTh4ICBwC?uQ$68C-HQw<+0+(pW3kfL4r?BLgldi&?YbDloUAR}FkiX%Z5FMkkdfiw9<-+sF$LFWtXg(5~{p-q4^laowA=maB1|b&$!_B;g3<?EfsBbafPQkCK^jaH(?eHa615zpOmf{7}oa+XP1B?Ltw#eBjy@P^65Q^MJK~dhn_q7MR9QGE+^as(xd$!Br0(UaerlBIS(G0M1eKLGBjAe+X%_f6t#Lu!v$~ZmQY2<V$CqR%}Ybr6O51+#^ss4qJomk8CTABCD?}5xqD14*2{h)Fo6BmKJfjUaA3*{$X)6EPe7MivEHuI7mV!j+7u;?m>e9DDR8;S(+BlqV{r|Bl$;0@rn_kQJ|!uXHO!`ZFv=mw*~n`R@^_;}%yY~$mOU@=R*H{#f+Gz%o={~H~TXB9mjEB-8jbk`-+B=0ZR`;mnxRarN8NxAMPd4%R+oL-t?2Wf<3Fgj0|J5W#_LuP!}uN)3zgu5Z9K1Jf^#-^b#e&+B0O~JH}Fwlkj0A&bin-L{s*04Y9O1QQ>vX@~48HTvg8t67N1N6igzCcp~Y7>P(3$F_785h{)M!<DZgLY)W!zkaKO-^klMnfiTacoeU;!ioIBh1)GmnjFk&Gs>e9)Qnfz5a6CuxYPQ;%iXQod*7Rh~}OKvDkcaM{;!xH#P-#cN2K~#8{$XB5oSvmI7xpby1+{^6fa6iBGu#cHZ8;+&%REYCgulH2JJ$MBL_($3mXlzseZD4tnzAt&ezK<v-;4ptn_)wNIMD+{(&S#rJcsBIX)#E;A1g{%u0^FnITza2XF&dXyfT!MhiJw(dQ+Fg3-4&A3{?lnr{0c+B>%+LllaRR*K~a0#!eR#$%p<i^^K6E!&GwW1sB`*K;y5>n%mSfjQ{yFoq}CZxi@gqq)!{LTY;*WN~+L(lPqYwzA+5wel|rn!UR3}12@7D;Logp8DdkI1Sf{fJ)ma`z0uwkJ>+^H<?yYfXx`;hQC0kEAV$&TulzB*H(PL&qSK!R(m5>y%6;TfBS&QglBbP9eCvvy<4pS(ew3kcZ~O-U-stB=t3Y&LAjv?hyd$XM(!L4J6Vtyp37zpIKiO%;H#@77jgb3z6;UISup0n{7xv@9o08{T?g8^jh89WLFh=bsh4t_FFoHb1stfn{ZLY-v8oVs-mDwxT1xae-H=Zh5s@|R@6u_^@UAYSCc=`#2atClTB2G$!}&#S_&ihW5t~i*ju+J;Tw0!9l7F8P+hNW9`zO8rwIp#7n2L)TyZCKohp6@javF)5GjRYPN-GTKeeR448g$6SuNW2eb6V(lm_$^5~L7-EdC3*5W+D')), __file__, "exec"), globals())
+from __future__ import annotations
+
+import hashlib
+import json
+import tarfile
+from pathlib import Path
+
+from pydantic import ValidationError
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from app.models import (
+    CodeWorkspace, EngineeringExecution, EngineeringExecutionEvent, EngineeringRoleTurn,
+    EngineeringRun, ProjectRuntime, ProjectRuntimeSnapshot, Task, utcnow,
+)
+from app.schemas.chat import ChatMessage
+from app.schemas.engineering import ImplementationPatchOutput
+from app.services.sandbox import SandboxError, run_in_container, sandbox_capabilities
+from app.services.code_workspace import WorkspaceError, path_allowed, resolve_inside, run_command, safe_relative_path, sha256_file, write_text
+from app.services.project_runtime import create_snapshot
+
+
+class ExecutionError(ValueError):
+    pass
+
+
+def serialize_execution(db: Session, row: EngineeringExecution) -> dict:
+    events = list(db.scalars(select(EngineeringExecutionEvent).where(
+        EngineeringExecutionEvent.execution_id == row.id
+    ).order_by(EngineeringExecutionEvent.sequence)).all())
+    return {
+        "id": row.id, "engineering_run_id": row.engineering_run_id, "project_id": row.project_id,
+        "task_id": row.task_id, "runtime_id": row.runtime_id, "workspace_id": row.workspace_id,
+        "created_by": row.created_by, "status": row.status, "state_version": row.state_version,
+        "snapshot_id": row.snapshot_id, "attempt": row.attempt, "max_repairs": row.max_repairs,
+        "change_manifest": row.change_manifest or [], "verification_results": row.verification_results or [],
+        "failure_reason": row.failure_reason or "", "events": events, "started_at": row.started_at,
+        "completed_at": row.completed_at, "created_at": row.created_at, "updated_at": row.updated_at,
+    }
+
+
+def _turn_output(db: Session, run_id: str, role: str) -> dict:
+    row = db.scalar(select(EngineeringRoleTurn).where(
+        EngineeringRoleTurn.run_id == run_id, EngineeringRoleTurn.role == role
+    ).order_by(EngineeringRoleTurn.sequence.desc()))
+    return dict(row.output or {}) if row else {}
+
+
+def create_execution(db: Session, *, user_id: str, run: EngineeringRun, max_repairs: int) -> EngineeringExecution:
+    if run.status != "approved":
+        raise ExecutionError("Engineering run must be approved before execution")
+    if not run.runtime_id or not run.workspace_id:
+        raise ExecutionError("Engineering run requires an isolated project runtime")
+    existing = db.scalar(select(EngineeringExecution).where(EngineeringExecution.engineering_run_id == run.id))
+    if existing:
+        return existing
+    runtime = db.get(ProjectRuntime, run.runtime_id)
+    workspace = db.get(CodeWorkspace, run.workspace_id)
+    if runtime is None or workspace is None:
+        raise ExecutionError("Runtime or workspace not found")
+    row = EngineeringExecution(
+        engineering_run_id=run.id, project_id=run.project_id, task_id=run.task_id,
+        runtime_id=runtime.id, workspace_id=workspace.id, created_by=user_id,
+        status="planned", max_repairs=max_repairs,
+    )
+    db.add(row); db.flush()
+    add_event(db, row, "created", "ok", {"engineering_run_id": run.id})
+    return row
+
+
+def add_event(db: Session, row: EngineeringExecution, kind: str, status: str, details: dict) -> EngineeringExecutionEvent:
+    persisted = int(db.scalar(select(func.coalesce(func.max(EngineeringExecutionEvent.sequence), 0)).where(
+        EngineeringExecutionEvent.execution_id == row.id
+    )) or 0)
+    pending = max((x.sequence for x in db.new if isinstance(x, EngineeringExecutionEvent) and x.execution_id == row.id), default=0)
+    seq = max(persisted, pending) + 1
+    event = EngineeringExecutionEvent(execution_id=row.id, sequence=seq, kind=kind, status=status, details=details)
+    db.add(event)
+    return event
+
+
+def ensure_snapshot(db: Session, row: EngineeringExecution, user_id: str) -> ProjectRuntimeSnapshot:
+    if row.snapshot_id:
+        snap = db.get(ProjectRuntimeSnapshot, row.snapshot_id)
+        if snap:
+            return snap
+    runtime = db.get(ProjectRuntime, row.runtime_id)
+    workspace = db.get(CodeWorkspace, row.workspace_id)
+    if runtime is None or workspace is None:
+        raise ExecutionError("Runtime or workspace not found")
+    result = create_snapshot(Path(workspace.root_path), Path(runtime.runtime_root) / "snapshots")
+    snap = db.scalar(select(ProjectRuntimeSnapshot).where(
+        ProjectRuntimeSnapshot.runtime_id == runtime.id,
+        ProjectRuntimeSnapshot.manifest_sha256 == result["manifest_sha256"],
+    ))
+    if snap is None:
+        snap = ProjectRuntimeSnapshot(
+            runtime_id=runtime.id, created_by=user_id, archive_path=result["archive_path"],
+            manifest_sha256=result["manifest_sha256"], file_count=result["manifest"]["file_count"],
+            total_bytes=result["manifest"]["total_bytes"], manifest=result["manifest"],
+        )
+        db.add(snap); db.flush()
+    row.snapshot_id = snap.id
+    add_event(db, row, "snapshot", "ok", {"snapshot_id": snap.id, "manifest_sha256": snap.manifest_sha256})
+    return snap
+
+
+def _approved_scope(db: Session, run: EngineeringRun) -> tuple[list[str], list[str], list[list[str]]]:
+    coordinator = _turn_output(db, run.id, "coordinator")
+    developer = _turn_output(db, run.id, "developer")
+    scope = [safe_relative_path(x).as_posix() for x in coordinator.get("scope_paths", [])]
+    files = [safe_relative_path(x).as_posix() for x in developer.get("files_to_change", [])]
+    for path in files:
+        if scope and not path_allowed(path, scope):
+            raise ExecutionError(f"Developer file outside approved scope: {path}")
+    commands = developer.get("verification_commands", []) or []
+    return scope, files, commands
+
+
+def build_patch_messages(db: Session, row: EngineeringExecution) -> tuple[list[ChatMessage], str]:
+    run = db.get(EngineeringRun, row.engineering_run_id)
+    workspace = db.get(CodeWorkspace, row.workspace_id)
+    task = db.get(Task, row.task_id)
+    if run is None or workspace is None or task is None:
+        raise ExecutionError("Execution references missing state")
+    scope, files, commands = _approved_scope(db, run)
+    root = Path(workspace.root_path).resolve()
+    file_payload = []
+    total_chars = 0
+    for rel in files[:40]:
+        target = resolve_inside(root, rel)
+        if target.exists():
+            if not target.is_file() or target.stat().st_size > 350_000:
+                raise ExecutionError(f"File is too large or not regular: {rel}")
+            text = target.read_text("utf-8", errors="replace")
+            total_chars += len(text)
+            if total_chars > 1_000_000:
+                raise ExecutionError("Approved file context exceeds execution limit")
+            file_payload.append({"path": rel, "sha256": sha256_file(target), "content": text})
+        else:
+            file_payload.append({"path": rel, "sha256": None, "content": None})
+    context = {
+        "goal": task.goal,
+        "approved_scope_paths": scope,
+        "approved_files": files,
+        "approved_verification_commands": commands,
+        "developer_handoff": _turn_output(db, run.id, "developer"),
+        "tester_handoff": _turn_output(db, run.id, "tester"),
+        "reviewer_handoff": _turn_output(db, run.id, "reviewer"),
+        "files": file_payload,
+        "attempt": row.attempt + 1,
+        "previous_verification_failures": row.verification_results or [],
+    }
+    raw = json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(raw.encode()).hexdigest()
+    schema = ImplementationPatchOutput.model_json_schema()
+    messages = [
+        ChatMessage(role="system", content=(
+            "You are the X1 implementation executor. Produce only the minimal file replacements needed for the approved task. "
+            "You may only return paths from approved_files and MUST echo each file sha256 as expected_sha256 (null for a new file). "
+            "Do not invent completed tests, permissions, shell access, network access, or extra files. "
+            "Return one JSON object matching the schema."
+        )),
+        ChatMessage(role="user", content="APPROVED EXECUTION STATE:\n" + raw + "\n\nOUTPUT JSON SCHEMA:\n" + json.dumps(schema, ensure_ascii=False)),
+    ]
+    return messages, digest
+
+
+def parse_patch(raw: str, *, approved_files: list[str], scope: list[str]) -> dict:
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        raise ExecutionError("Implementation output is not JSON")
+    try:
+        parsed = ImplementationPatchOutput.model_validate(json.loads(raw[start:end + 1])).model_dump()
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise ExecutionError("Implementation output failed validation") from exc
+    seen = set()
+    for item in parsed["changes"]:
+        path = safe_relative_path(item["path"]).as_posix()
+        if path not in approved_files:
+            raise ExecutionError(f"Patch path was not approved: {path}")
+        if scope and not path_allowed(path, scope):
+            raise ExecutionError(f"Patch path escapes approved scope: {path}")
+        if path in seen:
+            raise ExecutionError("Patch contains duplicate file path")
+        seen.add(path); item["path"] = path
+    return parsed
+
+
+def apply_patch(db: Session, row: EngineeringExecution, patch: dict) -> list[dict]:
+    workspace = db.get(CodeWorkspace, row.workspace_id)
+    run = db.get(EngineeringRun, row.engineering_run_id)
+    if workspace is None or run is None:
+        raise ExecutionError("Workspace not found")
+    scope, approved_files, _ = _approved_scope(db, run)
+    root = Path(workspace.root_path).resolve()
+    changes = []
+    for item in patch["changes"]:
+        path = item["path"]
+        if path not in approved_files or (scope and not path_allowed(path, scope)):
+            raise ExecutionError("Patch scope changed before application")
+        target = resolve_inside(root, path)
+        expected = item.get("expected_sha256")
+        current = sha256_file(target) if target.is_file() else None
+        if current != expected:
+            raise ExecutionError(f"File changed after patch context was built: {path}")
+        result = write_text(root, path, item["content"], expected_sha256=expected)
+        changes.append(result)
+    row.change_manifest = changes
+    add_event(db, row, "patch_applied", "ok", {"changes": changes})
+    return changes
+
+
+def verification_commands(db: Session, row: EngineeringExecution, patch: dict) -> list[list[str]]:
+    run = db.get(EngineeringRun, row.engineering_run_id)
+    if run is None:
+        raise ExecutionError("Engineering run not found")
+    _, _, approved = _approved_scope(db, run)
+    # Patch may repeat approved commands but cannot expand execution authority.
+    proposed = patch.get("verification_commands", []) or []
+    normalized_approved = {json.dumps(x, ensure_ascii=False) for x in approved}
+    commands = list(approved)
+    for cmd in proposed:
+        if json.dumps(cmd, ensure_ascii=False) in normalized_approved and cmd not in commands:
+            commands.append(cmd)
+    return commands
+
+
+def run_verification(db: Session, row: EngineeringExecution, commands: list[list[str]], *, timeout_seconds: int, allow_unsafe: bool, sandbox_settings=None) -> tuple[bool, list[dict]]:
+    workspace = db.get(CodeWorkspace, row.workspace_id)
+    runtime = db.get(ProjectRuntime, row.runtime_id)
+    if workspace is None or runtime is None:
+        raise ExecutionError("Runtime or workspace not found")
+    root = Path(workspace.root_path).resolve()
+    results = []
+    for argv in commands:
+        try:
+            # Static checks may run directly. All broader project execution must use a real container sandbox.
+            try:
+                result = run_command(root, argv, timeout_seconds, allow_unsafe=False)
+            except WorkspaceError as static_exc:
+                if sandbox_settings is None:
+                    raise static_exc
+                caps = sandbox_capabilities(sandbox_settings.project_sandbox_backend, sandbox_settings.project_sandbox_image)
+                if not caps["available"]:
+                    raise WorkspaceError(caps["reason"] or "Container sandbox unavailable")
+                scratch = Path(runtime.runtime_root).resolve() / "sandbox" / row.id
+                result = run_in_container(
+                    preferred_backend=sandbox_settings.project_sandbox_backend, image=sandbox_settings.project_sandbox_image,
+                    workspace=root, scratch=scratch, argv=argv, timeout_seconds=timeout_seconds,
+                    cpu_limit=runtime.cpu_limit, memory_mb=runtime.memory_limit_mb, process_limit=runtime.process_limit,
+                    network_policy=runtime.network_policy, env=None,
+                )
+        except (WorkspaceError, SandboxError) as exc:
+            result = {"argv": argv, "exit_code": None, "timed_out": False, "stdout": "", "stderr": str(exc), "sandbox_level": "blocked"}
+        results.append(result)
+        if result.get("timed_out") or result.get("exit_code") != 0:
+            row.verification_results = results
+            add_event(db, row, "verification", "failed", {"result": result})
+            return False, results
+    row.verification_results = results
+    add_event(db, row, "verification", "ok", {"commands": len(results)})
+    return True, results
+
+
+def rollback_changed_files(db: Session, row: EngineeringExecution) -> None:
+    if not row.snapshot_id:
+        raise ExecutionError("Cannot rollback without snapshot")
+    snap = db.get(ProjectRuntimeSnapshot, row.snapshot_id)
+    workspace = db.get(CodeWorkspace, row.workspace_id)
+    if snap is None or workspace is None:
+        raise ExecutionError("Snapshot or workspace not found")
+    root = Path(workspace.root_path).resolve()
+    wanted = {safe_relative_path(x["path"]).as_posix() for x in (row.change_manifest or [])}
+    existing_before = {x["path"] for x in (snap.manifest or {}).get("files", [])}
+    restored = set()
+    with tarfile.open(snap.archive_path, "r:gz") as tf:
+        members = {m.name: m for m in tf.getmembers() if m.isfile()}
+        for rel in wanted:
+            target = resolve_inside(root, rel)
+            if rel in existing_before:
+                member = members.get(rel)
+                if member is None:
+                    raise ExecutionError(f"Snapshot is missing changed file: {rel}")
+                src = tf.extractfile(member)
+                if src is None:
+                    raise ExecutionError("Snapshot extraction failed")
+                data = src.read()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                tmp = target.with_name(target.name + ".x1rollback")
+                tmp.write_bytes(data); tmp.replace(target); restored.add(rel)
+            else:
+                target.unlink(missing_ok=True); restored.add(rel)
+    add_event(db, row, "rollback", "ok", {"files": sorted(restored), "snapshot_id": snap.id})
+
+
+def can_run_unsafe(runtime: ProjectRuntime, operator_enabled: bool) -> bool:
+    # linux_namespace currently proves network/user namespace only, not filesystem jail.
+    return bool(operator_enabled and runtime.isolation_backend in {"container", "filesystem_jail"})

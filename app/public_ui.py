@@ -6,10 +6,7 @@ import secrets
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
-from app.onboarding_ui import router as onboarding_ui_router
-
 router = APIRouter(tags=["public-site"])
-router.include_router(onboarding_ui_router)
 
 
 def _page(title: str, body: str, *, script: str = "") -> HTMLResponse:

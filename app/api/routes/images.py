@@ -257,9 +257,3 @@ def image_feedback(generation_id: str, payload: ImageFeedbackWrite, user: User =
     build_candidate(db, row, fb) if payload.allow_training else withdraw_training_consent(db, row.id, user.id)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-# Mount reference-photo editing under the same /v1/images boundary so all image
-# requests inherit the existing authentication, overload and rollout protections.
-from app.api.routes.image_editing import router as image_editing_router
-router.include_router(image_editing_router)

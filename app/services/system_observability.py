@@ -116,24 +116,28 @@ def _route_contract(app) -> dict[str, Any]:
     """Verify representative public surfaces using their real router prefixes."""
     paths = {str(getattr(route, "path", "")) for route in app.routes}
     prefixes = {
-        "auth": "/v1/auth",
-        "chat": "/v1/chat",
-        "projects": "/v1/projects",
-        "documents": "/v1/documents",
-        "images": "/v1/images",
-        "research": "/v1/research",
-        "development": "/v1/development-plans",
-        "engineering": "/v1/engineering-runs",
-        "sandbox": "/v1/project-sandboxes",
-        "git": "/v1/git",
-        "commerce": "/v1/commerce",
-        "external_api": "/v1/api",
-        "complaints": "/v1/complaints",
-        "beta": "/v1/admin/beta",
-        "reliability": "/v1/admin/reliability",
-        "operations": "/v1/admin/operations",
+        "auth": ("/v1/auth",),
+        "chat": ("/v1/chat",),
+        "projects": ("/v1/projects",),
+        "documents": ("/v1/documents",),
+        "images": ("/v1/images",),
+        "research": ("/v1/research",),
+        "development": ("/v1/development-plans", "/v1/development"),
+        "engineering": ("/v1/engineering-runs", "/v1/engineering"),
+        "sandbox": ("/v1/project-sandboxes", "/v1/sandbox"),
+        "git": ("/v1/git",),
+        "commerce": ("/v1/commerce",),
+        "external_api": ("/v1/api",),
+        "complaints": ("/v1/feedback/complaints", "/v1/complaints"),
+        "beta": ("/v1/admin/beta",),
+        "reliability": ("/v1/admin/reliability",),
+        "operations": ("/v1/admin/operations",),
     }
-    missing = sorted(name for name, prefix in prefixes.items() if not any(path.startswith(prefix) for path in paths))
+    missing = sorted(
+        name
+        for name, accepted_prefixes in prefixes.items()
+        if not any(path.startswith(prefix) for path in paths for prefix in accepted_prefixes)
+    )
     if missing:
         return _check(
             "product.route_contract",

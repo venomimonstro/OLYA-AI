@@ -124,3 +124,14 @@ Canonical ORM Recovery & Source Integrity:
 - added deterministic Alembic-to-ORM regeneration with a drift check;
 - verified one complete 94-table metadata graph on a clean database;
 - made source-integrity audits validate readable Python and generated-model synchronization.
+
+## Sprint 66 — DONE
+
+Source & Release Recovery Closure:
+
+- restored engineering, image and project-runtime services as readable Python without compressed runtime execution;
+- restored the missing Alembic root revision and a clean one-head migration chain;
+- made migration-derived ORM generation preserve foreign keys and eliminated Alembic/ORM drift;
+- made the FastAPI 0.141 route registry concrete and release-auditable while preserving dependency overrides;
+- repaired image-editing/onboarding registration and stale product-surface contracts;
+- added fresh-database, source-integrity and route-registry regression coverage.

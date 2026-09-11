@@ -67,6 +67,7 @@ def test_canonical_sources_are_actually_decoded_or_parsed_and_compiled():
         "scripts/generate_orm_models.py",
         "app/services/engineering_execution.py",
         "app/services/image_runtime.py",
+        "app/services/project_runtime.py",
     }
     for item in result["checks"]:
         assert item["bytes"] > 0

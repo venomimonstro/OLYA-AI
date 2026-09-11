@@ -1,3 +1,88 @@
-# Restored losslessly from the canonical cumulative source.
-import base64 as _b64, zlib as _zlib
-exec(compile(_zlib.decompress(_b64.b85decode('c-pO2-EZVH5P#pl!uTnHZ0_1SDzqX<2ns?v&<Qwrs4B~wI2+$4wq-l*?p6KY8Gj|&Z43869(L`S@qGL|GoDt<0TI%UcGQdz#0Mp{MN|lBspV3b)hg1q)Ud0!Y1dKH^?aMQT&C4WBSl(ElUAl1E$^q@xK&!#%uIYsb<2CUYMnodTBkcX^B%UVz^V07S-I0xb;q)!p9X46rTM@uzhkDXx$2lUC1tcpr@z1c<L4iKjpwOSrD6Jx*G^hCjND7TH;UFQ$^V@Q*IG+mAkCB{168Zls_v;V==V`rJ_L5Q+~k`Tf=_`E2sf-nI&g`W(q_g=O?P3lLB=}Wk<S}X$kF;cA8k<N07sQ4oE*+e&5Z2tSeAP^M+3Rc%fDJEJs0Gymn{|5Ojz_q<xK=*UJ>P>;Uqr%i@2jbZ<1E807ttFl16w+jJIKy)s}ED>XV0TX}xEn$$VrDuWc|k3e$lP;B?4~^1kDBm*Ggqle>_GNqFIAu={|ccDzB@C6758%LZH^ESPooN(3F4ze^DLiS~v8Z-o1Q%6RnJtv=3XYUTW!GPMK*vYY4(=vjZz!r8KVWcap#`)jzU7V<w{|MlC4cket$j`k%M)B0JKL)#sDlTRMWJ$O{BG63Mx7gZH{?fL9bGiA}W{{!eZr>A_7tC!I0xfl-%P#pAdjKP`DfmZIH!&UAdV_IxS-ZxM~g15}rEEIrC>jHgQAc*{<&zdGy#Z;0rsa7NDU72rC+e>N-G_XPHBN?_E#0BgdZuavoqM6QkTJl`Up4Z2@;O4Z1Dpy?W0IpQ@-q(|Cf0%H^v*Qr$yeVdhWh5Z8+%BYiNqK*QxdqGnZ-DuL0Rs4+fB?iN2!KAVfgYg%YFriGR|g0)!POa@$Az_1gh29?uyh&l@m{&)Ahm?%;G78f-7KlMu0-H1>B;tJz4=LMNxohB(MrALO~V8koDO&B1|Kenk)wvxav@5{T@3{IvyRY7V~H`HTT2U%07)0(AO-zFeac9(XUEL28ZLEC1n<da*?NKmk~*!R+;H7dv199jtz%DI2PXdaM*2SZGd0qv5gb9>cx$y3E#JXA+?+Pp_|%rrc`m=cif)(8Hvs6Fwq1XN^So^M&Q(_)Lj=BiEJ+a0po@<zR?~Ul@E?2^Qq-<1OH+=Tibf9E#bxlNp_T$Cyr$U#Kd>B4W&U`9ys2~l3bchQT*q5U(47VvCJZp$8`?6my?Ps!1i!xWPC%e6Xr`v-9Ou*9a}sYD1uQ$*{|Z{udsIDRJDQmlO(8|Y(<{|8k%5*ReTy#MeBN^!Z(q?Pw6nAOeiq{xp0jhaxwwR~a;uBW&FxFbPB_IIh&X{hY8f$tD$~i+Zk&ju;X2ShuR}sRrU&95it6IE`|>CrT0Y2!R$<P&gz*jH|LY<lSA8Xb(X+~NqiNZUgECq2tbjT(ZuIqcTE!v3z#!=0H`Sl;y1U$gk%__xW~vMquE%U}$a@DctU7j>%FlVQ1hO3V@SBC9D`{j04h>80{WhGTy6#|#bwkJEGz@etehA7ROBj>O-6y>4QSn&mHJU7+^Un@$f=T>)ZaZSew&jNmm%zjGVBvUa1TUq6bOt^|dA|W;Iid#HcGl}YXwitnNB~dklM6kS3?nh<ufm}E%AdQzj)rfah(c73Q*z_;2_{GALq5<%Hpc<xmHjf(<!9THHch5{LPPLwB&n7r-AG@L+5jlwz83=)OnFT8@InUwB6g<(0FG4R)rEIE3A$G~W)=xa=U?HS&$Nl<(>E+1SN{NmKW_E')), __file__, "exec"), globals())
+from __future__ import annotations
+
+import base64
+import hashlib
+import io
+import json
+import os
+import shutil
+import subprocess
+import tarfile
+from pathlib import Path
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from app.services.code_workspace import WorkspaceError, repo_map
+
+
+class RuntimeError(RuntimeError):
+    pass
+
+
+def runtime_root(storage_root: str, runtime_id: str) -> Path:
+    base = Path(storage_root).resolve()
+    root = (base / runtime_id).resolve()
+    if root.parent != base:
+        raise RuntimeError("Invalid runtime root")
+    return root
+
+
+def detect_isolation_backend() -> dict:
+    unshare = shutil.which("unshare")
+    if not unshare:
+        return {"backend": "filesystem", "network_namespace": False, "user_namespace": False}
+    try:
+        cp = subprocess.run([unshare, "-Urn", "true"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+        ok = cp.returncode == 0
+    except Exception:
+        ok = False
+    return {"backend": "linux_namespace" if ok else "filesystem", "network_namespace": ok, "user_namespace": ok}
+
+
+def build_manifest(root: Path, *, project_id: str, workspace_id: str, cpu_limit: float, memory_mb: int, disk_mb: int, process_limit: int, network_policy: str) -> dict:
+    mapping = repo_map(root)
+    return {
+        "project_id": project_id,
+        "workspace_id": workspace_id,
+        "root": str(root),
+        "limits": {"cpu": cpu_limit, "memory_mb": memory_mb, "disk_mb": disk_mb, "processes": process_limit},
+        "network_policy": network_policy,
+        "repo": {"file_count": mapping["file_count"], "total_bytes": mapping["total_bytes"]},
+        "forbidden_mounts": ["x1_source", "docker_socket", "host_ssh", "other_project_roots"],
+    }
+
+
+def _key(secret: str) -> bytes:
+    if not secret or secret == "change-me-runtime-secret":
+        raise RuntimeError("Project runtime secret key is not configured")
+    return hashlib.sha256(secret.encode("utf-8")).digest()
+
+
+def encrypt_secret(value: str, secret: str) -> str:
+    nonce = os.urandom(12)
+    data = AESGCM(_key(secret)).encrypt(nonce, value.encode("utf-8"), b"x1-project-runtime")
+    return base64.urlsafe_b64encode(nonce + data).decode("ascii")
+
+
+def decrypt_secret(ciphertext: str, secret: str) -> str:
+    raw = base64.urlsafe_b64decode(ciphertext.encode("ascii"))
+    if len(raw) < 13:
+        raise RuntimeError("Invalid secret payload")
+    return AESGCM(_key(secret)).decrypt(raw[:12], raw[12:], b"x1-project-runtime").decode("utf-8")
+
+
+def create_snapshot(root: Path, snapshot_dir: Path) -> dict:
+    mapping = repo_map(root, max_files=100000)
+    manifest = {"files": mapping["files"], "file_count": mapping["file_count"], "total_bytes": mapping["total_bytes"]}
+    digest = hashlib.sha256(json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    archive = snapshot_dir / f"{digest}.tar.gz"
+    if not archive.exists():
+        tmp = archive.with_suffix(".tmp")
+        with tarfile.open(tmp, "w:gz") as tf:
+            for item in mapping["files"]:
+                path = root / item["path"]
+                if path.is_file() and not path.is_symlink():
+                    tf.add(path, arcname=item["path"], recursive=False)
+        os.replace(tmp, archive)
+    return {"archive_path": str(archive), "manifest_sha256": digest, "manifest": manifest}

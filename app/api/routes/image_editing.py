@@ -10,7 +10,6 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.image_studio_ui import router as studio_ui_router
 from app.models import BackgroundJob, ImageBlob, ImageEditRequest, ImageGeneration, ImageReference, User, utcnow
 from app.schemas.image_editing import ImageEditCreate, ImageEditCreateResponse, ImageEditRead, ImageReferenceRead
 from app.services.access import require_project_role
@@ -24,8 +23,7 @@ from app.services.image_worker_state import image_worker_snapshot
 from app.services.jobs import enqueue_job
 from app.services.safety import require_capability
 
-router = APIRouter(tags=["image-editing"])
-router.include_router(studio_ui_router)
+router = APIRouter(prefix="/v1/images", tags=["image-editing"])
 _LOCAL_EDIT_MODES = {"remove_object", "replace_object", "add_object", "background"}
 
 
