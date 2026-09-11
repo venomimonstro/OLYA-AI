@@ -114,3 +114,13 @@ Files & RAG UX:
 - visible file citations and source fragments used by Chat;
 - recovery after parsing timeout, application restart and stale processing state;
 - clear unsupported/empty/encrypted-file errors without pretending the file is available to RAG.
+
+## Sprint 65 — DONE
+
+Canonical ORM Recovery & Source Integrity:
+
+- removed the truncated binary model payload and runtime `exec` bootstrap;
+- restored a readable core registry and all migration-backed ORM models;
+- added deterministic Alembic-to-ORM regeneration with a drift check;
+- verified one complete 94-table metadata graph on a clean database;
+- made source-integrity audits validate readable Python and generated-model synchronization.

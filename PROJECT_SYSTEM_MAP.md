@@ -3,7 +3,7 @@
 > **ОБЯЗАТЕЛЬНО ПРОЧИТАТЬ ПЕРЕД ИЗМЕНЕНИЕМ ПРОЕКТА.**  
 > Этот файл — навигационная карта проекта для разработчиков и ИИ-агентов. Он отвечает на вопросы: **куда приходит запрос, какой контроллер его принимает, какой service выполняет бизнес-логику, какие ORM-модели/файлы/воркеры затрагиваются и где проходит граница безопасности**.
 >
-> Актуальность карты: 2026-09-10. Карта составлена по `main` после Sprint 63.
+> Актуальность карты: 2026-09-11. Карта составлена по `main` после Sprint 65.
 > **Правило проекта:** если в том же commit добавляется/удаляется controller, worker API, основной service, route prefix или меняется важная межмодульная связь — этот файл должен обновляться в том же commit.
 
 ---
@@ -66,7 +66,9 @@ flowchart TD
 | `app/main.py` | Единственная точка сборки FastAPI: lifespan, middleware, governors, router registration, background loops. |
 | `app/core/config.py` | Все runtime-настройки `X1_*`; лимиты CPU/RAM/context/files/research/sandbox/images/launch. |
 | `app/db.py` | SQLAlchemy engine, pool/deadlines, `SessionLocal`, `get_db`, `Base`. |
-| `app/models.py` | Канонический ORM registry. Загружает базовые модели из `_models_impl.py.gz` и Sprint extensions. |
+| `app/models.py` | Канонический ORM registry: readable core, migration-derived models и Sprint extensions. |
+| `app/models_core.py` | Базовые ORM-модели и общий declarative helper. |
+| `app/models_migrations.py` | Детерминированно сгенерированные ORM-модели из Alembic chain. |
 | `app/schemas/*` | Pydantic HTTP/domain contracts. |
 | `app/api/routes/*` | HTTP controllers. |
 | `app/services/*` | Основная доменная логика. |
@@ -81,7 +83,7 @@ flowchart TD
 
 ### ORM registry
 
-`app/models.py` — необычный, но важный слой. Он losslessly распаковывает `_models_impl.py.gz`, затем импортирует расширения:
+`app/models.py` собирает единый metadata graph из читаемых базовых моделей, детерминированного migration-derived registry и расширений:
 
 ```text
 models_sprint27.py
@@ -93,9 +95,12 @@ models_sprint38.py
 models_sprint45.py
 models_sprint51.py
 models_sprint53.py
+models_sprint59.py
+models_sprint61.py
+models_sprint62.py
 ```
 
-Все они используют один `app.db.Base`. **Не создавайте второй SQLAlchemy Base и не импортируйте только часть model registry в production-код.**
+`scripts/generate_orm_models.py --check` подтверждает, что `models_migrations.py` синхронизирован с Alembic. Все модули используют один `app.db.Base`. **Не создавайте второй SQLAlchemy Base и не импортируйте только часть model registry в production-код.**
 
 ---
 

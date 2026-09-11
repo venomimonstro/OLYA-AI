@@ -14,7 +14,11 @@ WRAPPERS = (
     "app/services/engineering_execution.py",
     "app/services/image_runtime.py",
 )
-MODEL_PAYLOAD = "app/_models_impl.py.gz"
+MODEL_SOURCES = (
+    "app/models.py",
+    "app/models_core.py",
+    "app/models_migrations.py",
+)
 
 
 class CanonicalSourceError(RuntimeError):
@@ -57,13 +61,33 @@ def _validate_python(source: bytes, *, label: str) -> dict:
     }
 
 
-def audit_model_payload() -> dict:
-    path = ROOT / MODEL_PAYLOAD
+def audit_model_source(relative: str) -> dict:
+    path = ROOT / relative
     if not path.is_file():
-        raise CanonicalSourceError(f"Missing canonical ORM payload: {MODEL_PAYLOAD}")
-    compressed = path.read_bytes()
-    source = _decompress_limited(compressed, wbits=zlib.MAX_WBITS | 16, label=MODEL_PAYLOAD)
-    return {"path": MODEL_PAYLOAD, **_validate_python(source, label=MODEL_PAYLOAD + "::python")}
+        raise CanonicalSourceError(f"Missing canonical ORM source: {relative}")
+    try:
+        source = path.read_bytes()
+    except OSError as exc:
+        raise CanonicalSourceError(f"Cannot read canonical ORM source: {relative}") from exc
+    return {"path": relative, **_validate_python(source, label=relative)}
+
+
+def audit_generated_models() -> dict:
+    import importlib.util
+
+    relative = "scripts/generate_orm_models.py"
+    path = ROOT / relative
+    spec = importlib.util.spec_from_file_location("x1_model_generator_audit", path)
+    if spec is None or spec.loader is None:
+        raise CanonicalSourceError("Cannot load ORM model generator")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    expected = module.generate()
+    actual = (ROOT / "app/models_migrations.py").read_text("utf-8")
+    if actual != expected:
+        raise CanonicalSourceError("Generated ORM source is stale; run scripts/generate_orm_models.py")
+    details = _validate_python(path.read_bytes(), label=relative)
+    return {"path": relative, **details, "generated_path": "app/models_migrations.py", "generation": "synchronized"}
 
 
 def _wrapper_payload(path: Path) -> bytes:
@@ -99,10 +123,12 @@ def audit_wrapper(relative: str) -> dict:
 def audit_all() -> dict:
     checks: list[dict] = []
     errors: list[dict] = []
-    for label, operation in (
-        (MODEL_PAYLOAD, audit_model_payload),
+    operations = [
+        *((relative, (lambda rel=relative: audit_model_source(rel))) for relative in MODEL_SOURCES),
+        ("scripts/generate_orm_models.py", audit_generated_models),
         *((relative, (lambda rel=relative: audit_wrapper(rel))) for relative in WRAPPERS),
-    ):
+    ]
+    for label, operation in operations:
         try:
             checks.append({"status": "passed", **operation()})
         except CanonicalSourceError as exc:

@@ -55,13 +55,16 @@ def test_terminal_image_job_failure_cannot_leave_edit_polling_forever():
     assert 'ImageGeneration.job_id.is_(None)' in source
 
 
-def test_canonical_compressed_sources_are_actually_decoded_and_compiled():
+def test_canonical_sources_are_actually_decoded_or_parsed_and_compiled():
     result = audit_all()
     assert result["status"] == "passed", result
     assert not result["errors"]
     checked = {item["path"] for item in result["checks"]}
     assert checked == {
-        "app/_models_impl.py.gz",
+        "app/models.py",
+        "app/models_core.py",
+        "app/models_migrations.py",
+        "scripts/generate_orm_models.py",
         "app/services/engineering_execution.py",
         "app/services/image_runtime.py",
     }

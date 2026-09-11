@@ -6,7 +6,7 @@ X1 — self-hosted AI-платформа с локальным inference на Qw
 
 ## Текущая версия
 
-**0.40.0 + Sprints 41–64 — Qwen3.6, streaming, memory/RAG, verification, coding proof, production hardening, onboarding, recoverable chat, project-centric workspace и управляемый Files/RAG UX.**
+**0.40.0 + Sprints 41–65 — Qwen3.6, streaming, memory/RAG, verification, coding proof, production hardening, onboarding, recoverable chat, project-centric workspace, Files/RAG UX и восстановленный проверяемый ORM source.**
 
 GitHub `main` является каноническим исходным кодом. Production-конфигурация fail-closed: дефолтные секреты, SQLite в production, сломанные обязательные routers, красный release gate, неподтверждённый GGUF или небезопасный memory budget не считаются рабочей установкой.
 

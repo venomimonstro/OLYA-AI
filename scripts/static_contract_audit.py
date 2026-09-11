@@ -102,7 +102,7 @@ def _audit_python(path: Path, settings_fields: set[str]) -> list[dict[str, Any]]
         name = _call_name(node.func)
         if name in {"eval", "builtins.eval", "os.system", "os.popen", "tempfile.mktemp"}:
             findings.append(issue("dangerous_execution_primitive", rel, node.lineno, name))
-        if name in {"exec", "builtins.exec"} and rel != "app/models.py" and rel not in CANONICAL_EXEC_WRAPPERS:
+        if name in {"exec", "builtins.exec"} and rel not in CANONICAL_EXEC_WRAPPERS:
             findings.append(issue("unexpected_exec", rel, node.lineno, name))
         if name in {"pickle.loads", "pickle.load", "marshal.loads", "marshal.load"}:
             findings.append(issue("unsafe_deserialization", rel, node.lineno, name))
@@ -244,7 +244,8 @@ def main() -> int:
     findings.extend(_audit_canonical_exec_wrappers())
 
     models = (ROOT / "app/models.py").read_text("utf-8", errors="replace")
-    if models.count("exec(") != 1 or "_models_impl.py.gz" not in models:
+    required_model_imports = ("models_core", "models_migrations", "models_sprint62")
+    if "exec(" in models or "_models_impl.py.gz" in models or not all(name in models for name in required_model_imports):
         findings.append(issue("canonical_model_wrapper_contract_changed", "app/models.py"))
 
     payload = {
