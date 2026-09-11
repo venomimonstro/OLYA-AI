@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.schemas.chat import AnswerRequirement, ChatMessage
 
 
 class OrganizationCreate(BaseModel):
@@ -91,6 +95,12 @@ class ApiContextCreate(BaseModel):
     label: str = Field(default="", max_length=160)
     metadata: dict = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def validate_context(self):
+        if len(json.dumps(self.metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 16_384:
+            raise ValueError("API context metadata must not exceed 16 KiB")
+        return self
+
 
 class ApiContextRead(BaseModel):
     id: str
@@ -107,13 +117,22 @@ class ApiChatRequest(BaseModel):
     project_id: str | None = None
     conversation_id: str | None = None
     task_id: str | None = None
-    messages: list[dict]
-    mode: str = "auto"
-    max_output_tokens: int | None = None
-    verification: str = "auto"
-    requirements: list[dict] = Field(default_factory=list)
-    research_source_ids: list[str] = Field(default_factory=list)
-    development_command: str | None = None
+    messages: list[ChatMessage] = Field(min_length=1, max_length=200)
+    mode: Literal["auto", "fast", "work", "deep"] = "auto"
+    max_output_tokens: int | None = Field(default=None, ge=32, le=8192)
+    verification: Literal["off", "auto", "strict"] = "auto"
+    requirements: list[AnswerRequirement] = Field(default_factory=list, max_length=30)
+    research_source_ids: list[str] = Field(default_factory=list, max_length=10)
+    development_command: Literal["auto", "status", "continue", "pause", "resume", "rollback"] | None = None
+    client_request_id: str | None = Field(default=None, min_length=12, max_length=80, pattern=r"^[A-Za-z0-9_.:-]+$")
+
+    @model_validator(mode="after")
+    def reject_ambiguous_context(self):
+        if self.context_id and (self.project_id or self.conversation_id):
+            raise ValueError("context_id cannot be combined with project_id or conversation_id")
+        if any(message.role == "system" for message in self.messages):
+            raise ValueError("system messages are controlled by X1")
+        return self
 
 
 class PaymentIngest(BaseModel):

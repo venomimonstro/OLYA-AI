@@ -3,7 +3,7 @@
 > **ОБЯЗАТЕЛЬНО ПРОЧИТАТЬ ПЕРЕД ИЗМЕНЕНИЕМ ПРОЕКТА.**  
 > Этот файл — навигационная карта проекта для разработчиков и ИИ-агентов. Он отвечает на вопросы: **куда приходит запрос, какой контроллер его принимает, какой service выполняет бизнес-логику, какие ORM-модели/файлы/воркеры затрагиваются и где проходит граница безопасности**.
 >
-> Актуальность карты: 2026-09-11. Карта составлена по `main` после Sprint 66.
+> Актуальность карты: 2026-09-11. Карта составлена по `main` после Sprint 67.
 > **Правило проекта:** если в том же commit добавляется/удаляется controller, worker API, основной service, route prefix или меняется важная межмодульная связь — этот файл должен обновляться в том же commit.
 
 ---
@@ -590,7 +590,7 @@ Models: `Organization`, `OrganizationMember`, `OrganizationBudget`, `ResourceExp
 
 Services: `commerce.py`, `measured_plans.py`.
 
-Payment ingest защищён отдельным HMAC/shared secret. Reconciliation и установка plan — admin operations.
+Payment ingest защищён отдельным HMAC/shared secret. Reconciliation и установка plan — admin operations. API keys создаются с ограниченным scope и показывают secret только один раз; `POST /api-keys/{id}/rotate` атомарно отзывает старый ключ и выдаёт замену без committed overlap.
 
 ### `app/api/routes/api_client.py` — `/v1/api`
 
@@ -603,6 +603,8 @@ Models: `ApiKey`, `PersistentApiContext`, `ApiRequestTelemetry`, `Conversation`,
 ```text
 API key request
  → require_api_scope
+ → strict credential grammar + current organization manager access
+ → atomic per-minute rate window + response headers
  → public rollout exposure
  → API channel budget / organization budget
  → app.api.routes.chat.chat_handler
@@ -610,7 +612,9 @@ API key request
  → telemetry + resource cost
 ```
 
-**Не дублировать Chat logic здесь.** Этот controller является auth/budget/telemetry adapter к обычному Chat.
+Persistent API contexts имеют bounded owner/org lifecycle: list/create/get/delete, максимум задаётся `X1_API_MAX_CONTEXTS_PER_OWNER`, metadata ограничена 16 KiB. Chat принимает один логический `Idempotency-Key`/`client_request_id`; повтор не создаёт вторую генерацию, telemetry или resource charge.
+
+**Не дублировать Chat logic здесь.** Этот controller является auth/budget/telemetry adapter к обычному Chat. `scripts/api_contract_audit.py` фиксирует method/path contract, key secrecy, idempotency и безопасные лимиты в release regression.
 
 ---
 

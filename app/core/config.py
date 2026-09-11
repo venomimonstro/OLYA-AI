@@ -187,6 +187,8 @@ class Settings(BaseSettings):
     payment_ingest_secret: str = ""
     api_default_rate_limit_per_minute: int = 60
     api_max_rate_limit_per_minute: int = 600
+    api_max_active_keys_per_user: int = 20
+    api_max_contexts_per_owner: int = 100
 
     backup_storage_path: str = "./backups"
     health_checkpoint_stale_seconds: int = 300

@@ -94,10 +94,40 @@ def ensure_organization_budget(db,organization_id,incremental_cost,now=None):
 def create_api_key(db,user,settings,*,name,scopes,organization_id,rate_limit_per_minute,expires_at):
     scopes=sorted(set(scopes))
     if not scopes or not set(scopes).issubset(ALLOWED_API_SCOPES): raise ValueError("Invalid API key scopes")
+    name=name.strip()
+    if not name: raise ValueError("API key name is required")
+    if expires_at is not None and _aware(expires_at)<=datetime.now(timezone.utc): raise ValueError("API key expiration must be in the future")
     if organization_id: require_organization_role(db,user,organization_id,"manager")
+    active_keys=int(db.scalar(select(func.count(ApiKey.id)).where(ApiKey.owner_id==user.id,ApiKey.status=="active",ApiKey.revoked_at.is_(None))) or 0)
+    if active_keys>=max(1,int(settings.api_max_active_keys_per_user)): raise ValueError("Active API key limit reached")
     limit=min(max(1,rate_limit_per_minute or settings.api_default_rate_limit_per_minute),settings.api_max_rate_limit_per_minute)
     raw=secrets.token_urlsafe(40); prefix=secrets.token_hex(4); token=f"x1k_{prefix}_{raw}"
-    row=ApiKey(owner_id=user.id,organization_id=organization_id,name=name.strip(),prefix=prefix,secret_hash=token_digest(token),scopes=scopes,rate_limit_per_minute=limit,expires_at=expires_at); db.add(row); db.flush(); return token,row
+    row=ApiKey(owner_id=user.id,organization_id=organization_id,name=name,prefix=prefix,secret_hash=token_digest(token),scopes=scopes,rate_limit_per_minute=limit,expires_at=expires_at); db.add(row); db.flush(); return token,row
+
+
+def rotate_api_key(db, user, settings, api_key):
+    if api_key.owner_id != user.id:
+        raise LookupError("API key not found")
+    if api_key.status != "active" or api_key.revoked_at is not None:
+        raise ValueError("Only an active API key can be rotated")
+    expires_at = _aware(api_key.expires_at)
+    if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+        raise ValueError("Expired API key cannot be rotated")
+    # Revoke first inside the same transaction so the active-key ceiling does
+    # not block replacement and there is never a committed two-key overlap.
+    api_key.status = "revoked"
+    api_key.revoked_at = utcnow()
+    db.flush()
+    return create_api_key(
+        db,
+        user,
+        settings,
+        name=api_key.name,
+        scopes=list(api_key.scopes or []),
+        organization_id=api_key.organization_id,
+        rate_limit_per_minute=api_key.rate_limit_per_minute,
+        expires_at=api_key.expires_at,
+    )
 def payment_payload_hash(payload): return hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()
 
 def _payment_by_identity(db,payload):
@@ -140,6 +170,14 @@ def payment_reconciliation(db):
         totals[row.currency]=totals.get(row.currency,0)+(-1 if row.kind=="refund" else 1)*row.amount_minor; unreconciled+=row.reconciled_at is None
     return {"records":len(rows),"unreconciled":unreconciled,"net_amount_minor_by_currency":totals}
 def record_telemetry(db,*,api_key,endpoint,request_id,status_code,latency_ms,quality_status,context_id,project_id,resource_usage,cost_microunits):
-    row=ApiRequestTelemetry(api_key_id=api_key.id,user_id=api_key.owner_id,organization_id=api_key.organization_id,context_id=context_id,project_id=project_id,endpoint=endpoint,request_id=request_id,status_code=status_code,latency_ms=max(0,latency_ms),quality_status=quality_status,cost_microunits=max(0,cost_microunits),resource_usage=resource_usage); db.add(row)
+    existing=db.scalar(select(ApiRequestTelemetry).where(ApiRequestTelemetry.request_id==request_id))
+    if existing is not None: return existing
+    row=ApiRequestTelemetry(api_key_id=api_key.id,user_id=api_key.owner_id,organization_id=api_key.organization_id,context_id=context_id,project_id=project_id,endpoint=endpoint,request_id=request_id,status_code=status_code,latency_ms=max(0,latency_ms),quality_status=quality_status,cost_microunits=max(0,cost_microunits),resource_usage=resource_usage)
+    try:
+        with db.begin_nested(): db.add(row); db.flush()
+    except IntegrityError:
+        winner=db.scalar(select(ApiRequestTelemetry).where(ApiRequestTelemetry.request_id==request_id))
+        if winner is None: raise
+        return winner
     if cost_microunits>0: db.add(ResourceExpenseEvent(user_id=api_key.owner_id,organization_id=api_key.organization_id,project_id=project_id,api_key_id=api_key.id,resource_kind="cpu",quantity_ms=int(resource_usage.get("cpu_ms",0)),cost_microunits=cost_microunits,source_kind="api_request",source_id=request_id,metadata_json={"endpoint":endpoint,"quality_status":quality_status}))
     return row

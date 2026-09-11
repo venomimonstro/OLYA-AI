@@ -130,6 +130,7 @@ def main() -> int:
         if shell_scripts: checks.append(run("shell_syntax", [*gate_prefix, "bash", "-n", *shell_scripts], timeout=args.command_timeout))
         checks.append(run("compileall", [*gate_prefix, "python", "-m", "compileall", "-q", "app", "scripts", "tests"], timeout=args.command_timeout))
         checks.append(run("static_contract_audit", [*gate_prefix, "python", "-m", "scripts.static_contract_audit"], timeout=args.command_timeout))
+        checks.append(run("api_contract_audit", [*gate_prefix, "python", "-m", "scripts.api_contract_audit"], timeout=args.command_timeout))
         checks.append(run("stability_probe", [*gate_prefix, "python", "-m", "scripts.stability_probe"], timeout=args.command_timeout))
         checks.append(run("document_render_probe", [*gate_prefix, "python", "-m", "scripts.document_render_probe"], timeout=max(args.command_timeout, 180)))
         checks.append(parse_alembic_heads(run("alembic_heads", [*gate_prefix, "python", "-m", "alembic", "heads"], timeout=args.command_timeout)))
@@ -139,6 +140,7 @@ def main() -> int:
         if shell_scripts: checks.append(run("shell_syntax", ["bash", "-n", *shell_scripts], timeout=args.command_timeout, env=python_env))
         checks.append(run("compileall", [sys.executable, "-m", "compileall", "-q", "app", "scripts", "tests"], timeout=args.command_timeout, env=python_env))
         checks.append(run("static_contract_audit", [sys.executable, "-m", "scripts.static_contract_audit"], timeout=args.command_timeout, env=python_env))
+        checks.append(run("api_contract_audit", [sys.executable, "-m", "scripts.api_contract_audit"], timeout=args.command_timeout, env=python_env))
         checks.append(run("stability_probe", [sys.executable, "-m", "scripts.stability_probe"], timeout=args.command_timeout, env=python_env))
         if shutil.which("libreoffice") or shutil.which("soffice"):
             checks.append(run("document_render_probe", [sys.executable, "-m", "scripts.document_render_probe"], timeout=max(args.command_timeout, 180), env=python_env))

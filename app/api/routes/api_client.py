@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import re
 from time import perf_counter
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.routes.chat import chat as chat_handler
@@ -19,6 +21,7 @@ from app.services.measured_plans import ensure_channel_budget, reset_channel_ove
 from app.services.progressive_launch import active_rollout, rollout_allows_user, user_has_open_breaker
 
 router = APIRouter(prefix="/v1/api", tags=["api-client"])
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{12,80}$")
 
 
 def _context_access(db: Session, key: ApiKey, user: User, context_id: str) -> PersistentApiContext:
@@ -43,8 +46,11 @@ def _require_public_api_exposure(request: Request, db: Session, user: User) -> N
 
 
 @router.post("/contexts", response_model=ApiContextRead, status_code=status.HTTP_201_CREATED)
-def create_context(payload: ApiContextCreate, principal=Depends(require_api_scope("contexts:write")), db: Session = Depends(get_db)):
+def create_context(payload: ApiContextCreate, request: Request, principal=Depends(require_api_scope("contexts:write")), db: Session = Depends(get_db)):
     key, user = principal; project_id = payload.project_id; conversation_id = payload.conversation_id
+    context_count = int(db.scalar(select(func.count(PersistentApiContext.id)).where(PersistentApiContext.owner_id == user.id, PersistentApiContext.organization_id == key.organization_id)) or 0)
+    if context_count >= max(1, int(request.app.state.settings.api_max_contexts_per_owner)):
+        raise HTTPException(status_code=409, detail="API context limit reached")
     if project_id: require_project_role(db, user, project_id, "member")
     if conversation_id:
         conv = db.get(Conversation, conversation_id)
@@ -57,15 +63,43 @@ def create_context(payload: ApiContextCreate, principal=Depends(require_api_scop
     return ApiContextRead(id=row.id, project_id=row.project_id, conversation_id=row.conversation_id, label=row.label, metadata=row.metadata_json, created_at=row.created_at, updated_at=row.updated_at)
 
 
+@router.get("/contexts", response_model=list[ApiContextRead])
+def list_contexts(limit: int = Query(default=100, ge=1, le=500), principal=Depends(require_api_scope("contexts:read")), db: Session = Depends(get_db)):
+    key, user = principal
+    rows = db.scalars(select(PersistentApiContext).where(PersistentApiContext.owner_id == user.id, PersistentApiContext.organization_id == key.organization_id).order_by(PersistentApiContext.updated_at.desc()).limit(limit)).all()
+    db.commit()
+    return [ApiContextRead(id=row.id, project_id=row.project_id, conversation_id=row.conversation_id, label=row.label, metadata=row.metadata_json, created_at=row.created_at, updated_at=row.updated_at) for row in rows]
+
+
 @router.get("/contexts/{context_id}", response_model=ApiContextRead)
 def get_context(context_id: str, principal=Depends(require_api_scope("contexts:read")), db: Session = Depends(get_db)):
     key, user = principal; row = _context_access(db, key, user, context_id); db.commit()
     return ApiContextRead(id=row.id, project_id=row.project_id, conversation_id=row.conversation_id, label=row.label, metadata=row.metadata_json, created_at=row.created_at, updated_at=row.updated_at)
 
 
+@router.delete("/contexts/{context_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_context(context_id: str, principal=Depends(require_api_scope("contexts:write")), db: Session = Depends(get_db)) -> Response:
+    key, user = principal
+    row = _context_access(db, key, user, context_id)
+    db.delete(row)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _logical_request_id(payload: ApiChatRequest, idempotency_key: str) -> str:
+    header_value = idempotency_key.strip()
+    if header_value and not REQUEST_ID_RE.fullmatch(header_value):
+        raise HTTPException(status_code=422, detail="Invalid Idempotency-Key")
+    if header_value and payload.client_request_id and header_value != payload.client_request_id:
+        raise HTTPException(status_code=409, detail="Idempotency-Key and client_request_id differ")
+    return header_value or payload.client_request_id or uuid4().hex
+
+
 @router.post("/chat", response_model=ChatResponse)
-async def api_chat(payload: ApiChatRequest, request: Request, principal=Depends(require_api_scope("chat")), db: Session = Depends(get_db)):
+async def api_chat(payload: ApiChatRequest, request: Request, response: Response, idempotency_key: str = Header(default="", alias="Idempotency-Key"), principal=Depends(require_api_scope("chat")), db: Session = Depends(get_db)):
     key, user = principal; _require_public_api_exposure(request, db, user); context = None
+    logical_request_id = _logical_request_id(payload, idempotency_key)
+    response.headers["X-Request-ID"] = logical_request_id
     if payload.context_id: context = _context_access(db, key, user, payload.context_id)
     reserve_seconds = {"fast":15,"work":60,"deep":180}.get(payload.mode, 60)
     if payload.verification == "strict" or (payload.verification == "auto" and payload.requirements): reserve_seconds *= 2
@@ -76,8 +110,9 @@ async def api_chat(payload: ApiChatRequest, request: Request, principal=Depends(
         try: ensure_organization_budget(db, key.organization_id, reserve_cost)
         except RuntimeError as exc: db.rollback(); raise HTTPException(status_code=429, detail=str(exc)) from exc
     data = payload.model_dump(exclude={"context_id"})
+    data["client_request_id"] = logical_request_id
     if context: data["project_id"] = context.project_id; data["conversation_id"] = context.conversation_id
-    chat_payload = ChatRequest.model_validate(data); started = perf_counter(); external_request_id = uuid4().hex; token = set_channel_override("api")
+    chat_payload = ChatRequest.model_validate(data); started = perf_counter(); external_request_id = hashlib.sha256(f"{key.id}:{logical_request_id}".encode("utf-8")).hexdigest(); token = set_channel_override("api")
     try:
         try: response = await chat_handler(chat_payload, request, user, db)
         except HTTPException as exc:

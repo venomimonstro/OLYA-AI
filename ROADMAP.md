@@ -135,3 +135,17 @@ Source & Release Recovery Closure:
 - made the FastAPI 0.141 route registry concrete and release-auditable while preserving dependency overrides;
 - repaired image-editing/onboarding registration and stale product-surface contracts;
 - added fresh-database, source-integrity and route-registry regression coverage.
+
+## Sprint 67 — DONE
+
+Public API Hardening:
+
+- strict single-source API-key authentication with bounded token grammar;
+- truthful rate-limit limit/remaining/reset headers and exact retry windows;
+- organization API keys fail closed immediately after manager access is removed;
+- atomic one-time-secret key rotation with no committed credential overlap;
+- bounded API-key and persistent-context counts plus 16-KiB context metadata limit;
+- list/get/delete context lifecycle with owner and organization isolation;
+- durable Chat idempotency through `Idempotency-Key` / `client_request_id`;
+- idempotent telemetry and resource charging for retried logical requests;
+- dedicated API contract audit included in the full release regression.

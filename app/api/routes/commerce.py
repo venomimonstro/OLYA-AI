@@ -13,7 +13,7 @@ from app.models import ApiKey, Organization, OrganizationBudget, OrganizationMem
 from app.schemas.commerce import ApiKeyCreate, ApiKeyCreated, ApiKeyRead, BudgetPut, BudgetRead, OrganizationCreate, OrganizationMemberRead, OrganizationMemberUpsert, OrganizationRead, PaymentIngest, PaymentRead
 from app.services.admin import audit, require_admin
 from app.services.auth import get_current_user, normalize_email
-from app.services.commerce import budget_state, create_api_key, ingest_payment, list_organizations, measured_user_resources, normalize_slug, organization_role, payment_reconciliation, require_organization_role
+from app.services.commerce import budget_state, create_api_key, ingest_payment, list_organizations, measured_user_resources, normalize_slug, organization_role, payment_reconciliation, require_organization_role, rotate_api_key
 from app.services.measured_plans import apply_runtime_plan_to_quota, runtime_plan_catalog
 
 router=APIRouter(prefix="/v1/commerce",tags=["commerce"])
@@ -90,6 +90,16 @@ def revoke(api_key_id:str,user:User=Depends(get_current_user),db:Session=Depends
     if row is None or row.owner_id!=user.id: raise HTTPException(status_code=404,detail='API key not found')
     if row.status!='revoked': row.status='revoked'; row.revoked_at=datetime.now(timezone.utc)
     db.commit()
+
+
+@router.post('/api-keys/{api_key_id}/rotate',response_model=ApiKeyCreated,status_code=status.HTTP_201_CREATED)
+def rotate_key(api_key_id:str,request:Request,user:User=Depends(get_current_user),db:Session=Depends(get_db)):
+    row=db.get(ApiKey,api_key_id)
+    if row is None or row.owner_id!=user.id: raise HTTPException(status_code=404,detail='API key not found')
+    try: token,replacement=rotate_api_key(db,user,request.app.state.settings,row)
+    except (ValueError,LookupError) as exc: db.rollback(); raise HTTPException(status_code=409 if isinstance(exc,ValueError) else 404,detail=str(exc)) from exc
+    db.commit(); db.refresh(replacement)
+    return ApiKeyCreated(id=replacement.id,name=replacement.name,prefix=replacement.prefix,token=token,scopes=replacement.scopes,rate_limit_per_minute=replacement.rate_limit_per_minute,organization_id=replacement.organization_id,expires_at=replacement.expires_at,created_at=replacement.created_at)
 
 @router.post('/payments/ingest',response_model=PaymentRead)
 def payment(payload:PaymentIngest,request:Request,x_x1_payment_secret:str=Header(default='',alias='X-X1-Payment-Secret'),db:Session=Depends(get_db)):

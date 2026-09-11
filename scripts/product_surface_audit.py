@@ -41,6 +41,10 @@ ESSENTIAL_PATHS = {
     "/v1/images/generations",
     "/v1/images/references",
     "/v1/images/edits",
+    "/v1/commerce/api-keys/{api_key_id}/rotate",
+    "/v1/api/contexts",
+    "/v1/api/contexts/{context_id}",
+    "/v1/api/chat",
 }
 
 
