@@ -127,8 +127,6 @@ async def lifespan(app: FastAPI):
     if settings.database_auto_create_schema:
         init_db()
     app.state.settings = settings
-    # Re-open the process-local chat coordinator for this application lifespan.
-    # shutdown() deliberately leaves it closed so no request can race teardown.
     from app.services.chat_runtime import chat_execution_manager
     chat_execution_manager.startup()
     app.state.capacity_boot_max_context_tokens = int(settings.max_context_tokens)
@@ -136,7 +134,7 @@ async def lifespan(app: FastAPI):
     app.state.capacity_boot_max_concurrent_generations = int(settings.max_concurrent_generations)
     app.state.llama = LlamaClient(settings.llama_base_url, settings.request_timeout_seconds)
     app.state.context = ContextCompiler(max_chars=settings.deep_context_tokens * 6)
-    app.state.governor = ResourceGovernor(max_concurrent=settings.max_concurrent_generations, max_queue=settings.max_queue_size, wait_timeout_seconds=settings.inference_queue_timeout_seconds)
+    app.state.governor = ResourceGovernor(max_concurrent=settings.max_concurrent_generations, max_queue=settings.max_queue_size, wait_timeout_seconds=settings.inference_queue_timeout_seconds, max_queued_per_principal=settings.inference_max_queued_per_principal)
     app.state.file_upload_governor = ResourceGovernor(max_concurrent=2, max_queue=8, wait_timeout_seconds=15.0)
     app.state.user_governor = UserResourceGovernor()
     app.state.overload_lanes = {
@@ -181,9 +179,6 @@ async def lifespan(app: FastAPI):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
-        # A process restart is not the same thing as the user pressing Stop.
-        # Interrupt managed chat jobs explicitly before closing llama.cpp so the
-        # durable ChatRun can be resumed with the same logical request id.
         await chat_execution_manager.shutdown()
         await app.state.llama.close()
 
@@ -317,13 +312,6 @@ async def database_operational_error_handler(request: Request, exc: OperationalE
 
 
 def _include_router_eager(router) -> None:
-    """Register concrete routes for stable runtime/audit introspection.
-
-    FastAPI 0.141 stores include_router() calls as lazy private wrapper objects.
-    X1's release gates intentionally inspect app.routes, so an empty include
-    context is flattened here while router-owned paths, dependencies and tags
-    remain attached to each concrete route.
-    """
     if router.on_startup or router.on_shutdown:
         raise RuntimeError("X1 routers must use the application lifespan")
     concrete = list(router.routes)
@@ -368,6 +356,7 @@ for module in (
     "app.api.routes.beta",
     "app.api.routes.beta_ops",
     "app.api.routes.launch",
+    "app.api.routes.launch_bundle",
     "app.image_studio_ui",
     "app.beta_admin_ui",
     "app.launch_admin_ui",
