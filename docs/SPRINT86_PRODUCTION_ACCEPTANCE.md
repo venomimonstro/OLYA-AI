@@ -14,7 +14,7 @@ The harness refuses launch unless the current clean git checkout has matching, g
 - `backups/release-gate-latest.json` (`x1-release-gate-v4`);
 - restore-drill and runtime-chaos evidence.
 
-RC/load evidence must match both current `git_head` and deterministic `source_fingerprint` where applicable. The harness also recomputes the fingerprint inside the running `app` container and checks the public `GET /version` value, so a stale or modified runtime cannot be accepted.
+RC/load evidence must match current `git_head` and deterministic `source_fingerprint` where applicable. Sprint80 load evidence must additionally name the **same canonical production target URL** that Sprint86 is accepting; a green staging load cannot be reused for another target. The harness also recomputes the fingerprint inside the running `app` container and checks the public `GET /version` value, so a stale or modified runtime cannot be accepted.
 
 ## Live target probes
 Production acceptance verifies running Docker services, PostgreSQL readiness, local Qwen/llama.cpp health, SearXNG, sandbox worker and document worker. It also requires `/ready` to be stable, administrator release-readiness to be green, the Sprint84 business contract to pass, and required live capabilities to be available. Image generation/editing can be made mandatory with `--require-images`.
