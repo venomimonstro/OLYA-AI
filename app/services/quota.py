@@ -33,6 +33,23 @@ def _sync_measured_policy(db: Session, quota: UserQuota, settings: Settings) -> 
         return
 
 
+def _sync_canonical_entitlement(db: Session, user: User, settings: Settings, quota: UserQuota) -> UserQuota:
+    """Restore billing/free truth before applying any explicit admin override.
+
+    This makes direct mutations of UserQuota non-authoritative. A paid subscription
+    controls its plan; users without an active subscription return to Free.
+    """
+    try:
+        from app.services.billing import reconcile_user_subscription
+        from app.services.measured_plans import apply_runtime_plan_to_quota
+        sub = reconcile_user_subscription(db, user, settings, quota=quota)
+        target_plan = sub.plan if sub is not None and sub.status == "active" else "free"
+        quota = apply_runtime_plan_to_quota(db, user, settings, target_plan)
+    except ImportError:
+        pass
+    return quota
+
+
 def get_or_create_quota(db: Session, user: User, settings: Settings) -> UserQuota:
     quota = db.get(UserQuota, user.id)
     if quota is None:
@@ -45,12 +62,13 @@ def get_or_create_quota(db: Session, user: User, settings: Settings) -> UserQuot
         )
         db.add(quota)
         db.flush()
+    quota = _sync_canonical_entitlement(db, user, settings, quota)
+    _sync_measured_policy(db, quota, settings)
     try:
-        from app.services.billing import reconcile_user_subscription
-        reconcile_user_subscription(db, user, settings, quota=quota)
+        from app.services.admin_user_controls import apply_control_to_quota
+        quota = apply_control_to_quota(db, user, settings, quota)
     except ImportError:
         pass
-    _sync_measured_policy(db, quota, settings)
     return quota
 
 
