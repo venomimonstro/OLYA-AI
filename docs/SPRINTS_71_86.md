@@ -1,6 +1,6 @@
 # Sprints 71–86 — remaining MVP plan
 
-После Sprint 83 остаётся 3 спринта до production acceptance. Sprint80 target load run остаётся обязательным внешним gate.
+После Sprint 84 остаётся 2 спринта до production acceptance. Sprint80 target load run остаётся обязательным внешним gate.
 
 ## Sprint 71 — DONE — Admin Control Center
 ## Sprint 72 — DONE — Admin User Operations
@@ -15,9 +15,7 @@
 ## Sprint 81 — DONE — Security MVP Pen-Test Simulation
 ## Sprint 82 — DONE — Crash / Recovery / Data Integrity
 ## Sprint 83 — DONE — Architecture Cleanup
-
-## Sprint 84 — Business Logic Contract
-Фиксация инвариантов тарифов, billing, quota, organizations, API, projects, tasks, agents и release policy как executable contract tests.
+## Sprint 84 — DONE — Business Logic Contract
 
 ## Sprint 85 — MVP Freeze / Release Candidate
 Feature freeze, полный regression/security/recovery/load gate, миграции, backup/restore и формирование одного release candidate без новых функций.
