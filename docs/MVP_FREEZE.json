@@ -25,6 +25,7 @@
     "business_logic_contract",
     "current_head_release_gate_evidence",
     "current_head_target_load_evidence",
+    "current_source_runtime_provenance",
     "model_regression_evidence",
     "backup_restore_drill",
     "runtime_chaos",
