@@ -10,6 +10,7 @@ def audit()->dict:
     main=(ROOT/'app/main.py').read_text('utf-8')
     user_ui=(ROOT/'app/user_ui.py').read_text('utf-8')
     base=(ROOT/'app/user_workspace_base.py').read_text('utf-8')
+    legacy_admin=(ROOT/'app/api/routes/admin.py').read_text('utf-8')
     regression=(ROOT/'scripts/run_full_regression.py').read_text('utf-8')
     required_domains=('authentication','billing','quota_entitlement','plan_policy','admin_user_override','capability_availability','inference_admission','request_deadline','agent_completion','image_beta_contract','product_analytics','background_jobs','recovery_integrity')
     for name in required_domains:
@@ -31,7 +32,9 @@ def audit()->dict:
     if 'user_workspace_base_router' in main or 'from app.user_workspace_base import router' in main:errors.append({'code':'workspace_base_registered_directly'})
     if 'from app.user_workspace_base import workspace as _base_workspace' not in user_ui:errors.append({'code':'workspace_template_dependency_missing'})
     if '@router.get("/app"' not in base:errors.append({'code':'legacy_template_route_marker_missing','note':'base remains template-compatible but is not registered'})
-    if '("scripts.architecture_cleanup_audit", [])' not in regression:errors.append({'code':'regression_missing_architecture_cleanup'})
+    if 'setattr(quota' in legacy_admin or 'quota.plan =' in legacy_admin or 'quota.plan=' in legacy_admin:errors.append({'code':'legacy_admin_direct_quota_mutation'})
+    if 'put_control(' not in legacy_admin or 'get_or_create_quota(' not in legacy_admin:errors.append({'code':'legacy_admin_not_canonical_adapter'})
+    if '("scripts.architecture_cleanup_audit",[])' not in regression and '("scripts.architecture_cleanup_audit", [])' not in regression:errors.append({'code':'regression_missing_architecture_cleanup'})
     return {'format':'x1-architecture-cleanup-audit-v1','status':'passed' if not errors else 'failed','errors':errors,'registered_route_keys':len(keys),'domain_owners':module.DOMAIN_OWNERS}
 def main()->int:
     r=audit();print(json.dumps(r,ensure_ascii=False,indent=2));return 0 if r['status']=='passed' else 2
