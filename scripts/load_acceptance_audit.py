@@ -18,7 +18,7 @@ def audit()->dict:
             errors.append({'code':'load_acceptance_chat_payload_semantics_invalid'})
     except Exception as exc:
         errors.append({'code':'load_acceptance_chat_schema_mismatch','error':type(exc).__name__})
-    for token in ('x1-build-provenance-v1','source_fingerprint','build-inputs/Dockerfile','build-inputs/docker-compose.yml'):
+    for token in ('FORMAT = "x1-build-provenance-v1"','_BUILD_INPUTS = ("Dockerfile", "docker-compose.yml")','root / "build-inputs" / name','manifest[f"build-inputs/{name}"]','source_fingerprint'):
         if token not in prov: errors.append({'code':'load_acceptance_build_provenance_missing','token':token})
     if '("scripts.load_acceptance_audit",[])' not in reg and '("scripts.load_acceptance_audit", [])' not in reg: errors.append({'code':'regression_missing_load_acceptance_audit'})
     return {'format':'x1-load-acceptance-audit-v5','status':'passed' if not errors else 'failed','errors':errors,'requires_external_target_run':True,'requires_distinct_authenticated_users':True,'validates_canonical_chat_schema':True,'requires_matching_runtime_build':True,'evidence_path':'backups/load-acceptance-latest.json'}
