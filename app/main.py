@@ -21,7 +21,7 @@ from app.user_ui import router as user_ui_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.safety_admin import router as safety_admin_router
 from app.api.routes.auth import router as auth_router
-from app.api.routes.chat import router as chat_router
+from app.api.routes.smart_chat import router as chat_router
 from app.api.routes.conversations import router as conversations_router
 from app.api.routes.health import router as health_router
 from app.api.routes.files import router as files_router
