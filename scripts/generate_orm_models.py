@@ -70,6 +70,7 @@ EXTERNAL_TABLES = {
     "project_files", "file_chunks", "tasks", "task_criteria", "task_evidence",
     "task_checkpoints", "conversations", "messages", "usage_events",
     "user_quotas", "background_jobs",
+    "admin_user_controls",
     "api_keys", "api_rate_limit_windows", "api_request_telemetry",
     "autonomous_development_checkpoints", "autonomous_development_ledgers",
     "beta_participants", "beta_snapshots", "beta_waves", "capacity_plans",
