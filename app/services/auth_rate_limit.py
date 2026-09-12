@@ -79,10 +79,10 @@ def _reject_auth_load() -> None:
 def enforce_auth_rate_limit(request: Request, *, email: str, action: str, environment: str) -> None:
     if environment.lower() not in {"production", "prod", "stable"}:
         return
-    # The global circuit breaker is checked before IP/email buckets and before
-    # scrypt. A botnet therefore cannot bypass CPU protection merely by rotating
-    # addresses. Limits are intentionally far above normal traffic for a single
-    # low-cost node; overload is shed instead of exhausting CPU/DB connections.
+    # Global + IP breakers always protect scrypt/OAuth entry points. The email
+    # bucket is intentionally optional because OAuth starts do not yet have an
+    # authenticated email; putting all OAuth traffic into one fake email bucket
+    # would incorrectly throttle unrelated users together.
     global_limit = 120 if action == "register" else 300
     if not _limiter.consume(f"auth:{action}:global", limit=global_limit):
         _reject_auth_load()
@@ -92,7 +92,9 @@ def enforce_auth_rate_limit(request: Request, *, email: str, action: str, enviro
     if not _limiter.consume(f"auth:{action}:ip:{ip}", limit=ip_limit):
         _reject_auth_load()
 
-    import hashlib
-    email_key = hashlib.sha256(email.casefold().encode("utf-8", errors="ignore")).hexdigest()[:24]
-    if not _limiter.consume(f"auth:{action}:email:{email_key}", limit=8):
-        _reject_auth_load()
+    normalized_email = str(email or "").strip().casefold()
+    if normalized_email:
+        import hashlib
+        email_key = hashlib.sha256(normalized_email.encode("utf-8", errors="ignore")).hexdigest()[:24]
+        if not _limiter.consume(f"auth:{action}:email:{email_key}", limit=8):
+            _reject_auth_load()
