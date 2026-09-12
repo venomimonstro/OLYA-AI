@@ -149,3 +149,17 @@ Public API Hardening:
 - durable Chat idempotency through `Idempotency-Key` / `client_request_id`;
 - idempotent telemetry and resource charging for retried logical requests;
 - dedicated API contract audit included in the full release regression.
+
+## Sprint 68 — DONE
+
+Self-Service API Console:
+
+- отдельная CSP-защищённая Console на `/v1/commerce/console` без нового API-движка;
+- создание, ротация и отзыв API-ключей с выбором scopes, organization, rate limit и expiration;
+- одноразовый secret показывается только после create/rotate и не сохраняется Console в browser storage;
+- management-plane остаётся на user session auth, а `/v1/api/*` тестируется только отдельным API-key;
+- persistent contexts можно создавать, просматривать и удалять прямо из Console;
+- встроенный idempotent test request использует реальный `/v1/api/chat`;
+- user-scoped management telemetry показывает endpoint, HTTP status, latency, quality, resource cost и request id без API-secret;
+- responsive mobile-first UI, quickstart и безопасные рекомендации по scopes/rotation;
+- отдельный `api_console_audit` добавлен в полный release regression вместе с расширенным API contract audit.

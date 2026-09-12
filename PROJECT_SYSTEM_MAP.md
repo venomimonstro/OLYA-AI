@@ -3,7 +3,7 @@
 > **ОБЯЗАТЕЛЬНО ПРОЧИТАТЬ ПЕРЕД ИЗМЕНЕНИЕМ ПРОЕКТА.**  
 > Этот файл — навигационная карта проекта для разработчиков и ИИ-агентов. Он отвечает на вопросы: **куда приходит запрос, какой контроллер его принимает, какой service выполняет бизнес-логику, какие ORM-модели/файлы/воркеры затрагиваются и где проходит граница безопасности**.
 >
-> Актуальность карты: 2026-09-11. Карта составлена по `main` после Sprint 67.
+> Актуальность карты: 2026-09-12. Карта составлена по `main` после Sprint 68.
 > **Правило проекта:** если в том же commit добавляется/удаляется controller, worker API, основной service, route prefix или меняется важная межмодульная связь — этот файл должен обновляться в том же commit.
 
 ---
@@ -584,13 +584,15 @@ Services: `image_policy.py`, `image_learning.py`, admin audit.
 
 ### `app/api/routes/commerce.py` — `/v1/commerce`
 
-Назначение: measured plans, resource economics, organizations, API keys, payment ingestion.
+Назначение: measured plans, resource economics, organizations, API keys, payment ingestion и management-plane API Console.
 
-Models: `Organization`, `OrganizationMember`, `OrganizationBudget`, `ResourceExpenseEvent`, `ApiKey`, user quota/payment records.
+Models: `Organization`, `OrganizationMember`, `OrganizationBudget`, `ResourceExpenseEvent`, `ApiKey`, `ApiRequestTelemetry`, user quota/payment records.
 
-Services: `commerce.py`, `measured_plans.py`.
+Services: `commerce.py`, `measured_plans.py`; HTML renderer Console — `app/api_console.py`.
 
 Payment ingest защищён отдельным HMAC/shared secret. Reconciliation и установка plan — admin operations. API keys создаются с ограниченным scope и показывают secret только один раз; `POST /api-keys/{id}/rotate` атомарно отзывает старый ключ и выдаёт замену без committed overlap.
+
+Sprint 68 добавляет `GET /v1/commerce/console` и session-auth `GET /v1/commerce/api-telemetry`. Console не обходит публичный API: management операции используют user session, а test/context операции вызывают канонические `/v1/api/*` с отдельным API-key. Management telemetry выбирает только `ApiRequestTelemetry`, связанные с ключами текущего owner. API-secret не возвращается key-list/telemetry и не сохраняется Console в browser storage.
 
 ### `app/api/routes/api_client.py` — `/v1/api`
 
@@ -614,7 +616,7 @@ API key request
 
 Persistent API contexts имеют bounded owner/org lifecycle: list/create/get/delete, максимум задаётся `X1_API_MAX_CONTEXTS_PER_OWNER`, metadata ограничена 16 KiB. Chat принимает один логический `Idempotency-Key`/`client_request_id`; повтор не создаёт вторую генерацию, telemetry или resource charge.
 
-**Не дублировать Chat logic здесь.** Этот controller является auth/budget/telemetry adapter к обычному Chat. `scripts/api_contract_audit.py` фиксирует method/path contract, key secrecy, idempotency и безопасные лимиты в release regression.
+**Не дублировать Chat logic здесь.** Этот controller является auth/budget/telemetry adapter к обычному Chat. `scripts/api_contract_audit.py` фиксирует method/path contract, key secrecy, idempotency и безопасные лимиты в release regression; `scripts/api_console_audit.py` фиксирует Console route/scopes/secret-storage boundary.
 
 ---
 
@@ -754,6 +756,8 @@ Models: `PublicRollout`, `MeasuredPlanCatalog`, `CircuitBreakerEvent`, `BetaPart
 | `app/media_admin_ui.py` | `/admin/media` | Media moderation, policy, training/datasets. |
 | `app/beta_admin_ui.py` | `/admin/beta` | Closed-beta waves/capacity/feedback. |
 | `app/launch_admin_ui.py` | `/admin/launch` | Progressive public rollout/measured plans/circuit breakers. |
+
+`app/api_console.py` — не отдельный router и не новый business controller: это HTML renderer для `GET /v1/commerce/console`, зарегистрированного существующим `commerce.py`. Он намеренно использует существующие management/public API contracts вместо дублирования логики.
 
 UI **не является source of truth бизнес-логики**. Любая операция UI должна существовать в API/service, чтобы её можно было тестировать без браузера.
 
@@ -1167,6 +1171,20 @@ closed beta telemetry
  → advance OR freeze/rollback
 ```
 
+## 13.8 API Console
+
+```text
+Browser session
+ → GET /v1/commerce/console
+ → session-auth management calls
+     → API key create/list/rotate/revoke
+     → owner-scoped API telemetry
+ → API secret kept only in page memory
+ → /v1/api/contexts or /v1/api/chat
+ → require_api_scope + rate/budget guards
+ → canonical Chat/context pipeline
+```
+
 ---
 
 # 14. Security boundaries, которые нельзя обходить
@@ -1185,6 +1203,7 @@ closed beta telemetry
 12. **Coding proof:** model text не является proof; only server-observed diff/tests/evidence.
 13. **Task completion:** required criteria/evidence блокируют ложное `completed`.
 14. **Release:** публичный launch нельзя объявлять готовым в prose — только green RC/reliability evidence.
+15. **API key:** full secret существует только при create/rotate или в памяти клиента; key list/telemetry/log не должны его восстанавливать или сохранять.
 
 ---
 
@@ -1232,7 +1251,7 @@ Optimistic state/version используется в Task, EngineeringRun/Execut
 | Images | `images.py`, `image_runtime.py`, `image_policy.py`, `scripts/image_worker.py` |
 | Media moderation/training | `media_admin.py`, `image_learning.py` |
 | Тарифы/экономика | `commerce.py`, `measured_plans.py`, `budget_transparency.py` |
-| Public API | `api_client.py`, но Chat logic менять в `chat.py` |
+| Public API / API Console | `api_client.py`, `commerce.py`, `app/api_console.py`; Chat logic менять только в `chat.py` |
 | Beta | `beta.py`, `adaptive_capacity.py`, `beta_scheduler.py` |
 | Public rollout | `launch.py`, `progressive_launch.py`, `public_launch_scheduler.py` |
 | Reliability | `reliability.py`, `system_observability.py` |
@@ -1335,6 +1354,7 @@ failed_checks = []
 ❌ shell=True для пользовательской/agent команды
 ❌ произвольный host path из HTTP payload
 ❌ plaintext secrets в response/log
+❌ сохранение API-secret в localStorage/sessionStorage
 ❌ auto GitHub push после model generation
 ❌ "tests passed" из текста LLM без server result
 ❌ завершение Task без criteria/evidence

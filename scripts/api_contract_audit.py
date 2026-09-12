@@ -16,6 +16,7 @@ REQUIRED_OPERATIONS = {
     ("POST", "/v1/commerce/api-keys"),
     ("DELETE", "/v1/commerce/api-keys/{api_key_id}"),
     ("POST", "/v1/commerce/api-keys/{api_key_id}/rotate"),
+    ("GET", "/v1/commerce/api-telemetry"),
 }
 
 
@@ -30,7 +31,7 @@ def audit() -> dict:
     for route in app.routes:
         path = str(getattr(route, "path", ""))
         for method in set(getattr(route, "methods", set()) or set()):
-            if path.startswith(("/v1/api", "/v1/commerce/api-keys")) and method not in {"HEAD", "OPTIONS"}:
+            if path.startswith(("/v1/api", "/v1/commerce/api-keys", "/v1/commerce/api-telemetry")) and method not in {"HEAD", "OPTIONS"}:
                 operations.append((method, path))
     available = set(operations)
     for method, path in sorted(REQUIRED_OPERATIONS - available):

@@ -4,12 +4,14 @@ import hmac
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api_console import api_console_response
 from app.db import get_db
-from app.models import ApiKey, Organization, OrganizationBudget, OrganizationMember, ResourceExpenseEvent, User
+from app.models import ApiKey, ApiRequestTelemetry, Organization, OrganizationBudget, OrganizationMember, ResourceExpenseEvent, User
 from app.schemas.commerce import ApiKeyCreate, ApiKeyCreated, ApiKeyRead, BudgetPut, BudgetRead, OrganizationCreate, OrganizationMemberRead, OrganizationMemberUpsert, OrganizationRead, PaymentIngest, PaymentRead
 from app.services.admin import audit, require_admin
 from app.services.auth import get_current_user, normalize_email
@@ -22,6 +24,16 @@ def _org_response(db,user,org): return OrganizationRead(id=org.id,owner_id=org.o
 def _require_org(db,user,org_id,minimum="member"):
     try:return require_organization_role(db,user,org_id,minimum)
     except LookupError as exc: raise HTTPException(status_code=404,detail="Organization not found") from exc
+
+def _api_key_management_visible(db:Session,user:User,row:ApiKey)->bool:
+    if row.organization_id is None:return True
+    org=db.get(Organization,row.organization_id)
+    if org is None:return False
+    return (organization_role(db,user.id,org) or '') in {'owner','manager'}
+
+@router.get('/console',response_class=HTMLResponse,include_in_schema=False)
+def api_console() -> HTMLResponse:
+    return api_console_response()
 
 @router.get('/plans')
 def plans(request:Request,db:Session=Depends(get_db)): return runtime_plan_catalog(db,request.app.state.settings)
@@ -83,6 +95,17 @@ def new_key(payload:ApiKeyCreate,request:Request,user:User=Depends(get_current_u
 
 @router.get('/api-keys',response_model=list[ApiKeyRead])
 def keys(user:User=Depends(get_current_user),db:Session=Depends(get_db)): return db.scalars(select(ApiKey).where(ApiKey.owner_id==user.id).order_by(ApiKey.created_at.desc())).all()
+
+@router.get('/api-telemetry')
+def api_telemetry(api_key_id:str|None=Query(default=None),limit:int=Query(default=100,ge=1,le=500),user:User=Depends(get_current_user),db:Session=Depends(get_db)):
+    owned=list(db.scalars(select(ApiKey).where(ApiKey.owner_id==user.id).order_by(ApiKey.created_at.desc())).all())
+    visible=[row for row in owned if _api_key_management_visible(db,user,row)]
+    by_id={row.id:row for row in visible}
+    if api_key_id and api_key_id not in by_id: raise HTTPException(status_code=404,detail='API key not found')
+    selected_ids=[api_key_id] if api_key_id else list(by_id)
+    if not selected_ids:return []
+    rows=db.scalars(select(ApiRequestTelemetry).where(ApiRequestTelemetry.api_key_id.in_(selected_ids)).order_by(ApiRequestTelemetry.created_at.desc()).limit(limit)).all()
+    return [{'api_key_id':x.api_key_id,'api_key_name':by_id[x.api_key_id].name,'api_key_prefix':by_id[x.api_key_id].prefix,'request_id':x.request_id,'endpoint':x.endpoint,'status_code':x.status_code,'latency_ms':x.latency_ms,'quality_status':x.quality_status,'cost_microunits':x.cost_microunits,'resource_usage':x.resource_usage,'context_id':x.context_id,'project_id':x.project_id,'created_at':x.created_at} for x in rows]
 
 @router.delete('/api-keys/{api_key_id}',status_code=status.HTTP_204_NO_CONTENT)
 def revoke(api_key_id:str,user:User=Depends(get_current_user),db:Session=Depends(get_db)):
