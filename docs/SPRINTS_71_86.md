@@ -1,6 +1,6 @@
-# Sprints 71–86 — remaining MVP plan
+# Sprints 71–86 — MVP plan status
 
-После Sprint 84 остаётся 2 спринта до production acceptance. Sprint80 target load run остаётся обязательным внешним gate.
+Кодовые контракты Sprint 71–86 реализованы. Production launch всё ещё требует внешних target-node прогонов; отсутствие фактического прогона не считается успешным acceptance.
 
 ## Sprint 71 — DONE — Admin Control Center
 ## Sprint 72 — DONE — Admin User Operations
@@ -16,9 +16,10 @@
 ## Sprint 82 — DONE — Crash / Recovery / Data Integrity
 ## Sprint 83 — DONE — Architecture Cleanup
 ## Sprint 84 — DONE — Business Logic Contract
+## Sprint 85 — GATE DONE / RC NOT ISSUED — MVP Freeze / Release Candidate
 
-## Sprint 85 — MVP Freeze / Release Candidate
-Feature freeze, полный regression/security/recovery/load gate, миграции, backup/restore и формирование одного release candidate без новых функций.
+Feature freeze и единый RC gate реализованы. RC выдаётся только после полного regression/security/recovery/runtime gate, backup/restore, model evidence и реального Sprint80 load acceptance, привязанных к текущему git HEAD.
 
-## Sprint 86 — MVP Production Acceptance
-Финальная проверка на целевом production-сервере с реальной Qwen, PostgreSQL, SearXNG и workers; запуск допускается только при зелёных acceptance gates.
+## Sprint 86 — HARNESS DONE / PRODUCTION RUN REQUIRED — MVP Production Acceptance
+
+`production_acceptance.py` проверяет кандидата на целевом сервере с реальной Qwen, PostgreSQL, SearXNG, sandbox/document workers, release-readiness, business contract, live capability registry и current-HEAD evidence. `accepted_for_launch=true` допустим только при зелёных фактических проверках.
