@@ -31,7 +31,20 @@ def billing_plan_catalog(db: Session, settings) -> list[dict]:
         policy=policies.get(name)
         if not policy: continue
         amount=billing_price_minor(settings,name)
-        result.append({"name":name,"amount_minor":amount,"currency":str(settings.billing_currency).upper(),"period_days":max(1,int(settings.billing_period_days)),"purchase_enabled":name!="free" and amount>0,"monthly_cpu_seconds":int(policy.get("monthly_cpu_seconds") or 0),"resource_budget_microunits":int(policy.get("resource_budget_microunits") or 0),"max_concurrent_inference":int(policy.get("max_concurrent_inference") or 1),"max_concurrent_jobs":int(policy.get("max_concurrent_jobs") or 1)})
+        result.append({
+            "name":name,
+            "amount_minor":amount,
+            "currency":str(settings.billing_currency).upper(),
+            "period_days":max(1,int(settings.billing_period_days)),
+            "purchase_enabled":name!="free" and amount>0,
+            "monthly_cpu_seconds":int(policy.get("monthly_cpu_seconds") or 0),
+            "resource_budget_microunits":int(policy.get("resource_budget_microunits") or 0),
+            "monthly_request_units":int(policy.get("monthly_request_units") or 0),
+            "daily_request_units":int(policy.get("daily_request_units") or 0),
+            "request_unit_weights":{str(k):int(v) for k,v in (policy.get("request_unit_weights") or {}).items()},
+            "max_concurrent_inference":int(policy.get("max_concurrent_inference") or 1),
+            "max_concurrent_jobs":int(policy.get("max_concurrent_jobs") or 1),
+        })
     return result
 
 def checkout_url(settings, checkout_id: str) -> str | None:
