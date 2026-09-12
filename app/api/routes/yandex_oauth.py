@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -32,12 +33,13 @@ def _is_prod(request: Request) -> bool:
 def _completion_page(*, token: str | None = None, user_id: str | None = None, is_admin: bool = False, error: str = "") -> HTMLResponse:
     nonce = secrets.token_urlsafe(18)
     if token and user_id:
+        token_js = json.dumps(token)
+        user_js = json.dumps(user_id)
         script = (
-            "sessionStorage.setItem('x1_access_token'," + repr(token) + ");"
-            "sessionStorage.setItem('x1_user_id'," + repr(user_id) + ");"
-            "try{window.opener&&window.opener.postMessage({type:'x1-yandex-login'},location.origin)}catch(_e){};"
-            + ("sessionStorage.setItem('x1AdminToken'," + repr(token) + ");" if is_admin else "")
-            + "location.replace('/welcome');"
+            f"sessionStorage.setItem('x1_access_token',{token_js});"
+            f"sessionStorage.setItem('x1_user_id',{user_js});"
+            + (f"sessionStorage.setItem('x1AdminToken',{token_js});" if is_admin else "")
+            + "location.replace('/login?oauth=yandex');"
         )
         title = "Вход выполнен"
         body = "Вход через Яндекс выполнен. Открываю X1…"
@@ -109,8 +111,8 @@ async def yandex_callback(
     cookie_state = request.cookies.get(COOKIE_NAME, "")
     try:
         verifier = consume_state(db, request.app.state.settings, state=state, cookie_state=cookie_state)
-        # Commit the one-time state before any external network request. Even a
-        # timeout at Yandex cannot make the same callback replayable.
+        # Persist one-time state before upstream network I/O. A Yandex timeout
+        # cannot make an already-consumed callback replayable.
         db.commit()
         token_data = await exchange_code(db, request.app.state.settings, code=code, verifier=verifier)
         profile = await fetch_profile(db, request.app.state.settings, access_token=token_data["access_token"])
