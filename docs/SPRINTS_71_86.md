@@ -1,6 +1,6 @@
 # Sprints 71–86 — remaining MVP plan
 
-После завершения Sprint 74 до production acceptance остаётся 12 спринтов.
+После завершения Sprint 75 до production acceptance остаётся 11 спринтов.
 
 ## Sprint 71 — DONE — Admin Control Center
 Единая операционная панель администратора: здоровье, нагрузка, очереди, capacity, billing/API/complaints/release-сигналы без дублирования существующих admin services.
@@ -14,8 +14,8 @@
 ## Sprint 74 — DONE — Priority Inference Scheduler
 Bounded priority/fair scheduler для Fast/Work/API/Deep/background с plan-aware queue ordering, starvation protection и сохранением canonical quota/user/resource governors.
 
-## Sprint 75 — End-to-End Deadline Budget
-Один deadline budget через HTTP admission, research, queue, inference, verification и tools, чтобы запрос не продолжал дорогую работу после исчерпания пользовательского времени.
+## Sprint 75 — DONE — End-to-End Deadline Budget
+Один request-rooted monotonic deadline через auth, queue, local inference, research, verification и sandbox tools без возврата уже потраченного времени.
 
 ## Sprint 76 — Agent MVP Lock
 Фиксация минимально надёжного agent/development контура: bounded autonomy, доказуемые tool results, stop/recovery и запрет ложного completion.
