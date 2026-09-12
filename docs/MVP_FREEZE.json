@@ -1,0 +1,33 @@
+{
+  "format": "x1-mvp-freeze-v1",
+  "freeze_after_sprint": 84,
+  "feature_state": "frozen",
+  "allowed_post_freeze_change_classes": [
+    "release_gate",
+    "security_fix",
+    "recovery_fix",
+    "data_integrity_fix",
+    "deployment_fix",
+    "acceptance_harness",
+    "documentation",
+    "regression_test"
+  ],
+  "forbidden_post_freeze_change_classes": [
+    "new_user_feature",
+    "new_plan_semantics",
+    "new_billing_semantics",
+    "new_unbounded_agent_autonomy",
+    "new_external_dependency_without_release_review"
+  ],
+  "release_candidate_requires": [
+    "full_regression",
+    "security_audit",
+    "business_logic_contract",
+    "current_head_release_gate_evidence",
+    "current_head_target_load_evidence",
+    "model_regression_evidence",
+    "backup_restore_drill",
+    "runtime_chaos",
+    "capacity_calibration"
+  ]
+}
