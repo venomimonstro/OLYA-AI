@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app import user_ui as _base_user_ui
 from app.api.routes import chat as legacy_chat
 from app.db import SessionLocal, get_db
 from app.models import User
@@ -16,9 +17,24 @@ from app.schemas.chat import ChatRequest, ChatResponse, ChatRunStatus
 from app.services.auth import get_current_user
 from app.services.chat_runtime import ActiveChatJob, ChatRunConflict, ChatRunSnapshot, chat_execution_manager
 from app.services.task_solver import execute_task_solver, plan_task, reset_task_solver_context, set_task_solver_context
+from app.task_solver_user_ui import router as _task_solver_user_ui_router
 
 router = APIRouter(prefix="/v1", tags=["chat"])
 _SPECIALIZED_TASKS = {"website_audit", "local_recommendation"}
+
+
+def _install_workspace_route() -> None:
+    # main.py imports user_ui before smart_chat. Replace its /app route in-place
+    # so the already-held router reference gets the enhanced workspace and
+    # FastAPI never receives two competing /app handlers.
+    retained = [route for route in _base_user_ui.router.routes if str(getattr(route, "path", "")) != "/app"]
+    enhanced = [route for route in _task_solver_user_ui_router.routes if str(getattr(route, "path", "")) == "/app"]
+    if len(enhanced) != 1:
+        raise RuntimeError("Task-solver workspace must own exactly one /app route")
+    _base_user_ui.router.routes[:] = [*retained, enhanced[0]]
+
+
+_install_workspace_route()
 
 
 def _latest_user_text(payload: ChatRequest) -> str:
