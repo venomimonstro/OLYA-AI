@@ -90,12 +90,13 @@ def integration_snapshot(db: Session, settings) -> dict:
     production = str(getattr(settings, "env", "development")).lower() in {"production", "prod", "stable"}
     base_ready = _base_url_valid(row.public_base_url, production=production)
     smtp_password_set = bool(row.smtp_password_ciphertext)
+    smtp_auth_ready = not row.smtp_username.strip() or smtp_password_set
     smtp_ready = bool(
         row.smtp_enabled
         and row.smtp_host.strip()
         and 1 <= int(row.smtp_port) <= 65535
         and row.smtp_from_email.strip()
-        and smtp_password_set
+        and smtp_auth_ready
         and not (row.smtp_use_tls and row.smtp_use_ssl)
     )
     yoomoney_ready = bool(
@@ -257,8 +258,6 @@ def email_verification_required_for_user(db: Session, user: User) -> bool:
     if row is None or not row.auth_email_verification_required or user.is_admin:
         return False
     state = db.get(UserEmailState, user.id)
-    # Legacy users created before the launch-email migration are grandfathered;
-    # new registrations create an explicit state row before the session is issued.
     return state is not None and state.verified_at is None
 
 
