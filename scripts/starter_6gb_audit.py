@@ -18,18 +18,23 @@ def audit() -> dict:
     router = (ROOT / "app/inference/router.py").read_text("utf-8")
     verification = (ROOT / "app/services/conditional_verification.py").read_text("utf-8")
     installer = (ROOT / "scripts/install_starter_6gb.sh").read_text("utf-8")
+    runtime_audit = (ROOT / "scripts/runtime_config_audit.py").read_text("utf-8")
 
     primary = manifest.get("primary") or {}
     host = manifest.get("host_policy") or {}
+    low = manifest.get("low_ram_policy") or {}
     if primary.get("model_name") != "Qwen3-4B-Q4_K_M" or primary.get("quantization") != "Q4_K_M":
         errors.append({"code": "starter_primary_model_mismatch"})
     if int(primary.get("size_bytes") or 0) <= 0 or int(primary.get("size_bytes") or 0) > 3_000_000_000:
         errors.append({"code": "starter_model_size_out_of_envelope", "size_bytes": primary.get("size_bytes")})
-    if int(host.get("minimum_detected_ram_gib") or 0) > 5:
-        errors.append({"code": "starter_host_policy_rejects_6gb"})
-    tiers = host.get("context_tiers") or []
-    if not any(int(row.get("tokens") or 0) == 4096 and float(row.get("min_ram_gib") or 0) <= 6 for row in tiers if isinstance(row, dict)):
-        errors.append({"code": "starter_4096_context_tier_missing"})
+    if int(host.get("minimum_detected_ram_gib") or 0) < 8:
+        errors.append({"code": "generic_full_install_must_not_target_6gb"})
+    if low.get("starter_profile") != "starter_6gb" or int(low.get("primary_target_ram_gib") or 0) != 6:
+        errors.append({"code": "starter_low_ram_policy_missing"})
+    if int(low.get("minimum_detected_ram_gib") or 0) > 5 or int(low.get("context_tokens") or 0) != 4096:
+        errors.append({"code": "starter_low_ram_envelope_invalid"})
+    if str(low.get("llama_memory_limit") or "") != "3200m":
+        errors.append({"code": "starter_llama_memory_policy_invalid"})
 
     for token in (
         'llama_model_name: str = "Qwen3-4B-Q4_K_M"',
@@ -71,9 +76,12 @@ def audit() -> dict:
     for token in ("monthly_request_units", "daily_request_units", "request_unit_weights"):
         if token not in plans or token not in quota:
             errors.append({"code": "starter_request_quota_missing", "token": token})
+    for token in ("UsageEvent.success.is_(True)", "request_mode = _inferred_channel(reserve_seconds)"):
+        if token not in quota:
+            errors.append({"code": "starter_request_unit_fairness_missing", "token": token})
     if "starter_4k = deep_limit <= 4096" not in router or "max_output_tokens=1024 if starter_4k" not in router:
         errors.append({"code": "starter_output_budget_missing"})
-    if "return 1" not in verification:
+    if "return 1" not in verification or "repair_critic=False" not in verification:
         errors.append({"code": "starter_verification_must_be_single_extra_pass"})
 
     for token in (
@@ -87,9 +95,17 @@ def audit() -> dict:
     ):
         if token not in installer:
             errors.append({"code": "starter_installer_contract_missing", "token": token})
+    for token in (
+        'starter = str(settings.server_optimization_profile).lower() == "starter_6gb"',
+        'document_backend in {"disabled", "remote"}',
+        'sandbox_backend in {"disabled", "remote"}',
+        'starter_inference_concurrency_must_be_one',
+    ):
+        if token not in runtime_audit:
+            errors.append({"code": "starter_runtime_audit_contract_missing", "token": token})
 
     return {
-        "format": "x1-starter-6gb-audit-v1",
+        "format": "x1-starter-6gb-audit-v2",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "target": {"cpu_cores": 4, "ram_gib": 6, "disk_gib": 80},
@@ -98,6 +114,7 @@ def audit() -> dict:
         "bounded_queue": True,
         "request_unit_billing": True,
         "heavy_workers_disabled_by_starter_installer": True,
+        "generic_full_install_min_ram_gib": int(host.get("minimum_detected_ram_gib") or 0),
     }
 
 
