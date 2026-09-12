@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit, urlunsplit
 
@@ -13,7 +14,7 @@ from app.schemas.chat import ChatMessage
 from app.services.business_intelligence import build_business_candidates, recommendation_summary
 from app.services.discovery import DiscoveryError, SearchHit, cached_provider_search, canonical_result_url, dedupe_hits, enrich_hit
 from app.services.freshness import classify_freshness
-from app.services.research import ResearchFetchError, UnsafeURL, source_sha256
+from app.services.research import source_sha256
 from app.services.research_planner import plan_research
 from app.services.safety import require_capability
 
@@ -52,6 +53,7 @@ _CITY_ALIASES = {
     "сочи": "Сочи", "уфе": "Уфа", "уфа": "Уфа", "перми": "Пермь", "пермь": "Пермь",
     "тюмени": "Тюмень", "тюмень": "Тюмень", "красноярске": "Красноярск", "красноярск": "Красноярск",
 }
+_TASK_SOLVER_CONTEXT: ContextVar[tuple[ChatMessage, ...]] = ContextVar("x1_task_solver_context", default=())
 
 
 @dataclass(frozen=True)
@@ -83,7 +85,7 @@ class TaskExecution:
     warnings: list[str] = field(default_factory=list)
 
     def public_metadata(self) -> dict:
-        # Intentionally expose method/results, never hidden reasoning or source content.
+        # Method/results are visible; hidden model reasoning and source bodies are not.
         return {
             "kind": self.plan.kind,
             "web_used": self.plan.requires_web,
@@ -95,6 +97,18 @@ class TaskExecution:
             "independent_hosts": self.independent_hosts,
             "warnings": list(self.warnings[:5]),
         }
+
+
+def set_task_solver_context(messages: list[ChatMessage]) -> Token:
+    return _TASK_SOLVER_CONTEXT.set(tuple(messages))
+
+
+def reset_task_solver_context(token: Token) -> None:
+    _TASK_SOLVER_CONTEXT.reset(token)
+
+
+def current_task_solver_context() -> list[ChatMessage]:
+    return list(_TASK_SOLVER_CONTEXT.get())
 
 
 def _clean_url(raw: str) -> str:
@@ -218,14 +232,16 @@ def diversify_hits(hits: list[SearchHit], *, kind: str, limit: int) -> list[dict
     per_host: dict[str, int] = {}
 
     if kind == "local_recommendation":
-        # Seed different evidence classes first so a search engine's top results
-        # cannot turn into the whole recommendation set.
+        # Seed different evidence classes first; top search rank is never the full recommendation set.
         for wanted in ("official_candidate", "maps_catalog", "reviews", "web"):
             row = next((r for r in enriched if r.get("source_kind") == wanted and canonical_result_url(str(r.get("url") or "")) not in seen_urls), None)
             if row is None:
                 continue
-            url = canonical_result_url(str(row["url"])); host = _host(url)
-            result.append(row); seen_urls.add(url); per_host[host] = per_host.get(host, 0) + 1
+            url = canonical_result_url(str(row["url"]))
+            host = _host(url)
+            result.append(row)
+            seen_urls.add(url)
+            per_host[host] = per_host.get(host, 0) + 1
             if len(result) >= limit:
                 return result
 
@@ -237,7 +253,9 @@ def diversify_hits(hits: list[SearchHit], *, kind: str, limit: int) -> list[dict
         max_host = 2 if kind == "website_audit" else 1
         if host and per_host.get(host, 0) >= max_host:
             continue
-        result.append(row); seen_urls.add(url); per_host[host] = per_host.get(host, 0) + 1
+        result.append(row)
+        seen_urls.add(url)
+        per_host[host] = per_host.get(host, 0) + 1
         if len(result) >= limit:
             break
     return result
@@ -356,8 +374,7 @@ async def execute_task_solver(
             )
             gathered.extend(rows)
         except DiscoveryError:
-            execution.warnings.append(f"Поиск временно не дал результатов для одного из запросов")
-            db.rollback()
+            execution.warnings.append("Поиск временно не дал результатов для одного из запросов")
 
     gathered = dedupe_hits(gathered, limit=int(getattr(settings, "research_max_discovery_results", 20)))
     execution.discovered_hits = len(gathered)
@@ -385,9 +402,10 @@ async def execute_task_solver(
             continue
         _url, page = result
         try:
-            source_rows.append(_store_page(db, user_id=user.id, project_id=project_id, page=page))
+            with db.begin_nested():
+                source = _store_page(db, user_id=user.id, project_id=project_id, page=page)
+            source_rows.append(source)
         except Exception:
-            db.rollback()
             failed += 1
     if source_rows:
         db.commit()
