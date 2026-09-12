@@ -56,6 +56,22 @@ def test_admin_controls_and_public_button_are_toggle_driven():
     assert "/v1/auth/yandex/start" in public
 
 
+def test_email_verification_registration_is_sessionless_and_guarded_server_side():
+    route = (ROOT / "app" / "api" / "routes" / "auth.py").read_text("utf-8")
+    service = (ROOT / "app" / "services" / "auth.py").read_text("utf-8")
+    schema = (ROOT / "app" / "schemas" / "auth.py").read_text("utf-8")
+    assert "access_token: str | None = None" in schema
+    assert "AuthResponse(access_token=None, user_id=user.id, verification_required=True" in route
+    assert "email_verification_required_for_user(db, user)" in service
+    assert '"code": "email_verification_required"' in service
+
+
+def test_admin_control_center_reuses_authenticated_session():
+    admin_ui = (ROOT / "app" / "admin_ui.py").read_text("utf-8")
+    assert "sessionStorage.getItem('x1AdminToken')||sessionStorage.getItem('x1_access_token')" in admin_ui
+    assert "Yandex ID" in admin_ui
+
+
 def test_yandex_migration_is_linear_after_launch_operations():
     migration = (ROOT / "alembic" / "versions" / "f88b2e7a6c31_add_yandex_oauth.py").read_text("utf-8")
     assert 'revision = "f88b2e7a6c31"' in migration
