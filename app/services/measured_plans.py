@@ -25,11 +25,12 @@ def current_channel_override() -> str | None:
 
 
 def request_unit_weights(settings) -> dict[str, int]:
+    # Transport-neutral pricing: API and UI cost the same for the same selected
+    # Fast/Work/Deep route. API has a separate rate limit and resource share.
     return {
         "fast": max(1, int(settings.request_unit_weight_fast)),
         "work": max(1, int(settings.request_unit_weight_work)),
         "deep": max(1, int(settings.request_unit_weight_deep)),
-        "api": max(1, int(settings.request_unit_weight_api)),
     }
 
 
