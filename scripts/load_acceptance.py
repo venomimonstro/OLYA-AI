@@ -10,6 +10,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -55,6 +56,18 @@ def write_report(path: Path, payload: dict) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", "utf-8")
     os.replace(tmp, path)
+
+
+def _validate_target_transport(base_url: str) -> None:
+    try:
+        parsed = urlsplit(base_url)
+    except ValueError as exc:
+        raise RuntimeError("Load acceptance target URL is invalid") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise RuntimeError("Load acceptance target URL is invalid")
+    local_hosts = {"127.0.0.1", "localhost", "::1"}
+    if parsed.scheme != "https" and parsed.hostname.lower() not in local_hosts:
+        raise RuntimeError("Load acceptance requires HTTPS for non-loopback targets before sending Bearer tokens")
 
 
 def _chat_payload(user_index: int, round_index: int) -> dict:
@@ -118,6 +131,7 @@ async def _one(client: httpx.AsyncClient, base_url: str, token: str, user_index:
 
 
 async def run(base_url: str, tokens: list[str], *, rounds: int, timeout: float, p95_limit_ms: int, max_error_rate: float) -> dict:
+    _validate_target_transport(base_url)
     if len(tokens) < 10:
         raise RuntimeError("Real load acceptance requires at least 10 authenticated users")
     if len(set(tokens)) != len(tokens):
@@ -165,7 +179,7 @@ async def run(base_url: str, tokens: list[str], *, rounds: int, timeout: float, 
         "git_head": current_git_head(),
         "source_fingerprint": candidate_fingerprint,
         "target_build_fingerprint": runtime_fingerprint,
-        "target": base_url,
+        "target": base_url.rstrip("/"),
         "virtual_users": len(tokens),
         "unique_authenticated_users": len(unique_user_ids),
         "rounds": rounds,
@@ -207,6 +221,7 @@ def main() -> int:
             "format": "x1-real-load-acceptance-v2",
             "git_head": current_git_head(),
             "source_fingerprint": candidate.get("source_fingerprint"),
+            "target": args.base_url.rstrip("/"),
             "passed": False,
             "error": str(exc),
         }
