@@ -1,3 +1,6 @@
+from pathlib import Path
+import json
+
 from fastapi import APIRouter, Depends, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -7,11 +10,32 @@ from app.db import get_db
 from app.services.system_observability import CRITICAL, collect_system_health
 
 router = APIRouter(tags=["health"])
+_BUILD_PROVENANCE = Path("/app/BUILD_PROVENANCE.json")
+
+
+def _runtime_provenance() -> dict:
+    try:
+        payload = json.loads(_BUILD_PROVENANCE.read_text("utf-8"))
+    except Exception:
+        return {"format": "x1-build-provenance-v1", "source_fingerprint": "", "file_count": 0}
+    fingerprint = str(payload.get("source_fingerprint") or "").lower()
+    valid = len(fingerprint) == 64 and all(char in "0123456789abcdef" for char in fingerprint)
+    return {
+        "format": str(payload.get("format") or ""),
+        "source_fingerprint": fingerprint if valid else "",
+        "file_count": int(payload.get("file_count") or 0),
+    }
 
 
 @router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/version")
+async def version() -> dict:
+    """Public, secret-free build identity used by deployment acceptance."""
+    return _runtime_provenance()
 
 
 @router.get("/ready")
