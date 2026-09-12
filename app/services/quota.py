@@ -90,9 +90,12 @@ def ensure_compute_available(db: Session, user: User, settings: Settings, *, res
     used = compute_seconds_used(db, user.id)
     if used + reserve_seconds > quota.monthly_compute_seconds_limit:
         raise QuotaExceededError("Monthly local compute budget exhausted")
+
+    scheduler_channel = channel or _inferred_channel(reserve_seconds)
     try:
         from app.services.commerce import measured_user_resources, price_resource_ms
         from app.services.measured_plans import current_channel_override, ensure_channel_budget, plan_policy
+        scheduler_channel = channel or current_channel_override() or scheduler_channel
         policy = plan_policy(db, settings, quota.plan)
         if policy is not None:
             measured = measured_user_resources(db, user.id, settings)
@@ -100,9 +103,23 @@ def ensure_compute_available(db: Session, user: User, settings: Settings, *, res
             total_budget = max(0, int(policy.get("resource_budget_microunits") or 0))
             if total_budget and measured["total_cost_microunits"] + reserve_cost > total_budget:
                 raise QuotaExceededError("Monthly measured resource budget exhausted")
-            fairness_channel = channel or current_channel_override() or _inferred_channel(reserve_seconds)
-            try: ensure_channel_budget(db, user, settings, fairness_channel, reserve_cost)
+            try: ensure_channel_budget(db, user, settings, scheduler_channel, reserve_cost)
             except RuntimeError as exc: raise QuotaExceededError(str(exc)) from exc
+    except ImportError:
+        pass
+
+    # The request has passed quota/resource checks. Propagate the same canonical
+    # plan/user/channel into the scarce inference scheduler. This does not grant
+    # capacity; ResourceGovernor still enforces its own bounded queue/concurrency.
+    try:
+        from app.services.resource_governor import set_inference_scheduler_context
+        priority = scheduler_channel if scheduler_channel in {"fast", "work", "deep", "api", "background"} else _inferred_channel(reserve_seconds)
+        set_inference_scheduler_context(
+            priority_class=priority,
+            plan=quota.plan,
+            principal=user.id,
+            channel=scheduler_channel,
+        )
     except ImportError:
         pass
     return quota
