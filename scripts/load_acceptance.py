@@ -6,10 +6,14 @@ import asyncio
 import json
 import os
 import statistics
+import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,22 @@ def _percentile(values: list[int], p: float) -> int:
     rows = sorted(values)
     index = max(0, min(len(rows) - 1, int((len(rows) - 1) * p)))
     return int(rows[index])
+
+
+def current_git_head() -> str:
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5, shell=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    value = result.stdout.strip().lower()
+    return value if result.returncode == 0 and len(value) == 40 and all(char in "0123456789abcdef" for char in value) else ""
+
+
+def write_report(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", "utf-8")
+    os.replace(tmp, path)
 
 
 async def _one(client: httpx.AsyncClient, base_url: str, token: str, user_index: int, round_index: int, timeout: float) -> Sample:
@@ -81,6 +101,7 @@ async def run(base_url: str, tokens: list[str], *, rounds: int, timeout: float, 
     }
     return {
         "format": "x1-real-load-acceptance-v1",
+        "git_head": current_git_head(),
         "target": base_url,
         "virtual_users": len(tokens),
         "rounds": rounds,
@@ -111,15 +132,19 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--p95-limit-ms", type=int, default=120_000)
     parser.add_argument("--max-error-rate", type=float, default=0.05)
+    parser.add_argument("--report", default="backups/load-acceptance-latest.json")
     args = parser.parse_args()
     tokens = [value.strip() for value in os.environ.get("X1_LOAD_TOKENS", "").split(",") if value.strip()]
     try:
         result = asyncio.run(run(args.base_url, tokens, rounds=max(1, min(args.rounds, 20)), timeout=max(5.0, args.timeout), p95_limit_ms=max(1000, args.p95_limit_ms), max_error_rate=max(0.0, min(args.max_error_rate, .5))))
     except RuntimeError as exc:
-        print(json.dumps({"format": "x1-real-load-acceptance-v1", "passed": False, "error": str(exc)}, ensure_ascii=False, indent=2))
-        return 2
+        result = {"format": "x1-real-load-acceptance-v1", "git_head": current_git_head(), "passed": False, "error": str(exc)}
+    path = Path(args.report)
+    if not path.is_absolute():
+        path = ROOT / path
+    write_report(path, result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if result["passed"] else 2
+    return 0 if result.get("passed") else 2
 
 
 if __name__ == "__main__":
