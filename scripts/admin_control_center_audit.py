@@ -45,7 +45,8 @@ def audit() -> dict:
     forbidden_ui_tokens = [
         "'unsafe-inline'",
         'localStorage',
-        'onclick=',
+        ' onclick=',
+        ' style=',
         '/v1/admin/users?limit=',
         "method:'PATCH'",
         "method:'DELETE'",
