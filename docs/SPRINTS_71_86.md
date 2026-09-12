@@ -1,6 +1,6 @@
 # Sprints 71–86 — remaining MVP plan
 
-После Sprint 82 остаётся 4 спринта до production acceptance. Sprint80 target load run остаётся обязательным внешним gate.
+После Sprint 83 остаётся 3 спринта до production acceptance. Sprint80 target load run остаётся обязательным внешним gate.
 
 ## Sprint 71 — DONE — Admin Control Center
 ## Sprint 72 — DONE — Admin User Operations
@@ -14,9 +14,7 @@
 ## Sprint 80 — HARNESS DONE / TARGET RUN REQUIRED — 10-User Real Load Acceptance
 ## Sprint 81 — DONE — Security MVP Pen-Test Simulation
 ## Sprint 82 — DONE — Crash / Recovery / Data Integrity
-
-## Sprint 83 — Architecture Cleanup
-Удаление временных compatibility layers, dead code и дублирующихся путей; подтверждение одного владельца для каждого доменного процесса.
+## Sprint 83 — DONE — Architecture Cleanup
 
 ## Sprint 84 — Business Logic Contract
 Фиксация инвариантов тарифов, billing, quota, organizations, API, projects, tasks, agents и release policy как executable contract tests.
