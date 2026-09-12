@@ -10,7 +10,11 @@ from app.services.discovery import canonical_result_url
 
 _GENERIC = {
     "официальный", "сайт", "отзывы", "отзыв", "пациентов", "пациента", "пациент",
-    "цены", "цена", "рейтинг", "стоматология", "клиника", "центр", "самара",
+    "цены", "цена", "рейтинг", "стоматология", "стоматологическая", "клиника", "центр",
+    "яндекс", "карты", "2гис", "про", "докторов", "prodoctorov", "лучшие", "лучший", "лучшая",
+    "москва", "москве", "москвы", "самара", "самаре", "казань", "казани", "уфа", "уфе",
+    "пермь", "перми", "тюмень", "тюмени", "сочи", "екатеринбург", "екатеринбурге",
+    "новосибирск", "новосибирске", "красноярск", "красноярске", "петербург", "петербурге", "спб",
 }
 _RATING_RE = re.compile(r"(?<!\d)([1-4][\.,]\d|5(?:[\.,]0)?)(?:\s*(?:из|/|из\s+)?\s*5)?(?!\d)", re.I)
 _REVIEW_RE = re.compile(r"(?<!\d)(\d{1,7})\s+(?:отзыв(?:а|ов)?|оцен(?:ка|ки|ок)|reviews?)\b", re.I)
@@ -122,7 +126,6 @@ def build_business_candidates(rows: list[dict]) -> list[BusinessCandidate]:
             comparison_score = None
             comparison_state = "insufficient_data"
         else:
-            # 0..100 quality signal. Rating contributes 70%, evidence confidence 30%.
             comparison_score = round(((public_rating - 1.0) / 4.0) * 70.0 + evidence * 30.0, 2)
             comparison_state = "comparable" if rating_sources >= 2 and evidence >= 0.60 else "preliminary"
 
