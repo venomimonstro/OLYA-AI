@@ -47,25 +47,43 @@ class _AttemptLimiter:
 _limiter = _AttemptLimiter()
 
 
-def _valid_ip(value: str) -> str | None:
-    candidate = value.strip()
+def _ip(value: str):
     try:
-        return str(ipaddress.ip_address(candidate))
+        return ipaddress.ip_address(value.strip())
     except ValueError:
         return None
 
 
+def _trusted_proxy(address) -> bool:
+    # X1's Compose publishes the app only on the host loopback address. Traffic
+    # reaching it from RFC1918/loopback space is therefore the local reverse
+    # proxy / Docker bridge, not an arbitrary Internet client. Global auth
+    # limits remain active even if an internal component is compromised.
+    return bool(address and (address.is_loopback or address.is_private))
+
+
 def _client_ip(request: Request) -> str:
     peer_raw = request.client.host if request.client else "unknown"
-    peer = _valid_ip(peer_raw) or peer_raw[:128]
-    if peer in {"127.0.0.1", "::1"}:
-        forwarded = request.headers.get("x-forwarded-for", "")
-        if forwarded:
-            for raw in reversed(forwarded.split(",")):
-                candidate = _valid_ip(raw)
-                if candidate:
-                    return candidate
-    return peer
+    peer = _ip(peer_raw)
+    if peer is None:
+        return peer_raw[:128]
+    if not _trusted_proxy(peer):
+        return str(peer)
+
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if not forwarded:
+        return str(peer)
+    chain = [_ip(raw) for raw in forwarded.split(",")]
+    chain = [address for address in chain if address is not None]
+    if not chain:
+        return str(peer)
+    # Walk from the proxy side toward the client. Trusted hops are skipped; the
+    # first untrusted address is the effective client. This prevents a client
+    # from winning by prepending an arbitrary X-Forwarded-For value.
+    for address in reversed(chain):
+        if not _trusted_proxy(address):
+            return str(address)
+    return str(chain[0])
 
 
 def _reject_auth_load() -> None:
@@ -79,10 +97,6 @@ def _reject_auth_load() -> None:
 def enforce_auth_rate_limit(request: Request, *, email: str, action: str, environment: str) -> None:
     if environment.lower() not in {"production", "prod", "stable"}:
         return
-    # Global + IP breakers always protect scrypt/OAuth entry points. The email
-    # bucket is intentionally optional because OAuth starts do not yet have an
-    # authenticated email; putting all OAuth traffic into one fake email bucket
-    # would incorrectly throttle unrelated users together.
     global_limit = 120 if action == "register" else 300
     if not _limiter.consume(f"auth:{action}:global", limit=global_limit):
         _reject_auth_load()
