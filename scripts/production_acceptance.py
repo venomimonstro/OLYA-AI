@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def current_git_head() -> str:
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5, shell=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    value = result.stdout.strip().lower()
+    return value if result.returncode == 0 and len(value) == 40 and all(c in "0123456789abcdef" for c in value) else ""
+
+
+def command(name: str, argv: list[str], timeout: int = 30) -> dict:
+    try:
+        result = subprocess.run(argv, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, shell=False)
+        return {
+            "name": name,
+            "status": "passed" if result.returncode == 0 else "failed",
+            "exit_code": result.returncode,
+            "stdout": result.stdout[-4000:],
+            "stderr": result.stderr[-4000:],
+        }
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"name": name, "status": "failed", "error": type(exc).__name__}
+
+
+def http_json(name: str, url: str, token: str = "", timeout: float = 30.0) -> tuple[dict, dict | None]:
+    headers = {"Accept": "application/json", "User-Agent": "X1-Production-Acceptance/1"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    try:
+        request = Request(url, headers=headers)
+        with urlopen(request, timeout=timeout) as response:
+            body = response.read(2_000_000)
+            status_code = int(response.status)
+        payload = json.loads(body.decode("utf-8"))
+        return {"name": name, "status": "passed" if status_code == 200 else "failed", "http_status": status_code}, payload
+    except HTTPError as exc:
+        return {"name": name, "status": "failed", "http_status": exc.code}, None
+    except (URLError, OSError, ValueError, json.JSONDecodeError) as exc:
+        return {"name": name, "status": "failed", "error": type(exc).__name__}, None
+
+
+def evidence(name: str, relative: str, *, expected_format: str, head: str, pass_field: str = "status") -> dict:
+    path = ROOT / relative
+    if not path.is_file():
+        return {"name": name, "status": "failed", "reason": "missing", "path": relative}
+    try:
+        payload = json.loads(path.read_text("utf-8"))
+    except Exception as exc:
+        return {"name": name, "status": "failed", "reason": type(exc).__name__, "path": relative}
+    if payload.get("format") != expected_format:
+        return {"name": name, "status": "failed", "reason": "format_mismatch", "format": payload.get("format")}
+    passed = payload.get(pass_field) is True if pass_field == "passed" else payload.get(pass_field) == "passed"
+    report_head = str(payload.get("git_head") or "").lower()
+    same_head = bool(head and report_head == head)
+    return {
+        "name": name,
+        "status": "passed" if passed and same_head else "failed",
+        "payload_passed": passed,
+        "expected_head": head,
+        "report_head": report_head,
+        "same_head": same_head,
+        "path": relative,
+    }
+
+
+def generic_evidence(name: str, relative: str) -> dict:
+    path = ROOT / relative
+    if not path.is_file():
+        return {"name": name, "status": "failed", "reason": "missing", "path": relative}
+    try:
+        payload = json.loads(path.read_text("utf-8"))
+    except Exception as exc:
+        return {"name": name, "status": "failed", "reason": type(exc).__name__, "path": relative}
+    status = payload.get("status")
+    if status is None and "passed" in payload:
+        status = "passed" if payload.get("passed") is True else "failed"
+    return {"name": name, "status": "passed" if status == "passed" else "failed", "payload_status": status, "path": relative}
+
+
+def internal_http_probe(name: str, url: str) -> dict:
+    code = (
+        "import urllib.request; "
+        f"r=urllib.request.urlopen({url!r},timeout=10); "
+        "data=r.read(200000); "
+        "assert r.status==200 and data"
+    )
+    return command(name, ["docker", "compose", "exec", "-T", "app", "python", "-c", code], timeout=30)
+
+
+def write_report(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", "utf-8")
+    os.replace(tmp, path)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Final X1 production acceptance for the deployed candidate revision")
+    parser.add_argument("--base-url", default=os.environ.get("X1_PRODUCTION_BASE_URL", "http://127.0.0.1:8000"))
+    parser.add_argument("--admin-token-env", default="X1_PRODUCTION_ADMIN_TOKEN", help="environment variable containing an admin Bearer token; token is never written to reports")
+    parser.add_argument("--require-images", action="store_true", help="also require image-worker and image generation/editing capabilities")
+    parser.add_argument("--report", default="backups/production-acceptance-latest.json")
+    args = parser.parse_args()
+
+    head = current_git_head()
+    token = os.environ.get(args.admin_token_env, "").strip()
+    checks: list[dict] = []
+    if not head:
+        checks.append({"name": "current_git_head", "status": "failed", "reason": "git_head_unavailable"})
+    else:
+        checks.append({"name": "current_git_head", "status": "passed", "git_head": head})
+    checks.append({"name": "admin_token_supplied", "status": "passed" if token else "failed"})
+
+    # Candidate/evidence must be generated from exactly this immutable source revision.
+    checks.append(evidence("release_candidate", "backups/rc-release-candidate-latest.json", expected_format="x1-release-candidate-v3", head=head))
+    checks.append(evidence("target_load", "backups/load-acceptance-latest.json", expected_format="x1-real-load-acceptance-v1", head=head, pass_field="passed"))
+    checks.append(evidence("release_gate", "backups/release-gate-latest.json", expected_format="x1-release-gate-v4", head=head))
+    checks.append(generic_evidence("restore_drill", "backups/restore-drill-latest.json"))
+    checks.append(generic_evidence("runtime_chaos", "backups/rc-chaos-runtime-latest.json"))
+
+    running = command("docker_services", ["docker", "compose", "--profile", "inference", "--profile", "images", "ps", "--status", "running", "--services"], timeout=30)
+    if running["status"] == "passed":
+        services = {line.strip() for line in running.get("stdout", "").splitlines() if line.strip()}
+        required = {"db", "searxng", "app", "sandbox-worker", "document-worker", "llama"}
+        if args.require_images:
+            required.add("image-worker")
+        missing = sorted(required - services)
+        running["services"] = sorted(services)
+        running["required_services"] = sorted(required)
+        running["missing_services"] = missing
+        if missing:
+            running["status"] = "failed"
+    checks.append(running)
+
+    checks.append(command("postgresql_ready", ["docker", "compose", "exec", "-T", "db", "pg_isready", "-U", "x1", "-d", "x1"], timeout=30))
+    checks.append(internal_http_probe("qwen_llama_health", "http://llama:8080/health"))
+    checks.append(internal_http_probe("searxng_health", "http://searxng:8080/search?q=x1-production-acceptance&format=json"))
+    checks.append(internal_http_probe("sandbox_worker_health", "http://sandbox-worker:8090/health"))
+    checks.append(internal_http_probe("document_worker_health", "http://document-worker:8091/health"))
+
+    ready_check, ready = http_json("public_ready", args.base_url.rstrip("/") + "/ready", timeout=30)
+    if ready_check["status"] == "passed" and str((ready or {}).get("status") or "") != "stable":
+        ready_check["status"] = "failed"
+        ready_check["ready_status"] = (ready or {}).get("status")
+    checks.append(ready_check)
+
+    if token:
+        release_check, release = http_json("admin_release_readiness", args.base_url.rstrip("/") + "/v1/admin/reliability/release-readiness?refresh=true", token=token, timeout=180)
+        if release_check["status"] == "passed":
+            release_check["ready_for_public_release"] = bool((release or {}).get("ready_for_public_release"))
+            release_check["blocker_count"] = len((release or {}).get("blockers") or [])
+            if not release_check["ready_for_public_release"]:
+                release_check["status"] = "failed"
+        checks.append(release_check)
+
+        contract_check, contract = http_json("business_logic_contract", args.base_url.rstrip("/") + "/v1/admin/reliability/business-contract", token=token, timeout=60)
+        if contract_check["status"] == "passed" and (contract or {}).get("status") != "passed":
+            contract_check["status"] = "failed"
+            contract_check["blocker_count"] = len((contract or {}).get("blockers") or [])
+        checks.append(contract_check)
+
+        caps_check, caps = http_json("live_capability_registry", args.base_url.rstrip("/") + "/v1/admin/capabilities?live=true", token=token, timeout=60)
+        required_caps = {"chat", "files", "documents", "research.search", "sandbox.execute", "development", "api", "billing"}
+        if args.require_images:
+            required_caps |= {"images.generate", "images.edit"}
+        if caps_check["status"] == "passed":
+            by_id = {row.get("id"): row for row in (caps or {}).get("capabilities") or []}
+            unavailable = sorted(cap for cap in required_caps if not bool((by_id.get(cap) or {}).get("available")))
+            caps_check["required_capabilities"] = sorted(required_caps)
+            caps_check["unavailable_required"] = unavailable
+            if unavailable:
+                caps_check["status"] = "failed"
+        checks.append(caps_check)
+
+    failed = [row["name"] for row in checks if row.get("status") != "passed"]
+    payload = {
+        "format": "x1-production-acceptance-v1",
+        "status": "passed" if not failed else "failed",
+        "accepted_for_launch": not failed,
+        "git_head": head,
+        "target": args.base_url,
+        "require_images": bool(args.require_images),
+        "checked_at": utcnow(),
+        "failed_checks": failed,
+        "checks": checks,
+    }
+    path = Path(args.report)
+    if not path.is_absolute():
+        path = ROOT / path
+    write_report(path, payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload["accepted_for_launch"] else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
