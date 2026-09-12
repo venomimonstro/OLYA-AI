@@ -8,6 +8,8 @@ from pathlib import Path
 
 import httpx
 
+from app.services.deadline import DeadlineExceededError, checkpoint, clamp_timeout_seconds
+
 
 class SandboxError(RuntimeError):
     pass
@@ -38,7 +40,11 @@ def _remote_headers() -> dict[str, str]:
 
 def _remote_request(path: str, *, payload: dict | None = None, method: str = "POST", timeout: float = 15.0) -> dict:
     try:
-        with httpx.Client(timeout=timeout, trust_env=False) as client:
+        effective_timeout = clamp_timeout_seconds(float(timeout), stage=f"sandbox remote {path}", minimum=.1)
+    except DeadlineExceededError as exc:
+        raise SandboxError("Request deadline exceeded before sandbox operation") from exc
+    try:
+        with httpx.Client(timeout=effective_timeout, trust_env=False) as client:
             response = client.request(method, f"{_remote_url()}{path}", headers=_remote_headers(), json=payload)
             response.raise_for_status()
             return response.json()
@@ -87,8 +93,9 @@ def _image_exists(info: SandboxBackendInfo, image: str) -> bool:
         return False
     argv = [info.executable, "image", "inspect", image] if info.backend == "docker" else [info.executable, "image", "exists", image]
     try:
-        return subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8, shell=False).returncode == 0
-    except (OSError, subprocess.SubprocessError):
+        timeout = clamp_timeout_seconds(8.0, stage="sandbox image inspection", minimum=.1)
+        return subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout, shell=False).returncode == 0
+    except (DeadlineExceededError, OSError, subprocess.SubprocessError):
         return False
 
 
@@ -126,15 +133,19 @@ def _base_run_args(info: SandboxBackendInfo, *, image: str, workspace: Path, scr
 def run_in_container(*, preferred_backend: str, image: str, workspace: Path, scratch: Path, argv: list[str], timeout_seconds: int, cpu_limit: float, memory_mb: int, process_limit: int, network_policy: str, env: dict[str,str]|None=None, read_only_workspace: bool=False) -> dict:
     if not argv or any("\x00" in value for value in argv):
         raise SandboxError("Invalid sandbox command")
+    try:
+        effective_timeout=clamp_timeout_seconds(float(timeout_seconds),stage="sandbox command",minimum=.1)
+    except DeadlineExceededError as exc:
+        raise SandboxError("Request deadline exceeded before sandbox command") from exc
     if preferred_backend == "remote":
-        return _remote_request("/execute", payload={"image":image,"workspace_rel":_data_relative(workspace),"scratch_rel":_data_relative(scratch),"argv":argv,"timeout_seconds":max(1,int(timeout_seconds)),"cpu_limit":max(.1,float(cpu_limit)),"memory_mb":max(128,int(memory_mb)),"process_limit":max(16,int(process_limit)),"network_policy":network_policy,"env":env or {},"read_only_workspace":bool(read_only_workspace)}, timeout=max(15.0,float(timeout_seconds)+10))
+        return _remote_request("/execute", payload={"image":image,"workspace_rel":_data_relative(workspace),"scratch_rel":_data_relative(scratch),"argv":argv,"timeout_seconds":max(1,int(effective_timeout)),"cpu_limit":max(.1,float(cpu_limit)),"memory_mb":max(128,int(memory_mb)),"process_limit":max(16,int(process_limit)),"network_policy":network_policy,"env":env or {},"read_only_workspace":bool(read_only_workspace)}, timeout=max(.1,effective_timeout))
     info=detect_container_backend(preferred_backend); command=_base_run_args(info,image=image,workspace=workspace,scratch=scratch,cpu_limit=cpu_limit,memory_mb=memory_mb,process_limit=process_limit,network_policy=network_policy,read_only_workspace=read_only_workspace)
     for key,value in sorted((env or {}).items()):
         if not key.replace("_","").isalnum() or key.upper()!=key: raise SandboxError("Invalid sandbox environment variable name")
         command += ["--env",f"{key}={value}"]
     command += argv
     try:
-        completed=subprocess.run(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=max(1,int(timeout_seconds)),shell=False)
+        completed=subprocess.run(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=effective_timeout,shell=False)
         return {"argv":argv,"exit_code":completed.returncode,"stdout":completed.stdout[-30000:],"stderr":completed.stderr[-30000:],"timed_out":False,"sandbox_level":info.backend,"network_policy":network_policy,"effective_network_policy":"deny","read_only_workspace":bool(read_only_workspace)}
     except subprocess.TimeoutExpired as exc:
         return {"argv":argv,"exit_code":None,"stdout":(exc.stdout or "")[-30000:] if isinstance(exc.stdout,str) else "","stderr":(exc.stderr or "")[-30000:] if isinstance(exc.stderr,str) else "","timed_out":True,"sandbox_level":info.backend,"network_policy":network_policy,"effective_network_policy":"deny","read_only_workspace":bool(read_only_workspace)}
@@ -150,28 +161,38 @@ def sanitize_health_spec(spec: dict|None) -> dict:
 
 def start_detached_preview(*, preferred_backend: str, image: str, workspace: Path, scratch: Path, argv: list[str], name: str, cpu_limit: float, memory_mb: int, process_limit: int, network_policy: str) -> dict:
     if not argv: raise SandboxError("Preview command is empty")
+    try: checkpoint("sandbox preview start")
+    except DeadlineExceededError as exc: raise SandboxError("Request deadline exceeded before preview start") from exc
     if preferred_backend == "remote":
-        return _remote_request("/preview/start", payload={"image":image,"workspace_rel":_data_relative(workspace),"scratch_rel":_data_relative(scratch),"argv":argv,"name":name,"timeout_seconds":20,"cpu_limit":cpu_limit,"memory_mb":memory_mb,"process_limit":process_limit,"network_policy":network_policy,"env":{}}, timeout=30)
+        return _remote_request("/preview/start", payload={"image":image,"workspace_rel":_data_relative(workspace),"scratch_rel":_data_relative(scratch),"argv":argv,"name":name,"timeout_seconds":20,"cpu_limit":cpu_limit,"memory_mb":memory_mb,"process_limit":process_limit,"network_policy":network_policy,"env":{}}, timeout=20)
     info=detect_container_backend(preferred_backend); command=_base_run_args(info,image=image,workspace=workspace,scratch=scratch,cpu_limit=cpu_limit,memory_mb=memory_mb,process_limit=process_limit,network_policy=network_policy); command.insert(2,"-d"); command[3:3]=["--name",name]; command+=argv
-    completed=subprocess.run(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=20,shell=False)
+    try: timeout=clamp_timeout_seconds(20.0,stage="sandbox preview start",minimum=.1)
+    except DeadlineExceededError as exc: raise SandboxError("Request deadline exceeded before preview start") from exc
+    completed=subprocess.run(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=timeout,shell=False)
     if completed.returncode!=0: raise SandboxError((completed.stderr or "Failed to start preview container")[-4000:])
     return {"container_ref":completed.stdout.strip() or name,"backend":info.backend,"effective_network_policy":"deny"}
 
 
 def exec_in_container(*, preferred_backend: str, container_ref: str, argv: list[str], timeout_seconds: int) -> dict:
+    try: effective_timeout=clamp_timeout_seconds(float(timeout_seconds),stage="sandbox preview exec",minimum=.1)
+    except DeadlineExceededError as exc: raise SandboxError("Request deadline exceeded before preview command") from exc
     if preferred_backend == "remote":
-        return _remote_request("/preview/exec",payload={"container_ref":container_ref,"argv":argv,"timeout_seconds":max(1,int(timeout_seconds))},timeout=max(15.0,float(timeout_seconds)+10))
+        return _remote_request("/preview/exec",payload={"container_ref":container_ref,"argv":argv,"timeout_seconds":max(1,int(effective_timeout))},timeout=effective_timeout)
     info=detect_container_backend(preferred_backend)
     if not info.available or not info.executable: raise SandboxError("Container sandbox runtime is unavailable")
-    completed=subprocess.run([info.executable,"exec",container_ref,*argv],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=max(1,int(timeout_seconds)),shell=False)
+    completed=subprocess.run([info.executable,"exec",container_ref,*argv],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=effective_timeout,shell=False)
     return {"argv":argv,"exit_code":completed.returncode,"stdout":completed.stdout[-10000:],"stderr":completed.stderr[-10000:]}
 
 
 def stop_container(*, preferred_backend: str, container_ref: str) -> None:
     if not container_ref: return
     if preferred_backend == "remote":
-        try: _remote_request("/preview/stop",payload={"container_ref":container_ref},timeout=12)
-        except SandboxError: pass
+        # Cleanup is intentionally allowed after request deadline expiry.
+        try:
+            with httpx.Client(timeout=8.0,trust_env=False) as client:
+                response=client.post(f"{_remote_url()}/preview/stop",headers=_remote_headers(),json={"container_ref":container_ref})
+                response.raise_for_status()
+        except (httpx.HTTPError,ValueError,SandboxError): pass
         return
     info=detect_container_backend(preferred_backend)
     if not info.available or not info.executable: return
