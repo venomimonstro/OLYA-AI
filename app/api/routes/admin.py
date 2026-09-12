@@ -7,9 +7,11 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import AdminAuditLog, AnswerAudit, AuthSession, BackgroundJob, FrustrationEvent, OptimizationExperiment, PerformanceSnapshot, RiskEvent, SafetyCase, SearchProviderStat, SystemSetting, UsageEvent, User, UserQuota
 from app.services.admin import audit, require_admin
+from app.services.admin_user_controls import AdminUserControlError, control_is_active, get_control, put_control
 from app.services.auth import get_current_user
 from app.services.diagnostics import summary as frustration_summary
 from app.services.performance import build_snapshot, evaluate_candidate
+from app.services.quota import get_or_create_quota
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
 
@@ -86,7 +88,8 @@ def list_users(q: str = Query(default='', max_length=200), limit: int = Query(de
              'plan': quotas[u.id].plan if u.id in quotas else None} for u in rows]
 
 @router.patch('/users/{user_id}')
-def patch_user(user_id: str, payload: AdminUserPatch, admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+def patch_user(user_id: str, payload: AdminUserPatch, request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    """Backward-compatible adapter; canonical plan/quota state lives in AdminUserControl."""
     target = db.get(User, user_id)
     if target is None: raise HTTPException(status_code=404, detail='User not found')
     if target.id == admin.id and payload.is_active is False: raise HTTPException(status_code=409, detail='Administrator cannot deactivate own account here')
@@ -96,13 +99,33 @@ def patch_user(user_id: str, payload: AdminUserPatch, admin: User = Depends(requ
         if not payload.is_active:
             now=datetime.now(timezone.utc)
             for sess in db.scalars(select(AuthSession).where(AuthSession.user_id==target.id, AuthSession.revoked_at.is_(None))).all(): sess.revoked_at=now
-    quota=db.get(UserQuota,target.id)
-    if quota is None:
-        quota=UserQuota(user_id=target.id); db.add(quota)
-    for name in ('plan','monthly_compute_seconds_limit','max_concurrent_inference','max_concurrent_jobs'):
-        value=getattr(payload,name)
-        if value is not None: setattr(quota,name,value); changes[name]=value
-    audit(db, admin, 'user.update', 'user', target.id, changes); db.commit()
+    override_names=('plan','monthly_compute_seconds_limit','max_concurrent_inference','max_concurrent_jobs')
+    if any(getattr(payload,name) is not None for name in override_names):
+        existing=get_control(db,target.id,lock=True)
+        active_existing=existing if control_is_active(existing) else None
+        plan_override=payload.plan if payload.plan is not None else (active_existing.plan_override if active_existing else None)
+        monthly=payload.monthly_compute_seconds_limit if payload.monthly_compute_seconds_limit is not None else (active_existing.monthly_compute_seconds_limit if active_existing else None)
+        inference=payload.max_concurrent_inference if payload.max_concurrent_inference is not None else (active_existing.max_concurrent_inference if active_existing else None)
+        jobs=payload.max_concurrent_jobs if payload.max_concurrent_jobs is not None else (active_existing.max_concurrent_jobs if active_existing else None)
+        try:
+            put_control(
+                db,target,request.app.state.settings,
+                actor_user_id=admin.id,
+                expected_version=int(existing.version) if existing is not None else 0,
+                plan_override=plan_override,
+                monthly_compute_seconds_limit=monthly,
+                max_concurrent_inference=inference,
+                max_concurrent_jobs=jobs,
+                expires_at=None,
+                reason='Legacy admin PATCH compatibility',
+            )
+            get_or_create_quota(db,target,request.app.state.settings)
+        except AdminUserControlError as exc:
+            db.rollback(); raise HTTPException(status_code=422,detail=str(exc)) from exc
+        for name in override_names:
+            value=getattr(payload,name)
+            if value is not None: changes[name]=value
+    audit(db, admin, 'user.update', 'user', target.id, {**changes,'compatibility_adapter':True}); db.commit()
     return {'id':target.id,'changes':changes}
 
 @router.post('/users/{user_id}/revoke-sessions', status_code=204)
