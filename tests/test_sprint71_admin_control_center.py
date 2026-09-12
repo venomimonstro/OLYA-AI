@@ -24,7 +24,8 @@ def test_sprint71_admin_ui_is_nonce_protected_and_read_only() -> None:
     assert 'href="/admin/launch"' in body
     assert 'href="/admin/media"' in body
     assert 'localStorage' not in body
-    assert 'onclick=' not in body
+    assert ' onclick=' not in body
+    assert ' style=' not in body
     assert "method:'PATCH'" not in body
     assert "method:'DELETE'" not in body
 
