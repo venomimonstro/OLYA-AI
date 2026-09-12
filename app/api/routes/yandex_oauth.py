@@ -77,7 +77,9 @@ def auth_providers(request: Request, db: Session = Depends(get_db)) -> dict:
 
 @router.get("/yandex/start")
 def yandex_start(request: Request, db: Session = Depends(get_db)):
-    enforce_auth_rate_limit(request, email="yandex-oauth", action="yandex_oauth", environment=request.app.state.settings.env)
+    # OAuth has no email identity before the redirect. Use global + IP buckets;
+    # never put unrelated users into one fabricated shared email bucket.
+    enforce_auth_rate_limit(request, email="", action="yandex_oauth", environment=request.app.state.settings.env)
     try:
         authorization = create_authorization(db, request.app.state.settings)
     except YandexOAuthUnavailable as exc:
@@ -111,8 +113,6 @@ async def yandex_callback(
     cookie_state = request.cookies.get(COOKIE_NAME, "")
     try:
         verifier = consume_state(db, request.app.state.settings, state=state, cookie_state=cookie_state)
-        # Persist one-time state before upstream network I/O. A Yandex timeout
-        # cannot make an already-consumed callback replayable.
         db.commit()
         token_data = await exchange_code(db, request.app.state.settings, code=code, verifier=verifier)
         profile = await fetch_profile(db, request.app.state.settings, access_token=token_data["access_token"])
