@@ -11,7 +11,7 @@ from app.models import ImageGeneration, User
 from app.services.image_capabilities import image_edit_capabilities
 from app.services.image_references import total_user_image_storage_bytes
 from app.services.image_worker_state import image_worker_snapshot
-from app.services.quota import get_or_create_quota
+from app.services.quota import compute_seconds_used, get_or_create_quota
 from app.services.safety import active_restriction
 from app.services.sandbox import sandbox_capabilities
 
@@ -60,7 +60,9 @@ _LABELS = {
 }
 
 _MESSAGES = {
+    "account_inactive": "Аккаунт приостановлен администратором.",
     "safety_restriction_active": "Функция временно ограничена политикой доступа аккаунта.",
+    "compute_quota_exhausted": "Месячный лимит локальных вычислений исчерпан.",
     "inference_not_configured": "Локальный inference runtime не настроен.",
     "file_storage_not_configured": "Хранилище файлов не настроено.",
     "document_backend_not_configured": "Рендер документов не настроен.",
@@ -142,6 +144,22 @@ def _restriction_requirement(db: Session, user: User, capability_id: str) -> dic
     )
 
 
+def _compute_budget(db: Session, user: User, quota) -> tuple[dict, dict]:
+    limit = max(0, int(quota.monthly_compute_seconds_limit))
+    used = max(0, int(compute_seconds_used(db, user.id)))
+    remaining = max(0, limit - used)
+    requirement = _requirement(
+        "monthly_compute_budget",
+        remaining > 0,
+        "compute_quota_exhausted" if remaining <= 0 else None,
+    )
+    return requirement, {
+        "monthly_compute_seconds_limit": limit,
+        "compute_seconds_used": used,
+        "compute_seconds_remaining": remaining,
+    }
+
+
 def _configured_search_providers(settings) -> list[str]:
     raw = str(settings.search_providers or settings.search_provider or "")
     configured = []
@@ -217,7 +235,13 @@ def capability_decision(app, db: Session, user: User, capability_id: str, *, liv
         raise KeyError(capability_id)
     settings = app.state.settings
     quota = get_or_create_quota(db, user, settings)
-    requirements: list[dict] = []
+    requirements: list[dict] = [
+        _requirement(
+            "account_active",
+            bool(user.is_active),
+            "account_inactive" if not user.is_active else None,
+        )
+    ]
     restriction = _restriction_requirement(db, user, capability_id)
     if restriction is not None:
         requirements.append(restriction)
@@ -227,6 +251,9 @@ def capability_decision(app, db: Session, user: User, capability_id: str, *, liv
     if capability_id == "chat":
         configured = bool(str(settings.llama_base_url or "").strip())
         requirements.append(_requirement("inference_endpoint", configured, "inference_not_configured" if not configured else None))
+        compute_requirement, compute_details = _compute_budget(db, user, quota)
+        requirements.append(compute_requirement)
+        details.update(compute_details)
         initialized = getattr(app.state, "llama", None) is not None
         requirements.append(_requirement("inference_client_initialized", initialized, None, mandatory=False))
         details["model"] = str(settings.llama_model_name or "")
@@ -264,6 +291,31 @@ def capability_decision(app, db: Session, user: User, capability_id: str, *, liv
     elif capability_id in {"images.generate", "images.edit"}:
         worker = image_worker_snapshot(db, stale_seconds=90)
         worker_alive = bool(worker.get("alive"))
+
+        if capability_id == "images.generate":
+            configured = str(settings.image_backend or "disabled").strip().lower() != "disabled"
+            requirements.append(_requirement("image_backend", configured, "image_backend_not_configured" if not configured else None))
+            details["backend"] = str(settings.image_backend or "disabled")
+        else:
+            caps = image_edit_capabilities(settings, worker_alive=worker_alive)
+            backend_ready = str(caps.get("backend") or "disabled") != "disabled" and "unsupported_image_edit_backend" not in set(caps.get("reasons") or [])
+            model_ready = bool(caps.get("local_object_edit") or caps.get("identity_recompose"))
+            vision_ready = (not bool(settings.image_edit_require_vision_qa)) or bool(caps.get("vision_ready"))
+            requirements.extend(
+                [
+                    _requirement("image_edit_backend", backend_ready, "image_edit_backend_not_configured" if not backend_ready else None),
+                    _requirement("image_edit_model", model_ready, "image_edit_model_not_configured" if not model_ready else None),
+                    _requirement("vision_qa", vision_ready, "vision_qa_not_configured" if not vision_ready else None),
+                ]
+            )
+            details.update(
+                {
+                    "backend": str(caps.get("backend") or "disabled"),
+                    "local_object_edit": bool(caps.get("local_object_edit")),
+                    "identity_recompose": bool(caps.get("identity_recompose")),
+                }
+            )
+
         used = total_user_image_storage_bytes(db, user.id)
         storage_ok = used < int(settings.image_user_storage_quota_bytes)
         active = int(
@@ -292,31 +344,6 @@ def capability_decision(app, db: Session, user: User, capability_id: str, *, liv
                 "max_active_jobs": int(settings.image_max_active_per_user),
             }
         )
-        if capability_id == "images.generate":
-            configured = str(settings.image_backend or "disabled").strip().lower() != "disabled"
-            requirements.insert(
-                1 if restriction is not None else 0,
-                _requirement("image_backend", configured, "image_backend_not_configured" if not configured else None),
-            )
-            details["backend"] = str(settings.image_backend or "disabled")
-        else:
-            caps = image_edit_capabilities(settings, worker_alive=worker_alive)
-            backend_ready = str(caps.get("backend") or "disabled") != "disabled" and "unsupported_image_edit_backend" not in set(caps.get("reasons") or [])
-            model_ready = bool(caps.get("local_object_edit") or caps.get("identity_recompose"))
-            vision_ready = (not bool(settings.image_edit_require_vision_qa)) or bool(caps.get("vision_ready"))
-            insert_at = 1 if restriction is not None else 0
-            requirements[insert_at:insert_at] = [
-                _requirement("image_edit_backend", backend_ready, "image_edit_backend_not_configured" if not backend_ready else None),
-                _requirement("image_edit_model", model_ready, "image_edit_model_not_configured" if not model_ready else None),
-                _requirement("vision_qa", vision_ready, "vision_qa_not_configured" if not vision_ready else None),
-            ]
-            details.update(
-                {
-                    "backend": str(caps.get("backend") or "disabled"),
-                    "local_object_edit": bool(caps.get("local_object_edit")),
-                    "identity_recompose": bool(caps.get("identity_recompose")),
-                }
-            )
 
     elif capability_id == "sandbox.execute":
         requirements.extend(_sandbox_config_requirements(settings))
@@ -339,6 +366,9 @@ def capability_decision(app, db: Session, user: User, capability_id: str, *, liv
     elif capability_id == "development":
         inference_ready = bool(str(settings.llama_base_url or "").strip())
         requirements.append(_requirement("inference_endpoint", inference_ready, "inference_not_configured" if not inference_ready else None))
+        compute_requirement, compute_details = _compute_budget(db, user, quota)
+        requirements.append(compute_requirement)
+        details.update(compute_details)
         sandbox_rows = _sandbox_config_requirements(settings)
         sandbox_configured = all(row["satisfied"] is not False for row in sandbox_rows)
         requirements.append(_requirement("sandbox_for_execution", sandbox_configured, None, mandatory=False))
@@ -378,9 +408,9 @@ def registry_payload(app, db: Session, user: User, *, live: bool = False) -> dic
 
 def unavailable_http_status(decision: dict) -> int:
     reason = str(decision.get("reason") or "")
-    if reason == "safety_restriction_active":
+    if reason in {"account_inactive", "safety_restriction_active"}:
         return 403
-    if reason == "active_image_limit":
+    if reason in {"active_image_limit", "compute_quota_exhausted"}:
         return 429
     if reason == "storage_quota_reached":
         return 507
