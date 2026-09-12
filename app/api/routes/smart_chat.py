@@ -52,8 +52,14 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
         context_token = None
         max_queries = int(getattr(request.app.state.settings, "research_max_search_queries", 4))
         question = _planning_question(managed_payload, max_queries)
-        plan = plan_task(question, max_queries=max_queries) if question else None
-        should_solve = bool(plan and plan.requires_web and (not managed_payload.research_source_ids or plan.kind in _SPECIALIZED_TASKS))
+        force_web = managed_payload.web_mode == "always"
+        plan = plan_task(question, max_queries=max_queries, force_web=force_web) if question else None
+        should_solve = bool(
+            managed_payload.web_mode != "off"
+            and plan
+            and plan.requires_web
+            and (not managed_payload.research_source_ids or plan.kind in _SPECIALIZED_TASKS or force_web)
+        )
         if should_solve:
             job._publish_nowait("status", {"state": "researching", "message": "Собираю и сверяю источники…", "task_kind": plan.kind})
             execution = await execute_task_solver(
@@ -64,6 +70,7 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
                 fetcher=request.app.state.research,
                 question=question,
                 project_id=None,
+                force_web=force_web,
             )
             merged_sources = list(dict.fromkeys([*managed_payload.research_source_ids, *execution.source_ids]))[:10]
             if merged_sources != managed_payload.research_source_ids:
