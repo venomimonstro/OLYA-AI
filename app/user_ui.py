@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+import re
 
+from fastapi import APIRouter, Depends
+from fastapi.responses import HTMLResponse
+from sqlalchemy.orm import Session
+
+from app.db import get_db
+from app.services.owner_integrations import public_analytics_config
 from app.user_workspace_base import workspace as _base_workspace
 
 router = APIRouter(tags=["user-workspace"])
@@ -15,16 +20,38 @@ def _replace_once(document: str, old: str, new: str, label: str) -> str:
     return document.replace(old, new, 1)
 
 
+def _metrika_script(config: dict) -> str:
+    if not config.get("enabled"):
+        return ""
+    counter = int(config["counter_id"])
+    webvisor = "true" if config.get("webvisor") else "false"
+    return f'''
+window.x1MetrikaGoal=function(name,params){{try{{if(window.ym)window.ym({counter},'reachGoal',name,params||{{}})}}catch(_e){{}}}};
+window.x1MetrikaUser=function(id){{try{{if(window.ym&&id)window.ym({counter},'setUserID',String(id))}}catch(_e){{}}}};
+(function(m,e,t,r,i,k,a){{m[i]=m[i]||function(){{(m[i].a=m[i].a||[]).push(arguments)}};m[i].l=1*new Date();k=e.createElement(t),a=e.getElementsByTagName(t)[0],k.async=1,k.src=r,k.referrerPolicy='no-referrer';a.parentNode.insertBefore(k,a)}})(window,document,'script','https://mc.yandex.ru/metrika/tag.js','ym');
+ym({counter},'init',{{clickmap:true,trackLinks:true,accurateTrackBounce:true,webvisor:{webvisor}}});
+const x1uid=sessionStorage.getItem('x1_user_id');if(x1uid)window.x1MetrikaUser(x1uid);
+const x1send=document.getElementById('send'),x1prompt=document.getElementById('prompt');if(x1send&&x1prompt)x1send.addEventListener('click',()=>{{if(x1prompt.value.trim()&&!x1send.classList.contains('stop'))window.x1MetrikaGoal('first_prompt_sent')}});
+const x1messages=document.getElementById('messages');if(x1messages){{let seen=x1messages.querySelectorAll('.assistant').length;new MutationObserver(()=>{{const now=x1messages.querySelectorAll('.assistant').length;if(now>seen){{window.x1MetrikaGoal('answer_success');seen=now}}}}).observe(x1messages,{{childList:true,subtree:true}})}};
+'''
+
+
 @router.get("/app", response_class=HTMLResponse, include_in_schema=False)
-def workspace() -> HTMLResponse:
+def workspace(db: Session = Depends(get_db)) -> HTMLResponse:
     base = _base_workspace()
     document = base.body.decode("utf-8")
 
     document = _replace_once(
         document,
         "</style></head><body>",
-        ".account-section{margin-top:20px}.account-plan{display:flex;flex-direction:column;gap:8px}.account-plan.current{border-color:#566174}.plan-price{font-size:25px;font-weight:850;letter-spacing:-.03em}.plan-price small{font-size:12px;font-weight:500;color:var(--muted)}.account-progress{width:100%;height:10px;accent-color:var(--accent);margin:9px 0}.billing-list{display:grid;gap:7px;margin-top:10px}.billing-row{border-top:1px solid var(--line);padding-top:8px}.billing-row b{display:block}.billing-state{min-height:20px;color:var(--muted);margin-top:10px}</style></head><body>",
+        ".account-section{margin-top:20px}.account-plan{display:flex;flex-direction:column;gap:8px}.account-plan.current{border-color:#566174}.plan-price{font-size:25px;font-weight:850;letter-spacing:-.03em}.plan-price small{font-size:12px;font-weight:500;color:var(--muted)}.account-progress{width:100%;height:10px;accent-color:var(--accent);margin:9px 0}.billing-list{display:grid;gap:7px;margin-top:10px}.billing-row{border-top:1px solid var(--line);padding-top:8px}.billing-row b{display:block}.billing-state{min-height:20px;color:var(--muted);margin-top:10px}.support-link{text-decoration:none}.provider-box{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}.provider-box select{min-width:180px}</style></head><body>",
         "account styles",
+    )
+    document = _replace_once(
+        document,
+        '<button class="navbtn" id="nav-account">Аккаунт</button>',
+        '<a class="navbtn support-link" href="/support">Поддержка</a><button class="navbtn" id="nav-account">Аккаунт</button>',
+        "support navigation",
     )
 
     old_api = '<p class="muted">Self-service API Console развивается поверх существующих scopes, rate limits и telemetry без отдельного API-движка.</p>'
@@ -38,13 +65,13 @@ def workspace() -> HTMLResponse:
     )
 
     old_account = '<section class="view" id="view-account"><div class="content"><h1>Аккаунт</h1><p class="lead">Профиль, текущий ресурс и переносимость данных.</p><div class="cards"><div class="card"><h2>Профиль</h2><div id="account-profile" class="muted">Загружаю…</div></div><div class="card"><h2>Ресурс</h2><div id="account-budget" class="muted">Загружаю…</div></div></div><div class="formrow"><button class="secondary" id="account-export">Экспортировать мои данные</button><button class="secondary" id="onboarding-open">Начало работы</button></div></div></section>'
-    new_account = '<section class="view" id="view-account"><div class="content"><h1>Аккаунт и тариф</h1><p class="lead">Профиль, текущий план, понятный лимит запросов и управление подпиской без скрытых списаний.</p><div class="cards"><div class="card"><h2>Профиль</h2><div id="account-profile" class="muted">Загружаю…</div></div><div class="card"><h2>Подписка</h2><div id="account-subscription" class="muted">Загружаю…</div><div class="formrow"><button class="secondary" id="subscription-cancel" disabled>Отключить продление</button><button class="secondary" id="subscription-resume" disabled>Возобновить</button></div></div><div class="card"><h2>Лимит запросов</h2><div id="account-request-units" class="muted">Загружаю…</div><progress class="account-progress" id="account-request-progress" value="0" max="100"></progress></div><div class="card"><h2>Вычислительный бюджет</h2><div id="account-budget" class="muted">Загружаю…</div></div><div class="card"><h2>Измеренный ресурс</h2><div id="account-commerce-usage" class="muted">Загружаю…</div><progress class="account-progress" id="account-resource-progress" value="0" max="100"></progress></div></div><div class="account-section"><h2>Тарифы</h2><p class="muted">Fast = 1 единица, Work = 2, Deep = 4. Дневной лимит защищает очередь от резкого всплеска, месячный — ваш тариф.</p><div class="cards" id="account-plans"></div><div class="billing-state" id="billing-state"></div></div><div class="account-section cards"><div class="card"><h2>Последние checkout</h2><div class="billing-list" id="account-checkouts"></div></div><div class="card"><h2>Платежи</h2><div class="billing-list" id="account-payments"></div></div></div><div class="formrow"><button class="secondary" id="account-export">Экспортировать мои данные</button><button class="secondary" id="onboarding-open">Начало работы</button></div></div></section>'
+    new_account = '<section class="view" id="view-account"><div class="content"><h1>Аккаунт и тариф</h1><p class="lead">Профиль, текущий план, понятный лимит запросов и управление подпиской без скрытых списаний.</p><div class="cards"><div class="card"><h2>Профиль</h2><div id="account-profile" class="muted">Загружаю…</div></div><div class="card"><h2>Подписка</h2><div id="account-subscription" class="muted">Загружаю…</div><div class="formrow"><button class="secondary" id="subscription-cancel" disabled>Отключить продление</button><button class="secondary" id="subscription-resume" disabled>Возобновить</button></div></div><div class="card"><h2>Лимит запросов</h2><div id="account-request-units" class="muted">Загружаю…</div><progress class="account-progress" id="account-request-progress" value="0" max="100"></progress></div><div class="card"><h2>Вычислительный бюджет</h2><div id="account-budget" class="muted">Загружаю…</div></div><div class="card"><h2>Измеренный ресурс</h2><div id="account-commerce-usage" class="muted">Загружаю…</div><progress class="account-progress" id="account-resource-progress" value="0" max="100"></progress></div></div><div class="account-section"><h2>Тарифы</h2><p class="muted">Fast = 1 единица, Work = 2, Deep = 4. Дневной лимит защищает очередь от резкого всплеска, месячный — ваш тариф.</p><div class="provider-box" id="payment-provider-box"><span class="muted">Способ оплаты:</span><select id="payment-provider" disabled><option value="">Загружаю…</option></select></div><div class="cards" id="account-plans"></div><div class="billing-state" id="billing-state"></div></div><div class="account-section cards"><div class="card"><h2>Последние checkout</h2><div class="billing-list" id="account-checkouts"></div></div><div class="card"><h2>Платежи</h2><div class="billing-list" id="account-payments"></div></div></div><div class="formrow"><button class="secondary" id="support-open">Написать в поддержку</button><button class="secondary" id="account-export">Экспортировать мои данные</button><button class="secondary" id="onboarding-open">Начало работы</button></div></div></section>'
     document = _replace_once(document, old_account, new_account, "account plan surface")
 
     document = _replace_once(
         document,
         "meCache=null,workspaceProjectId=null;const steps=",
-        "meCache=null,workspaceProjectId=null,accountSubscription=null,accountUsage=null,accountCheckoutKeys={};const steps=",
+        "meCache=null,workspaceProjectId=null,accountSubscription=null,accountUsage=null,accountCheckoutKeys={},accountProviders=null;const steps=",
         "account state",
     )
     document = _replace_once(
@@ -55,29 +82,43 @@ def workspace() -> HTMLResponse:
     )
 
     old_render = "function renderAccount(){if(!meCache)return;$('account-profile').textContent=(meCache.display_name||'Без имени')+' · '+meCache.email}"
-    new_render = r'''function renderAccount(){if(!meCache)return;$('account-profile').textContent=(meCache.display_name||'Без имени')+' · '+meCache.email}
+    new_render = r'''function renderAccount(){if(!meCache)return;$('account-profile').textContent=(meCache.display_name||'Без имени')+' · '+meCache.email+(meCache.email_verified===false?' · email не подтверждён':'')}
 function moneyMinor(value,currency){return (Number(value||0)/100).toLocaleString('ru-RU',{minimumFractionDigits:0,maximumFractionDigits:2})+' '+String(currency||'RUB')}
 function billingDate(value){return value?new Date(value).toLocaleString('ru-RU'):'—'}
-function checkoutKey(plan){if(!accountCheckoutKeys[plan]){let id='';try{id=crypto.randomUUID().replaceAll('-','')}catch(_e){id=Date.now().toString(36)+Math.random().toString(36).slice(2)}accountCheckoutKeys[plan]='account_'+id}return accountCheckoutKeys[plan]}
+function checkoutKey(plan,provider='legacy'){const key=plan+':'+provider;if(!accountCheckoutKeys[key]){let id='';try{id=crypto.randomUUID().replaceAll('-','')}catch(_e){id=Date.now().toString(36)+Math.random().toString(36).slice(2)}accountCheckoutKeys[key]='account_'+id}return accountCheckoutKeys[key]}
 function renderSubscription(sub,usage){accountSubscription=sub;accountUsage=usage;const box=$('account-subscription'),cancel=$('subscription-cancel'),resume=$('subscription-resume');cancel.disabled=true;resume.disabled=true;if(!sub){box.textContent='Текущий план: '+String((usage&&usage.plan)||'free').toUpperCase()+'. Платной подписки нет.';return}let text=String(sub.plan||'free').toUpperCase()+' · '+String(sub.status||'unknown')+' · до '+billingDate(sub.current_period_end);if(sub.cancel_at_period_end)text+=' · продление отключено';box.textContent=text;if(sub.status==='active'){cancel.disabled=Boolean(sub.cancel_at_period_end);resume.disabled=!sub.cancel_at_period_end}}
 function renderRequestUnits(unitUsage){const box=$('account-request-units'),bar=$('account-request-progress');if(!unitUsage){box.textContent='Данные лимита запросов недоступны.';bar.value=0;return}const used=Math.max(0,Number(unitUsage.monthly_request_units_used||0)),limit=Math.max(0,Number(unitUsage.monthly_request_units_limit||0)),remaining=Math.max(0,Number(unitUsage.monthly_request_units_remaining||0)),dailyRemaining=Math.max(0,Number(unitUsage.daily_request_units_remaining||0)),dailyLimit=Math.max(0,Number(unitUsage.daily_request_units_limit||0));box.textContent='Использовано '+used.toLocaleString('ru-RU')+' из '+limit.toLocaleString('ru-RU')+' ед. за месяц · осталось '+remaining.toLocaleString('ru-RU')+' · сегодня '+dailyRemaining.toLocaleString('ru-RU')+' из '+dailyLimit.toLocaleString('ru-RU');bar.value=limit?Math.min(100,used/limit*100):0}
 function renderCommerceUsage(usage){const total=Math.max(0,Number(usage&&usage.plan_resource_budget_microunits||0)),spent=Math.max(0,Number(usage&&usage.total_cost_microunits||0)),remaining=Math.max(0,Number(usage&&usage.remaining_resource_microunits||0)),percent=total?Math.min(100,spent/total*100):0;$('account-commerce-usage').textContent='Использовано '+spent.toLocaleString('ru-RU')+' · осталось '+remaining.toLocaleString('ru-RU')+' из '+total.toLocaleString('ru-RU')+' ресурсных единиц';$('account-resource-progress').value=percent}
+function renderPaymentProviders(data){accountProviders=data;const select=$('payment-provider');select.replaceChildren();const providers=data&&data.providers||{};const ready=Object.entries(providers).filter(([,v])=>v&&v.ready);if(!ready.length){const o=document.createElement('option');o.value='';o.textContent='Платёжный провайдер ещё не настроен';select.append(o);select.disabled=true;return}for(const [name] of ready){const o=document.createElement('option');o.value=name;o.textContent=name==='yookassa'?'ЮKassa':'ЮMoney';select.append(o)}const preferred=String(data.default_provider||'');if(ready.some(([name])=>name===preferred))select.value=preferred;select.disabled=false}
 function renderPlanCatalog(plans,usage,sub){const root=$('account-plans'),current=String(usage&&usage.plan||'free');root.replaceChildren();for(const plan of plans){const card=document.createElement('div');card.className='card account-plan'+(plan.name===current?' current':'');const title=document.createElement('h3');title.textContent=String(plan.name||'').toUpperCase();const price=document.createElement('div');price.className='plan-price';price.textContent=plan.name==='free'?'0 ₽':moneyMinor(plan.amount_minor,plan.currency);if(plan.name!=='free'){const small=document.createElement('small');small.textContent=' / '+Number(plan.period_days||30)+' дней';price.append(small)}const limits=document.createElement('div');limits.className='muted';limits.textContent=Number(plan.monthly_request_units||0).toLocaleString('ru-RU')+' ед./мес · '+Number(plan.daily_request_units||0).toLocaleString('ru-RU')+' ед./день · 1 запрос к модели одновременно';card.append(title,price,limits);if(plan.name===current){const badge=document.createElement('span');badge.className='status ok';badge.textContent='Текущий';card.append(badge)}else if(plan.purchase_enabled){const button=document.createElement('button');button.className='primary';button.textContent='Выбрать '+String(plan.name).toUpperCase();button.onclick=()=>startPlanCheckout(plan.name,button);card.append(button)}root.append(card)}if(sub&&sub.status==='active')$('billing-state').textContent='Смена платного тарифа применяется только после подтверждённого платежа. Автоматический перерасчёт остатка периода не выполняется.'}
 function renderBillingRows(id,rows,kind){const root=$(id);root.replaceChildren();if(!rows||!rows.length){const empty=document.createElement('div');empty.className='muted';empty.textContent=kind==='checkout'?'Checkout пока нет.':'Подтверждённых billing-событий пока нет.';root.append(empty);return}for(const row of rows.slice(0,8)){const item=document.createElement('div');item.className='billing-row';const title=document.createElement('b');if(kind==='checkout')title.textContent=String(row.plan||'').toUpperCase()+' · '+moneyMinor(row.amount_minor,row.currency)+' · '+String(row.status||'');else title.textContent=String(row.kind||'payment')+' · '+moneyMinor(row.amount_minor,row.currency)+' · '+String(row.status||'');const meta=document.createElement('div');meta.className='muted';meta.textContent=(kind==='checkout'?String(row.id||''):String(row.provider||''))+' · '+billingDate(row.created_at);item.append(title,meta);root.append(item)}}
-async function loadAccountPlan(){renderAccount();$('billing-state').textContent='Загружаю тариф и подписку…';try{const [usage,plans,sub,checkouts,payments,unitUsage]=await Promise.all([api('/v1/commerce/usage',{},20000),api('/v1/commerce/billing/plans',{},20000),api('/v1/commerce/billing/subscription',{},20000),api('/v1/commerce/billing/checkouts?limit=20',{},20000),api('/v1/commerce/billing/payments?limit=20',{},20000),api('/v1/usage/summary',{},20000),refreshBudget()]);$('billing-state').textContent='';renderSubscription(sub,usage);renderRequestUnits(unitUsage);renderCommerceUsage(usage);renderPlanCatalog(plans,usage,sub);renderBillingRows('account-checkouts',checkouts,'checkout');renderBillingRows('account-payments',payments,'payment');if(!$('billing-state').textContent)$('billing-state').textContent='Данные тарифа актуальны.'}catch(e){$('billing-state').textContent=e.message}}
-async function startPlanCheckout(plan,button){button.disabled=true;$('billing-state').textContent='Создаю server-owned checkout…';try{const checkout=await api('/v1/commerce/billing/checkout',{method:'POST',body:JSON.stringify({plan:plan,idempotency_key:checkoutKey(plan)})},30000);$('billing-state').textContent='Checkout '+checkout.id+' создан на '+moneyMinor(checkout.amount_minor,checkout.currency)+'. Доступ изменится только после подтверждения оплаты.';if(checkout.checkout_url){const target=new URL(checkout.checkout_url,location.href);if(!['http:','https:'].includes(target.protocol))throw new Error('Платёжный URL отклонён браузером.');location.assign(target.href);return}await loadAccountPlan()}catch(e){$('billing-state').textContent=e.message}finally{button.disabled=false}}
+async function loadAccountPlan(){renderAccount();$('billing-state').textContent='Загружаю тариф и подписку…';try{const [usage,plans,sub,checkouts,payments,unitUsage,providers]=await Promise.all([api('/v1/commerce/usage',{},20000),api('/v1/commerce/billing/plans',{},20000),api('/v1/commerce/billing/subscription',{},20000),api('/v1/commerce/billing/checkouts?limit=20',{},20000),api('/v1/commerce/billing/payments?limit=20',{},20000),api('/v1/usage/summary',{},20000),api('/v1/commerce/billing/providers',{},20000),refreshBudget()]);$('billing-state').textContent='';renderSubscription(sub,usage);renderRequestUnits(unitUsage);renderCommerceUsage(usage);renderPaymentProviders(providers);renderPlanCatalog(plans,usage,sub);renderBillingRows('account-checkouts',checkouts,'checkout');renderBillingRows('account-payments',payments,'payment');if(new URLSearchParams(location.search).get('payment')==='return')$('billing-state').textContent='Вернулись со страницы оплаты. Проверяем статус по уведомлению платёжного провайдера — доступ появится только после серверного подтверждения.';else if(!$('billing-state').textContent)$('billing-state').textContent='Данные тарифа актуальны.'}catch(e){$('billing-state').textContent=e.message}}
+async function startPlanCheckout(plan,button){button.disabled=true;$('billing-state').textContent='Создаю защищённый checkout…';try{const provider=$('payment-provider').value;if(provider){const result=await api('/v1/commerce/billing/provider-checkout',{method:'POST',body:JSON.stringify({plan:plan,provider:provider,idempotency_key:checkoutKey(plan,provider)})},30000);$('billing-state').textContent='Checkout '+result.checkout_id+' создан на '+moneyMinor(result.amount_minor,result.currency)+'. Тариф включится только после серверного подтверждения оплаты.';try{window.x1MetrikaGoal&&window.x1MetrikaGoal('checkout_started',{plan:plan,provider:provider})}catch(_e){}if(result.redirect_url){const target=new URL(result.redirect_url,location.href);if(!['http:','https:'].includes(target.protocol))throw new Error('Платёжный URL отклонён браузером.');location.assign(target.href);return}}else{const checkout=await api('/v1/commerce/billing/checkout',{method:'POST',body:JSON.stringify({plan:plan,idempotency_key:checkoutKey(plan)})},30000);$('billing-state').textContent='Checkout '+checkout.id+' создан на '+moneyMinor(checkout.amount_minor,checkout.currency)+'. Доступ изменится только после подтверждения оплаты.';if(checkout.checkout_url){const target=new URL(checkout.checkout_url,location.href);if(!['http:','https:'].includes(target.protocol))throw new Error('Платёжный URL отклонён браузером.');location.assign(target.href);return}}await loadAccountPlan()}catch(e){$('billing-state').textContent=e.message}finally{button.disabled=false}}
 async function changeSubscription(action){const button=$(action==='cancel'?'subscription-cancel':'subscription-resume');button.disabled=true;$('billing-state').textContent=action==='cancel'?'Отключаю продление…':'Возобновляю продление…';try{await api('/v1/commerce/billing/subscription/'+action,{method:'POST'},20000);await loadAccountPlan();$('billing-state').textContent=action==='cancel'?'Автопродление отключено. Оплаченный период остаётся активным.':'Автопродление возобновлено.'}catch(e){$('billing-state').textContent=e.message}finally{button.disabled=false}}'''
     document = _replace_once(document, old_render, new_render, "account billing logic")
 
     document = _replace_once(
         document,
         "$('account-export').onclick=exportAccount;",
-        "$('api-console-open').onclick=()=>location.href='/v1/commerce/console';$('subscription-cancel').onclick=()=>changeSubscription('cancel');$('subscription-resume').onclick=()=>changeSubscription('resume');$('account-export').onclick=exportAccount;",
+        "$('api-console-open').onclick=()=>location.href='/v1/commerce/console';$('support-open').onclick=()=>location.href='/support';$('subscription-cancel').onclick=()=>changeSubscription('cancel');$('subscription-resume').onclick=()=>changeSubscription('resume');$('account-export').onclick=exportAccount;",
         "account event bindings",
     )
 
+    analytics = public_analytics_config(db)
+    analytics_script = _metrika_script(analytics)
+    if analytics_script:
+        match = re.search(r'<script nonce="([^"]+)"', document)
+        if not match:
+            raise RuntimeError("Workspace nonce missing")
+        nonce = match.group(1)
+        document = document.replace("</body></html>", f'<script nonce="{nonce}">{analytics_script}</script></body></html>', 1)
+
     response = HTMLResponse(document, status_code=base.status_code)
     for key, value in base.headers.items():
-        if key.lower() not in {"content-length", "content-type"}:
+        if key.lower() not in {"content-length", "content-type", "content-security-policy"}:
             response.headers[key] = value
+    csp = base.headers.get("content-security-policy", "")
+    if analytics_script:
+        csp = csp.replace("script-src ", "script-src https://mc.yandex.ru ", 1).replace("connect-src 'self'", "connect-src 'self' https://mc.yandex.ru", 1).replace("img-src 'self' data:", "img-src 'self' data: https://mc.yandex.ru", 1)
+    response.headers["Content-Security-Policy"] = csp
     return response
