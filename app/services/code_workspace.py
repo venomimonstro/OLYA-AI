@@ -7,6 +7,8 @@ import subprocess
 import zipfile
 from pathlib import Path, PurePosixPath
 
+from app.services.deadline import DeadlineExceededError, clamp_timeout_seconds
+
 
 class WorkspaceError(RuntimeError):
     pass
@@ -148,12 +150,6 @@ def path_allowed(path: str, allowed_paths: list[str]) -> bool:
 
 
 def _validated_static_command(root: Path, argv: list[str]) -> bool:
-    """Allow only py_compile with workspace-contained source paths on the host.
-
-    Tools such as mypy are not host-safe because project configuration can load
-    plugins and execute Python. Ruff/mypy/npm/etc. therefore require the real
-    isolated sandbox unless an operator deliberately enables unsafe commands.
-    """
     exe = Path(argv[0]).name
     if exe not in {"python", "python3"} or len(argv) < 4 or argv[1:3] != ["-m", "py_compile"]:
         return False
@@ -179,6 +175,11 @@ def run_command(root: Path, argv: list[str], timeout_seconds: int, *, allow_unsa
     if not static_safe and not allow_unsafe:
         raise WorkspaceError("Command requires an isolated sandbox backend")
 
+    try:
+        effective_timeout = clamp_timeout_seconds(float(timeout_seconds), stage="workspace verification command", minimum=.05)
+    except DeadlineExceededError as exc:
+        raise WorkspaceError("Request deadline exceeded before verification command") from exc
+
     env = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "HOME": str(root / ".x1home"),
@@ -200,7 +201,7 @@ def run_command(root: Path, argv: list[str], timeout_seconds: int, *, allow_unsa
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_seconds,
+            timeout=effective_timeout,
             shell=False,
         )
         return {
