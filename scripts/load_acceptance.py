@@ -52,6 +52,24 @@ def write_report(path: Path, payload: dict) -> None:
     os.replace(tmp, path)
 
 
+async def _identity(client: httpx.AsyncClient, base_url: str, token: str, timeout: float) -> str:
+    response = await client.get(
+        base_url.rstrip("/") + "/v1/auth/me",
+        headers={"Authorization": "Bearer " + token},
+        timeout=min(timeout, 30.0),
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"Load acceptance identity check failed with HTTP {response.status_code}")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError("Load acceptance identity endpoint returned invalid JSON") from exc
+    user_id = str(payload.get("id") or "").strip()
+    if not user_id:
+        raise RuntimeError("Load acceptance identity endpoint returned no user id")
+    return user_id
+
+
 async def _one(client: httpx.AsyncClient, base_url: str, token: str, user_index: int, round_index: int, timeout: float) -> Sample:
     started = time.perf_counter()
     try:
@@ -72,11 +90,16 @@ async def _one(client: httpx.AsyncClient, base_url: str, token: str, user_index:
 
 async def run(base_url: str, tokens: list[str], *, rounds: int, timeout: float, p95_limit_ms: int, max_error_rate: float) -> dict:
     if len(tokens) < 10:
-        raise RuntimeError("Real load acceptance requires at least 10 distinct user tokens")
+        raise RuntimeError("Real load acceptance requires at least 10 authenticated users")
     if len(set(tokens)) != len(tokens):
-        raise RuntimeError("Load acceptance tokens must represent distinct sessions/users")
+        raise RuntimeError("Load acceptance tokens must be distinct sessions")
     limits = httpx.Limits(max_connections=max(20, len(tokens) * 2), max_keepalive_connections=max(10, len(tokens)))
     async with httpx.AsyncClient(trust_env=False, limits=limits) as client:
+        identities = await asyncio.gather(*[_identity(client, base_url, token, timeout) for token in tokens])
+        unique_user_ids = set(identities)
+        if len(unique_user_ids) != len(tokens):
+            raise RuntimeError("Real load acceptance requires tokens from distinct user accounts")
+
         started = time.perf_counter()
         samples: list[Sample] = []
         for round_index in range(1, rounds + 1):
@@ -94,6 +117,7 @@ async def run(base_url: str, tokens: list[str], *, rounds: int, timeout: float, 
     p95 = _percentile(latencies, .95)
     gates = {
         "users_at_least_10": len(tokens) >= 10,
+        "unique_authenticated_users": len(unique_user_ids) == len(tokens),
         "all_users_exercised": len({row.user for row in samples}) == len(tokens),
         "error_rate": error_rate <= max_error_rate,
         "p95_latency_ms": p95 <= p95_limit_ms,
@@ -104,6 +128,7 @@ async def run(base_url: str, tokens: list[str], *, rounds: int, timeout: float, 
         "git_head": current_git_head(),
         "target": base_url,
         "virtual_users": len(tokens),
+        "unique_authenticated_users": len(unique_user_ids),
         "rounds": rounds,
         "requests": len(samples),
         "successes": len(successes),
