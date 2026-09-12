@@ -1,6 +1,7 @@
 FROM python:3.12.14-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
 
 ARG X1_EXTRAS=""
+ARG X1_RUNTIME_PROFILE="full"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -8,13 +9,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Git is required by the closed development runtime. LibreOffice + poppler are
-# required by the document QA/release path; without them a generated DOCX can
-# never pass the production render gate. Keep a basic font set installed so PDF
-# layout is reproducible instead of depending on accidental host fonts.
+# Git is required by the closed development runtime. Full installations also
+# include local document QA binaries. The 6GB starter keeps document rendering
+# disabled and omits LibreOffice/poppler to save disk and page-cache pressure.
 RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-       git ca-certificates libreoffice-writer poppler-utils fonts-dejavu-core \
+    && if [ "$X1_RUNTIME_PROFILE" = "starter_6gb" ]; then \
+         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates; \
+       else \
+         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+           git ca-certificates libreoffice-writer poppler-utils fonts-dejavu-core; \
+       fi \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./
@@ -34,15 +38,9 @@ COPY --chown=x1:x1 alembic ./alembic
 COPY --chown=x1:x1 app ./app
 COPY --chown=x1:x1 scripts ./scripts
 COPY --chown=x1:x1 tests ./tests
-# Sprint 57 is executed inside both the production app container and the gate
-# container. Keep its immutable corpus/model identity inside the image instead
-# of relying on host files that are not mounted at /app.
 COPY --chown=x1:x1 model-manifest.json ./model-manifest.json
 COPY --chown=x1:x1 regression ./regression
 
-# Production acceptance must prove that the running app image was built from
-# the same source/deployment definition as the checked-out candidate. Preserve
-# Dockerfile/Compose only as build inputs for a deterministic provenance hash.
 COPY --chown=x1:x1 Dockerfile ./build-inputs/Dockerfile
 COPY --chown=x1:x1 docker-compose.yml ./build-inputs/docker-compose.yml
 RUN python -m scripts.build_provenance --root /app --write /app/BUILD_PROVENANCE.json --no-manifest >/dev/null \
@@ -50,7 +48,4 @@ RUN python -m scripts.build_provenance --root /app --write /app/BUILD_PROVENANCE
 
 USER x1
 
-# One worker is intentional: in-memory admission/governor state is authoritative
-# on a single low-cost node. Uvicorn bounds HTTP tasks before the expensive
-# inference queue, so a connection storm cannot create unbounded request tasks.
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --limit-concurrency ${X1_HTTP_LIMIT_CONCURRENCY:-128} --backlog ${X1_HTTP_BACKLOG:-2048} --timeout-keep-alive ${X1_HTTP_KEEPALIVE_SECONDS:-5}"]
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --limit-concurrency ${X1_HTTP_LIMIT_CONCURRENCY:-32} --backlog ${X1_HTTP_BACKLOG:-512} --timeout-keep-alive ${X1_HTTP_KEEPALIVE_SECONDS:-5}"]
