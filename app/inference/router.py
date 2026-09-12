@@ -14,8 +14,6 @@ class RouteDecision:
     reason: str = "default"
 
 
-# These tasks have a high cost of a plausible-but-wrong answer. They should get
-# the Deep lane even when the literal prompt is short.
 HIGH_RISK_MARKERS = (
     "аудит безопасности",
     "security audit",
@@ -32,8 +30,6 @@ HIGH_RISK_MARKERS = (
     "medical diagnosis",
 )
 
-# Medium-complexity work benefits from thinking, but should not automatically
-# consume the full Deep budget.
 ANALYTIC_MARKERS = (
     "проанализируй",
     "сравни",
@@ -111,8 +107,6 @@ def _complexity_score(normalized: str) -> tuple[int, list[str]]:
         score += 1
         reasons.append("code_signal")
 
-    # Multiple explicit deliverables usually require planning even when the
-    # prompt does not contain one of the marker phrases.
     structural_signals = normalized.count("\n-") + normalized.count("\n1.") + normalized.count("\n2.")
     if structural_signals >= 3:
         score += 2
@@ -128,10 +122,9 @@ def _complexity_score(normalized: str) -> tuple[int, list[str]]:
 def choose_route(text: str, requested_mode: str, normal_context: int, deep_context: int) -> RouteDecision:
     normalized = text.casefold().strip()
 
-    # llama.cpp is booted with X1_DEEP_CONTEXT_TOKENS as its physical context
-    # ceiling. No runtime route is allowed to exceed that boot-time envelope.
     deep_limit = max(1024, int(deep_context))
     normal_limit = min(max(1024, int(normal_context)), deep_limit)
+    starter_4k = deep_limit <= 4096
 
     score, reasons = _complexity_score(normalized)
     high_risk = next((marker for marker in HIGH_RISK_MARKERS if marker in normalized), None)
@@ -153,7 +146,7 @@ def choose_route(text: str, requested_mode: str, normal_context: int, deep_conte
         return RouteDecision(
             mode="fast",
             max_context_tokens=min(normal_limit, 4096),
-            max_output_tokens=700,
+            max_output_tokens=448 if starter_4k else 700,
             reasoning=False,
             complexity_score=score,
             reason=",".join(reasons) or "fast_default",
@@ -163,20 +156,17 @@ def choose_route(text: str, requested_mode: str, normal_context: int, deep_conte
         return RouteDecision(
             mode="deep",
             max_context_tokens=deep_limit,
-            max_output_tokens=2200,
+            max_output_tokens=1024 if starter_4k else 2200,
             reasoning=True,
             complexity_score=score,
             reason=",".join(reasons) or "deep_default",
         )
 
-    # Work is the normal lane. Thinking is conditional: this directly prevents
-    # the common UX failure where a basic question spends tens of seconds in a
-    # hidden reasoning trace, while still giving analytical/code work more depth.
     work_reasoning = score >= 3
     return RouteDecision(
         mode="work",
         max_context_tokens=normal_limit,
-        max_output_tokens=1400 if work_reasoning else 1200,
+        max_output_tokens=(768 if work_reasoning else 640) if starter_4k else (1400 if work_reasoning else 1200),
         reasoning=work_reasoning,
         complexity_score=score,
         reason=",".join(reasons) or "work_default",
