@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from typing import Any, Awaitable, Callable
 import httpx
 
 from app.schemas.chat import ChatMessage
+from app.services.deadline import DeadlineExceededError, clamp_timeout_seconds
 from app.services.tool_reliability import ToolCall
 
 
@@ -39,7 +41,8 @@ TokenSink = Callable[[str], Awaitable[None]]
 class LlamaClient:
     def __init__(self, base_url: str, timeout_seconds: int = 180) -> None:
         self.base_url = base_url.rstrip("/")
-        self.timeout = httpx.Timeout(timeout_seconds, connect=min(10.0, float(timeout_seconds)))
+        self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self.timeout = httpx.Timeout(self.timeout_seconds, connect=min(10.0, self.timeout_seconds))
         self._client = httpx.AsyncClient(
             timeout=self.timeout,
             trust_env=False,
@@ -155,46 +158,52 @@ class LlamaClient:
         reported_tps = 0.0
 
         try:
-            async with self._client.stream(
-                "POST",
-                f"{self.base_url}/v1/chat/completions",
-                json=payload,
-            ) as response:
-                response.raise_for_status()
-                async for raw_line in response.aiter_lines():
-                    line = raw_line.strip()
-                    if not line or line.startswith(":"):
-                        continue
-                    if line.startswith("data:"):
-                        body = line[5:].strip()
-                    elif line.startswith("{"):
-                        body = line
-                    else:
-                        continue
-                    if body == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(body)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(data, dict):
-                        continue
+            budget = clamp_timeout_seconds(self.timeout_seconds, stage="local inference")
+            timeout = httpx.Timeout(budget, connect=min(10.0, budget))
+            async with asyncio.timeout(budget):
+                async with self._client.stream(
+                    "POST",
+                    f"{self.base_url}/v1/chat/completions",
+                    json=payload,
+                    timeout=timeout,
+                ) as response:
+                    response.raise_for_status()
+                    async for raw_line in response.aiter_lines():
+                        line = raw_line.strip()
+                        if not line or line.startswith(":"):
+                            continue
+                        if line.startswith("data:"):
+                            body = line[5:].strip()
+                        elif line.startswith("{"):
+                            body = line
+                        else:
+                            continue
+                        if body == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(body)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(data, dict):
+                            continue
 
-                    chunk_tokens, chunk_tps = self._telemetry(data)
-                    if chunk_tokens:
-                        completion_tokens = chunk_tokens
-                    if chunk_tps:
-                        reported_tps = chunk_tps
+                        chunk_tokens, chunk_tps = self._telemetry(data)
+                        if chunk_tokens:
+                            completion_tokens = chunk_tokens
+                        if chunk_tps:
+                            reported_tps = chunk_tps
 
-                    text = self._chunk_text(data)
-                    if not text:
-                        continue
-                    if first_content_at is None:
-                        first_content_at = perf_counter()
-                    pieces.append(text)
-                    observed_chunks += 1
-                    if on_token is not None:
-                        await on_token(text)
+                        text = self._chunk_text(data)
+                        if not text:
+                            continue
+                        if first_content_at is None:
+                            first_content_at = perf_counter()
+                        pieces.append(text)
+                        observed_chunks += 1
+                        if on_token is not None:
+                            await on_token(text)
+        except (DeadlineExceededError, TimeoutError) as exc:
+            raise LlamaUnavailable("request deadline exceeded during local inference") from exc
         except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
             raise LlamaUnavailable("local llama.cpp inference is unavailable or returned invalid data") from exc
 
@@ -291,12 +300,6 @@ class LlamaClient:
         max_tokens: int = 900,
         reasoning: bool = False,
     ) -> LlamaToolTurn:
-        """Run one bounded native tool-selection turn.
-
-        Tool execution is deliberately separate and must pass ToolSession. We use
-        auto selection and disable parallel calls so side effects remain ordered
-        and auditable. The executor, not the model, is the authorization boundary.
-        """
         clean_tools = self._validate_tool_schemas(tools)
         if not messages or len(messages) > 80:
             raise ValueError("Invalid tool conversation length")
@@ -316,9 +319,14 @@ class LlamaClient:
             payload["reasoning_effort"] = "none"
         started = perf_counter()
         try:
-            response = await self._client.post(f"{self.base_url}/v1/chat/completions", json=payload)
+            budget = clamp_timeout_seconds(self.timeout_seconds, stage="local tool inference")
+            timeout = httpx.Timeout(budget, connect=min(10.0, budget))
+            async with asyncio.timeout(budget):
+                response = await self._client.post(f"{self.base_url}/v1/chat/completions", json=payload, timeout=timeout)
             response.raise_for_status()
             data = response.json()
+        except (DeadlineExceededError, TimeoutError) as exc:
+            raise LlamaUnavailable("request deadline exceeded during local tool inference") from exc
         except (httpx.HTTPError, ValueError, TypeError) as exc:
             raise LlamaUnavailable("local llama.cpp tool turn is unavailable or invalid") from exc
         if not isinstance(data, dict):
