@@ -1,6 +1,6 @@
 # Sprints 71–86 — remaining MVP plan
 
-После завершения Sprint 72 до production acceptance остаётся 14 спринтов.
+После завершения Sprint 73 до production acceptance остаётся 13 спринтов.
 
 ## Sprint 71 — DONE — Admin Control Center
 Единая операционная панель администратора: здоровье, нагрузка, очереди, capacity, billing/API/complaints/release-сигналы без дублирования существующих admin services.
@@ -8,8 +8,8 @@
 ## Sprint 72 — DONE — Admin User Operations
 Безопасные операции над пользователями: поиск, account state, сессии, billing-aware plan/quota overrides, действующие safety restrictions, audit trail и fail-closed destructive actions.
 
-## Sprint 73 — Capability Registry
-Единый registry возможностей X1 с availability/reason/requirements вместо разрозненных feature flags и предположений UI.
+## Sprint 73 — DONE — Capability Registry
+Единый server-owned registry возможностей X1 с availability/reason/requirements, Safety/account context и live sandbox probe без публикации секретов конфигурации.
 
 ## Sprint 74 — Priority Inference Scheduler
 Справедливый приоритетный scheduler для Fast/Work/Deep/API/background workload с starvation protection и учётом тарифа без обхода resource governors.
