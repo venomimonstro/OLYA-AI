@@ -27,6 +27,7 @@ def billing_price_minor(settings, plan: str) -> int:
 
 def billing_plan_catalog(db: Session, settings) -> list[dict]:
     policies={str(x["name"]):x for x in runtime_plan_catalog(db,settings)}; result=[]
+    payment_flow_ready=bool(str(getattr(settings,"payment_ingest_secret","") or "").strip()) and checkout_url(settings,"catalog-probe") is not None
     for name in ("free",*BILLABLE_PLANS):
         policy=policies.get(name)
         if not policy: continue
@@ -36,7 +37,7 @@ def billing_plan_catalog(db: Session, settings) -> list[dict]:
             "amount_minor":amount,
             "currency":str(settings.billing_currency).upper(),
             "period_days":max(1,int(settings.billing_period_days)),
-            "purchase_enabled":name!="free" and amount>0,
+            "purchase_enabled":name!="free" and amount>0 and payment_flow_ready,
             "monthly_cpu_seconds":int(policy.get("monthly_cpu_seconds") or 0),
             "resource_budget_microunits":int(policy.get("resource_budget_microunits") or 0),
             "monthly_request_units":int(policy.get("monthly_request_units") or 0),
@@ -65,6 +66,8 @@ def create_checkout(db:Session,user:User,settings,*,plan:str,idempotency_key:str
     if plan not in {str(x["name"]) for x in runtime_plan_catalog(db,settings)}: raise BillingValidationError("Plan is not available")
     amount=billing_price_minor(settings,plan)
     if amount<=0: raise BillingConflictError("Plan purchasing is disabled")
+    if checkout_url(settings,"availability-probe") is None or not str(getattr(settings,"payment_ingest_secret","") or "").strip():
+        raise BillingConflictError("Paid checkout is not configured")
     existing=_by_identity(db,user.id,key)
     if existing:
         if existing.plan!=plan: raise BillingConflictError("Idempotency key is bound to another plan")
