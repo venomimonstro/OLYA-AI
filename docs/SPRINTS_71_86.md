@@ -18,8 +18,8 @@
 ## Sprint 84 — DONE — Business Logic Contract
 ## Sprint 85 — GATE DONE / RC NOT ISSUED — MVP Freeze / Release Candidate
 
-Feature freeze и единый RC gate реализованы. RC выдаётся только после полного regression/security/recovery/runtime gate, backup/restore, model evidence и реального Sprint80 load acceptance, привязанных к текущему git HEAD.
+Feature freeze и единый RC gate реализованы. RC выдаётся только после полного regression/security/recovery/runtime gate, backup/restore, model evidence и реального Sprint80 load acceptance. Evidence привязан к текущему git HEAD и deterministic source fingerprint; running app image обязан совпадать с checkout. RAM gate использует минимум из `model-manifest.json`, поэтому валидны и 32, и 48, и 64+ GiB production hosts.
 
 ## Sprint 86 — HARNESS DONE / PRODUCTION RUN REQUIRED — MVP Production Acceptance
 
-`production_acceptance.py` проверяет кандидата на целевом сервере с реальной Qwen, PostgreSQL, SearXNG, sandbox/document workers, release-readiness, business contract, live capability registry и current-HEAD evidence. `accepted_for_launch=true` допустим только при зелёных фактических проверках.
+`production_acceptance.py` проверяет кандидата на целевом сервере с реальной Qwen, PostgreSQL, SearXNG, sandbox/document workers, release-readiness, business contract и live capability registry. Дополнительно обязательны clean working tree, совпадение candidate/runtime/public build fingerprint, HTTPS для внешнего production URL и рабочая billing-конфигурация. `accepted_for_launch=true` допустим только при зелёных фактических проверках.
