@@ -24,31 +24,34 @@ class Settings(BaseSettings):
     database_idle_transaction_timeout_ms: int = 60000
 
     llama_base_url: str = "http://127.0.0.1:8080"
-    llama_model_name: str = "Qwen3.6-35B-A3B-Q4_K_M"
-    max_context_tokens: int = 8192
-    deep_context_tokens: int = 8192
+    llama_model_name: str = "Qwen3-4B-Q4_K_M"
+    max_context_tokens: int = 4096
+    deep_context_tokens: int = 4096
     max_concurrent_generations: int = 1
-    max_queue_size: int = 64
-    inference_queue_timeout_seconds: float = 120.0
-    default_max_output_tokens: int = 1200
-    request_timeout_seconds: int = 180
+    max_queue_size: int = 16
+    inference_max_queued_per_principal: int = 1
+    inference_queue_timeout_seconds: float = 90.0
+    default_max_output_tokens: int = 768
+    request_timeout_seconds: int = 150
+    verification_max_extra_inferences: int = 1
 
-    # Sprint 54 pre-DB overload lanes. These protect DB/session allocation while
-    # preserving the deeper inference/job governors as separate safety layers.
-    overload_chat_max_active_http: int = 4
-    overload_chat_max_queue: int = 32
-    overload_chat_queue_timeout_seconds: float = 90.0
-    overload_research_max_active_http: int = 4
-    overload_research_max_queue: int = 24
-    overload_research_queue_timeout_seconds: float = 15.0
-    overload_image_max_active_http: int = 2
-    overload_image_max_queue: int = 8
-    overload_image_queue_timeout_seconds: float = 10.0
-    overload_sandbox_max_active_http: int = 2
-    overload_sandbox_max_queue: int = 8
-    overload_sandbox_queue_timeout_seconds: float = 15.0
-    overload_max_queued_per_principal: int = 2
-    overload_breaker_failures: int = 5
+    # Pre-DB overload lanes protect the small node before requests allocate DB
+    # sessions or enter llama.cpp. The defaults are deliberately conservative;
+    # larger installations can override them without changing plan semantics.
+    overload_chat_max_active_http: int = 2
+    overload_chat_max_queue: int = 12
+    overload_chat_queue_timeout_seconds: float = 75.0
+    overload_research_max_active_http: int = 2
+    overload_research_max_queue: int = 8
+    overload_research_queue_timeout_seconds: float = 12.0
+    overload_image_max_active_http: int = 1
+    overload_image_max_queue: int = 2
+    overload_image_queue_timeout_seconds: float = 8.0
+    overload_sandbox_max_active_http: int = 1
+    overload_sandbox_max_queue: int = 2
+    overload_sandbox_queue_timeout_seconds: float = 10.0
+    overload_max_queued_per_principal: int = 1
+    overload_breaker_failures: int = 4
     overload_breaker_cooldown_seconds: float = 20.0
 
     admin_bootstrap_token: str = "change-me"
@@ -56,29 +59,29 @@ class Settings(BaseSettings):
     session_max_active_per_user: int = 20
 
     file_storage_path: str = "./data/files"
-    max_file_size_bytes: int = 20 * 1024 * 1024
-    file_chunk_chars: int = 1600
-    file_chunk_overlap_chars: int = 180
-    file_context_chunks: int = 6
-    max_pdf_pages: int = 500
-    max_docx_unpacked_bytes: int = 100 * 1024 * 1024
-    file_parse_timeout_seconds: int = 45
-    file_parse_memory_mb: int = 768
+    max_file_size_bytes: int = 10 * 1024 * 1024
+    file_chunk_chars: int = 1400
+    file_chunk_overlap_chars: int = 140
+    file_context_chunks: int = 4
+    max_pdf_pages: int = 200
+    max_docx_unpacked_bytes: int = 50 * 1024 * 1024
+    file_parse_timeout_seconds: int = 35
+    file_parse_memory_mb: int = 384
     file_parse_queue_timeout_seconds: float = 5.0
-    file_max_extracted_chars: int = 2_000_000
-    file_user_storage_quota_bytes: int = 2 * 1024 * 1024 * 1024
-    file_storage_min_free_bytes: int = 2 * 1024 * 1024 * 1024
-    file_storage_min_free_percent: float = 10.0
+    file_max_extracted_chars: int = 1_000_000
+    file_user_storage_quota_bytes: int = 512 * 1024 * 1024
+    file_storage_min_free_bytes: int = 10 * 1024 * 1024 * 1024
+    file_storage_min_free_percent: float = 15.0
 
     document_storage_path: str = "./data/documents"
     document_render_timeout_seconds: int = 60
-    document_max_pages: int = 300
+    document_max_pages: int = 120
     document_max_concurrent_renders: int = 1
     document_render_queue_timeout_seconds: float = 5.0
     document_render_backend: str = "local"
     document_render_worker_url: str = "http://document-worker:8091"
     document_render_worker_token: str = "change-me-document-worker"
-    document_raster_dpi: int = 110
+    document_raster_dpi: int = 96
     document_qa_max_repairs: int = 1
 
     database_auto_create_schema: bool = False
@@ -88,13 +91,13 @@ class Settings(BaseSettings):
     job_lease_seconds: int = 120
     job_poll_seconds: float = 1.0
 
-    research_timeout_seconds: float = 15.0
-    research_max_bytes: int = 2_000_000
-    research_max_chars: int = 500_000
+    research_timeout_seconds: float = 12.0
+    research_max_bytes: int = 1_000_000
+    research_max_chars: int = 250_000
     research_max_redirects: int = 3
-    research_max_concurrent_operations: int = 4
-    research_max_queue_size: int = 32
-    research_queue_timeout_seconds: float = 15.0
+    research_max_concurrent_operations: int = 2
+    research_max_queue_size: int = 12
+    research_queue_timeout_seconds: float = 12.0
     research_freshness_max_age_seconds: int = 15 * 60
     research_freshness_min_independent_hosts: int = 2
     search_provider: str = "searxng"
@@ -102,40 +105,40 @@ class Settings(BaseSettings):
     searxng_base_url: str = "http://searxng:8080"
     search_cache_ttl_seconds: int = 3600
     brave_search_api_key: str = ""
-    search_timeout_seconds: float = 10.0
-    research_max_search_queries: int = 6
-    research_max_discovery_results: int = 30
+    search_timeout_seconds: float = 8.0
+    research_max_search_queries: int = 4
+    research_max_discovery_results: int = 20
 
     frustration_slow_queue_ms: int = 5000
     frustration_slow_response_ms: int = 120000
 
     code_workspace_storage_path: str = "./data/code_workspaces"
-    code_workspace_max_archive_bytes: int = 25 * 1024 * 1024
-    code_workspace_max_unpacked_bytes: int = 100 * 1024 * 1024
-    code_workspace_max_files: int = 5000
+    code_workspace_max_archive_bytes: int = 15 * 1024 * 1024
+    code_workspace_max_unpacked_bytes: int = 60 * 1024 * 1024
+    code_workspace_max_files: int = 3000
     code_allow_unsafe_commands: bool = False
 
     project_runtime_storage_path: str = "./data/project_runtimes"
-    project_runtime_default_cpu_limit: float = 1.0
-    project_runtime_default_memory_mb: int = 1024
-    project_runtime_default_disk_mb: int = 2048
-    project_runtime_default_process_limit: int = 64
+    project_runtime_default_cpu_limit: float = 0.75
+    project_runtime_default_memory_mb: int = 512
+    project_runtime_default_disk_mb: int = 1024
+    project_runtime_default_process_limit: int = 48
     project_runtime_max_cpu_limit: float = 1.0
-    project_runtime_max_memory_mb: int = 2048
-    project_runtime_max_process_limit: int = 128
+    project_runtime_max_memory_mb: int = 768
+    project_runtime_max_process_limit: int = 96
     project_runtime_secret_key: str = "change-me-runtime-secret"
     project_sandbox_backend: str = "remote"
     project_sandbox_image: str = "x1-sandbox:0.39"
     project_sandbox_worker_url: str = "http://sandbox-worker:8090"
     project_sandbox_worker_token: str = "change-me-sandbox-worker"
-    project_sandbox_command_timeout_seconds: int = 300
-    project_sandbox_preview_timeout_seconds: int = 120
+    project_sandbox_command_timeout_seconds: int = 180
+    project_sandbox_preview_timeout_seconds: int = 90
     sandbox_max_concurrent_executions: int = 1
     sandbox_max_active_previews: int = 1
-    sandbox_max_memory_mb: int = 2048
-    sandbox_max_cpu: float = 1.0
-    sandbox_max_pids: int = 128
-    sandbox_preview_ttl_seconds: int = 900
+    sandbox_max_memory_mb: int = 768
+    sandbox_max_cpu: float = 0.75
+    sandbox_max_pids: int = 96
+    sandbox_preview_ttl_seconds: int = 600
 
     image_storage_path: str = "./data/images"
     image_backend: str = "disabled"
@@ -151,16 +154,13 @@ class Settings(BaseSettings):
     image_qa_max_repairs: int = 1
     image_perceptual_error_max: float = 4.0
     image_preview_max_side: int = 512
-    image_storage_min_free_bytes: int = 2 * 1024 * 1024 * 1024
-    image_storage_min_free_percent: float = 10.0
-    image_user_storage_quota_bytes: int = 2 * 1024 * 1024 * 1024
+    image_storage_min_free_bytes: int = 10 * 1024 * 1024 * 1024
+    image_storage_min_free_percent: float = 15.0
+    image_user_storage_quota_bytes: int = 256 * 1024 * 1024
     image_rejected_retention_days: int = 7
     image_vision_qa_url: str = ""
     image_vision_qa_timeout_seconds: int = 45
 
-    # Image Editing / identity-preserving editing. The inpaint and identity
-    # checkpoints are deliberately separate from text-to-image so an incapable
-    # checkpoint can never be silently used for a high-fidelity edit.
     image_edit_backend: str = "disabled"
     image_edit_model_name: str = ""
     image_edit_model_path: str = ""
@@ -177,7 +177,7 @@ class Settings(BaseSettings):
     image_edit_require_vision_qa: bool = True
 
     monthly_server_cost_rub: float = 4000.0
-    chat_history_messages: int = 48
+    chat_history_messages: int = 20
     chat_message_page_size: int = 100
 
     commerce_cpu_microunits_per_second: int = 1000
@@ -193,10 +193,30 @@ class Settings(BaseSettings):
     billing_price_pro_minor: int = 70000
     billing_price_max_minor: int = 150000
     billing_price_business_minor: int = 400000
-    api_default_rate_limit_per_minute: int = 60
-    api_max_rate_limit_per_minute: int = 600
-    api_max_active_keys_per_user: int = 20
-    api_max_contexts_per_owner: int = 100
+
+    # Commercial request-unit limits make plans understandable to users while
+    # compute-seconds remain the second, cost-based hard stop. Fast=1, Work=2,
+    # Deep=4 units by default. This prevents one Deep-heavy account from turning
+    # a low-cost node into an unbounded queue.
+    plan_monthly_request_units_free: int = 30
+    plan_monthly_request_units_x1: int = 240
+    plan_monthly_request_units_pro: int = 720
+    plan_monthly_request_units_max: int = 1800
+    plan_monthly_request_units_business: int = 4800
+    plan_daily_request_units_free: int = 6
+    plan_daily_request_units_x1: int = 24
+    plan_daily_request_units_pro: int = 60
+    plan_daily_request_units_max: int = 120
+    plan_daily_request_units_business: int = 300
+    request_unit_weight_fast: int = 1
+    request_unit_weight_work: int = 2
+    request_unit_weight_deep: int = 4
+    request_unit_weight_api: int = 2
+
+    api_default_rate_limit_per_minute: int = 30
+    api_max_rate_limit_per_minute: int = 120
+    api_max_active_keys_per_user: int = 10
+    api_max_contexts_per_owner: int = 50
 
     backup_storage_path: str = "./backups"
     health_checkpoint_stale_seconds: int = 300
@@ -212,39 +232,39 @@ class Settings(BaseSettings):
     search_cache_retention_hours: int = 24
     expired_session_retention_days: int = 7
     system_health_snapshot_retention_days: int = 30
-    background_job_success_retention_days: int = 30
-    background_job_failure_retention_days: int = 90
+    background_job_success_retention_days: int = 21
+    background_job_failure_retention_days: int = 45
 
     capacity_report_path: str = "./backups/capacity-latest.json"
     capacity_report_max_age_hours: float = 168.0
-    capacity_compute_headroom_ratio: float = 1.25
+    capacity_compute_headroom_ratio: float = 1.35
     capacity_min_monthly_compute_seconds: int = 300
     capacity_max_monthly_compute_seconds: int = 14400
-    beta_min_participants: int = 50
-    beta_max_participants: int = 100
-    beta_min_tasks: int = 500
-    beta_min_request_success_rate: float = 0.97
-    beta_max_frustration_per_request: float = 0.05
-    beta_max_p95_queue_ms: int = 5000
+    beta_min_participants: int = 10
+    beta_max_participants: int = 50
+    beta_min_tasks: int = 100
+    beta_min_request_success_rate: float = 0.95
+    beta_max_frustration_per_request: float = 0.08
+    beta_max_p95_queue_ms: int = 15000
 
-    beta_wave_default_size: int = 10
-    beta_wave_min_observation_requests: int = 50
+    beta_wave_default_size: int = 5
+    beta_wave_min_observation_requests: int = 30
     beta_wave_max_queue_regression_ratio: float = 1.50
     beta_wave_max_duration_regression_ratio: float = 1.50
     beta_wave_min_cpu_efficiency_ratio: float = 0.70
-    beta_trend_max_success_drop: float = 0.02
-    beta_trend_max_frustration_increase: float = 0.02
-    beta_trend_max_quality_drop: float = 0.05
+    beta_trend_max_success_drop: float = 0.03
+    beta_trend_max_frustration_increase: float = 0.03
+    beta_trend_max_quality_drop: float = 0.07
     beta_operations_scheduler_enabled: bool = True
     beta_operations_cohort: str = "closed-beta-1"
     beta_operations_window_days: int = 30
     beta_operations_check_interval_seconds: float = 3600.0
     beta_snapshot_interval_hours: float = 24.0
 
-    public_launch_breaker_min_requests: int = 50
-    public_launch_canary_min_requests: int = 30
-    public_launch_max_failure_rate: float = 0.03
-    public_launch_max_requests_per_user_hour: int = 120
+    public_launch_breaker_min_requests: int = 30
+    public_launch_canary_min_requests: int = 20
+    public_launch_max_failure_rate: float = 0.05
+    public_launch_max_requests_per_user_hour: int = 30
     public_launch_global_budget_microunits: int = 0
     public_launch_enforce_exposure: bool = True
     public_launch_watchdog_enabled: bool = True
@@ -256,11 +276,11 @@ class Settings(BaseSettings):
     plan_ratio_pro: float = 2.0
     plan_ratio_max: float = 4.0
     plan_ratio_business: float = 8.0
-    plan_share_fast: float = 0.20
-    plan_share_work: float = 0.35
-    plan_share_deep: float = 0.25
+    plan_share_fast: float = 0.30
+    plan_share_work: float = 0.40
+    plan_share_deep: float = 0.15
     plan_share_api: float = 0.10
-    plan_share_image: float = 0.05
+    plan_share_image: float = 0.00
     plan_share_sandbox: float = 0.05
 
     @property
