@@ -9,7 +9,7 @@
 Безопасные операции над пользователями: поиск, account state, сессии, billing-aware plan/quota overrides, действующие safety restrictions, audit trail и fail-closed destructive actions.
 
 ## Sprint 73 — DONE — Capability Registry
-Единый server-owned registry возможностей X1 с availability/reason/requirements, Safety/account context и live sandbox probe без публикации секретов конфигурации.
+Единый server-owned registry возможностей X1 с availability/reason/requirements, account state, effective quota/compute budget, Safety context и live sandbox probe без публикации секретов конфигурации.
 
 ## Sprint 74 — Priority Inference Scheduler
 Справедливый приоритетный scheduler для Fast/Work/Deep/API/background workload с starvation protection и учётом тарифа без обхода resource governors.
