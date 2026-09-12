@@ -185,6 +185,14 @@ class Settings(BaseSettings):
     commerce_image_worker_microunits_per_second: int = 5000
     commerce_sandbox_microunits_per_second: int = 2000
     payment_ingest_secret: str = ""
+    billing_currency: str = "RUB"
+    billing_period_days: int = 30
+    billing_checkout_ttl_minutes: int = 30
+    billing_checkout_url_template: str = ""
+    billing_price_x1_minor: int = 30000
+    billing_price_pro_minor: int = 70000
+    billing_price_max_minor: int = 150000
+    billing_price_business_minor: int = 400000
     api_default_rate_limit_per_minute: int = 60
     api_max_rate_limit_per_minute: int = 600
     api_max_active_keys_per_user: int = 20

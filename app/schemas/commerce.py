@@ -135,6 +135,51 @@ class ApiChatRequest(BaseModel):
         return self
 
 
+class BillingCheckoutCreate(BaseModel):
+    plan: Literal["x1", "pro", "max", "business"]
+    idempotency_key: str = Field(min_length=12, max_length=80, pattern=r"^[A-Za-z0-9_.:-]+$")
+
+
+class BillingPlanRead(BaseModel):
+    name: str
+    amount_minor: int
+    currency: str
+    period_days: int
+    purchase_enabled: bool
+    monthly_cpu_seconds: int
+    resource_budget_microunits: int
+    max_concurrent_inference: int
+    max_concurrent_jobs: int
+
+
+class BillingCheckoutRead(BaseModel):
+    id: str
+    user_id: str
+    plan: str
+    amount_minor: int
+    currency: str
+    status: str
+    idempotency_key: str
+    checkout_url: str | None = None
+    expires_at: datetime
+    payment_record_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BillingSubscriptionRead(BaseModel):
+    id: str
+    user_id: str
+    plan: str
+    status: str
+    cancel_at_period_end: bool
+    current_period_start: datetime
+    current_period_end: datetime
+    last_payment_record_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class PaymentIngest(BaseModel):
     provider: str = Field(min_length=1, max_length=48)
     provider_event_id: str = Field(min_length=1, max_length=160)

@@ -6,7 +6,7 @@ X1 — self-hosted AI-платформа с локальным inference на Qw
 
 ## Текущая версия
 
-**0.40.0 + Sprints 41–68 — Qwen3.6, streaming, memory/RAG, verification, coding proof, production hardening, onboarding, recoverable chat, project-centric workspace, Files/RAG UX, восстановленный source/release контур, защищённый публичный API и self-service API Console.**
+**0.40.0 + Sprints 41–69 — Qwen3.6, streaming, memory/RAG, verification, coding proof, production hardening, onboarding, recoverable chat, project-centric workspace, Files/RAG UX, защищённый публичный API, API Console и server-owned Billing/Subscriptions.**
 
 GitHub `main` является каноническим исходным кодом. Production-конфигурация fail-closed: дефолтные секреты, SQLite в production, сломанные обязательные routers, красный release gate, неподтверждённый GGUF или небезопасный memory budget не считаются рабочей установкой.
 
@@ -92,6 +92,8 @@ Sprint 43 заменяет имитацию streaming через heartbeat + о�
 После регистрации/входа пользователь сразу переводится в `/app`. Там доступны канонические серверные диалоги, Auto/Fast/Work/Deep, Auto/Strict/Off verification, internet research `Авто / Всегда / Выкл`, streaming-ответы со Stop, проекты и другие продуктовые контуры.
 
 Self-service API Console находится на `/v1/commerce/console`. Она использует пользовательскую session-auth только для management-plane операций и отдельный API-key только для вызовов `/v1/api/*`: создание/ротация/отзыв ключей, scopes, rate limits, persistent contexts, тестовый chat-запрос и telemetry. Полный API-secret возвращается только при создании/ротации, не попадает в key-list и не сохраняется Console в `localStorage`/`sessionStorage`.
+
+Sprint 69 добавляет session-auth Billing API `/v1/commerce/billing/*`. Checkout принимает только имя тарифа и idempotency key; сумма и валюта берутся из серверной конфигурации. Provider-neutral `/v1/commerce/payments/ingest` активирует entitlement только после exact match checkout/user/amount/currency, а subscription lifecycle синхронизирует реальный measured quota.
 
 Files показывает обработку, готовность и ошибки, историю версий, безопасный повтор индексации и manager-only управление. Ответ Chat возвращает только проверенные по БД файловые ссылки с фактически использованными фрагментами; поддельный `FILE_REF` не становится citation.
 

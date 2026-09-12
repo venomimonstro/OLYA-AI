@@ -42,6 +42,10 @@ ESSENTIAL_PATHS = {
     "/v1/images/references",
     "/v1/images/edits",
     "/v1/commerce/api-keys/{api_key_id}/rotate",
+    "/v1/commerce/billing/plans",
+    "/v1/commerce/billing/subscription",
+    "/v1/commerce/billing/checkout",
+    "/v1/commerce/billing/checkouts",
     "/v1/api/contexts",
     "/v1/api/contexts/{context_id}",
     "/v1/api/chat",
@@ -96,15 +100,9 @@ def _ui_contract_errors(registered_paths: set[str]) -> list[dict]:
         source = path.read_text("utf-8")
         rel = path.relative_to(ROOT).as_posix()
 
-        # Capture quoted/template-literal internal URLs as a whole. This keeps
-        # `${esc(id)}` or `${generationId}` intact so _path_shape can normalize
-        # the complete dynamic segment to a path parameter instead of treating
-        # a partial JavaScript expression as a literal route.
         refs = sorted(set(re.findall(r"[\'\"`](/v1/[^\'\"`\s<>]+)", source)))
         for ref in refs:
             base = ref.split("?", 1)[0]
-            # A trailing slash commonly means string concatenation continues
-            # after the literal; the concrete dynamic URL is checked elsewhere.
             if base.endswith("/"):
                 continue
             if not any(_path_matches(base, route_path) for route_path in registered_paths):
@@ -117,9 +115,6 @@ def _ui_contract_errors(registered_paths: set[str]) -> list[dict]:
             if href not in registered_paths:
                 errors.append({"code": "ui_navigation_route_missing", "file": rel, "reference": href})
 
-        # Catch visible buttons that have neither inline behavior nor an ID that
-        # is referenced again by page JavaScript. Submit buttons are bound at the
-        # form level and are therefore valid without their own handler.
         for match in re.finditer(r"<button\b([^>]*)>", source, flags=re.IGNORECASE):
             attrs = match.group(1)
             if re.search(r"\bonclick\s*=", attrs, flags=re.IGNORECASE):
@@ -142,8 +137,6 @@ def audit() -> dict:
     registered_paths = {str(getattr(route, "path", "")) for route in app_routes if getattr(route, "path", None)}
     errors: list[dict] = []
 
-    # Every router module in the product must contribute all of its endpoint
-    # functions to the final app, directly or through a nested APIRouter.
     module_stats: dict[str, int] = {}
     for module_name in _discover_router_modules():
         module = importlib.import_module(module_name)
@@ -156,18 +149,11 @@ def audit() -> dict:
         for route in routes:
             key = _route_endpoint_key(route)
             if key is not None and key not in app_endpoint_keys:
-                errors.append({
-                    "code": "router_endpoint_not_registered",
-                    "module": module_name,
-                    "endpoint": f"{key[0]}.{key[1]}",
-                    "local_path": str(getattr(route, "path", "")),
-                })
+                errors.append({"code": "router_endpoint_not_registered", "module": module_name, "endpoint": f"{key[0]}.{key[1]}", "local_path": str(getattr(route, "path", ""))})
 
     for path in sorted(ESSENTIAL_PATHS - registered_paths):
         errors.append({"code": "essential_product_path_missing", "path": path})
 
-    # A same-method/same-path collision means one implementation may shadow
-    # another depending on registration order. Ignore framework docs endpoints.
     keys: list[tuple[str, str]] = []
     for route in app_routes:
         path = str(getattr(route, "path", ""))
@@ -181,14 +167,7 @@ def audit() -> dict:
             errors.append({"code": "duplicate_route", "method": method, "path": path, "count": count})
 
     errors.extend(_ui_contract_errors(registered_paths))
-    return {
-        "format": "x1-product-surface-audit-v1",
-        "status": "passed" if not errors else "failed",
-        "registered_route_count": len(app_routes),
-        "router_modules": module_stats,
-        "essential_paths": sorted(ESSENTIAL_PATHS),
-        "errors": errors,
-    }
+    return {"format": "x1-product-surface-audit-v1", "status": "passed" if not errors else "failed", "registered_route_count": len(app_routes), "router_modules": module_stats, "essential_paths": sorted(ESSENTIAL_PATHS), "errors": errors}
 
 
 def main() -> int:

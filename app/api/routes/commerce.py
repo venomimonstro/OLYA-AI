@@ -12,9 +12,10 @@ from sqlalchemy.orm import Session
 from app.api_console import api_console_response
 from app.db import get_db
 from app.models import ApiKey, ApiRequestTelemetry, Organization, OrganizationBudget, OrganizationMember, ResourceExpenseEvent, User
-from app.schemas.commerce import ApiKeyCreate, ApiKeyCreated, ApiKeyRead, BudgetPut, BudgetRead, OrganizationCreate, OrganizationMemberRead, OrganizationMemberUpsert, OrganizationRead, PaymentIngest, PaymentRead
+from app.schemas.commerce import ApiKeyCreate, ApiKeyCreated, ApiKeyRead, BillingCheckoutCreate, BillingCheckoutRead, BillingPlanRead, BillingSubscriptionRead, BudgetPut, BudgetRead, OrganizationCreate, OrganizationMemberRead, OrganizationMemberUpsert, OrganizationRead, PaymentIngest, PaymentRead
 from app.services.admin import audit, require_admin
 from app.services.auth import get_current_user, normalize_email
+from app.services.billing import BillingConflictError, BillingNotFoundError, BillingValidationError, apply_payment_record, billing_plan_catalog, cancel_subscription, checkout_url, create_checkout, get_subscription, list_billing_payments, list_checkouts, reconcile_user_subscription, resume_subscription
 from app.services.commerce import budget_state, create_api_key, ingest_payment, list_organizations, measured_user_resources, normalize_slug, organization_role, payment_reconciliation, require_organization_role, rotate_api_key
 from app.services.measured_plans import apply_runtime_plan_to_quota, runtime_plan_catalog
 
@@ -31,6 +32,18 @@ def _api_key_management_visible(db:Session,user:User,row:ApiKey)->bool:
     if org is None:return False
     return (organization_role(db,user.id,org) or '') in {'owner','manager'}
 
+def _checkout_read(row,settings):
+    return BillingCheckoutRead(id=row.id,user_id=row.user_id,plan=row.plan,amount_minor=row.amount_minor,currency=row.currency,status=row.status,idempotency_key=row.idempotency_key,checkout_url=checkout_url(settings,row.id),expires_at=row.expires_at,payment_record_id=row.payment_record_id,created_at=row.created_at,updated_at=row.updated_at)
+
+def _subscription_read(row):
+    if row is None:return None
+    return BillingSubscriptionRead(id=row.id,user_id=row.user_id,plan=row.plan,status=row.status,cancel_at_period_end=row.cancel_at_period_end,current_period_start=row.current_period_start,current_period_end=row.current_period_end,last_payment_record_id=row.last_payment_record_id,created_at=row.created_at,updated_at=row.updated_at)
+
+def _billing_http_error(exc):
+    if isinstance(exc,BillingNotFoundError):return HTTPException(status_code=404,detail=str(exc))
+    if isinstance(exc,BillingValidationError):return HTTPException(status_code=422,detail=str(exc))
+    return HTTPException(status_code=409,detail=str(exc))
+
 @router.get('/console',response_class=HTMLResponse,include_in_schema=False)
 def api_console() -> HTMLResponse:
     return api_console_response()
@@ -44,6 +57,41 @@ def usage(request:Request,user:User=Depends(get_current_user),db:Session=Depends
     from app.services.quota import get_or_create_quota
     quota=get_or_create_quota(db,user,request.app.state.settings); policy=next((x for x in runtime_plan_catalog(db,request.app.state.settings) if x['name']==quota.plan),None)
     measured['plan']=quota.plan; measured['plan_resource_budget_microunits']=policy['resource_budget_microunits'] if policy else 0; measured['remaining_resource_microunits']=max(0,measured['plan_resource_budget_microunits']-measured['total_cost_microunits']); measured['catalog_version']=policy.get('catalog_version') if policy else None; measured['channel_shares']=policy.get('channel_shares',{}) if policy else {}; db.commit(); return measured
+
+@router.get('/billing/plans',response_model=list[BillingPlanRead])
+def billing_plans(request:Request,user:User=Depends(get_current_user),db:Session=Depends(get_db)):
+    _=user
+    return billing_plan_catalog(db,request.app.state.settings)
+
+@router.get('/billing/subscription',response_model=BillingSubscriptionRead|None)
+def billing_subscription(request:Request,user:User=Depends(get_current_user),db:Session=Depends(get_db)):
+    row=reconcile_user_subscription(db,user,request.app.state.settings); db.commit(); return _subscription_read(row)
+
+@router.post('/billing/checkout',response_model=BillingCheckoutRead,status_code=status.HTTP_201_CREATED)
+def billing_checkout(payload:BillingCheckoutCreate,request:Request,user:User=Depends(get_current_user),db:Session=Depends(get_db)):
+    try: row=create_checkout(db,user,request.app.state.settings,plan=payload.plan,idempotency_key=payload.idempotency_key)
+    except (BillingValidationError,BillingConflictError,BillingNotFoundError) as exc: db.rollback(); raise _billing_http_error(exc) from exc
+    db.commit(); db.refresh(row); return _checkout_read(row,request.app.state.settings)
+
+@router.get('/billing/checkouts',response_model=list[BillingCheckoutRead])
+def billing_checkouts(request:Request,limit:int=Query(default=100,ge=1,le=500),user:User=Depends(get_current_user),db:Session=Depends(get_db)):
+    rows=list_checkouts(db,user.id,limit=limit); db.commit(); return [_checkout_read(x,request.app.state.settings) for x in rows]
+
+@router.post('/billing/subscription/cancel',response_model=BillingSubscriptionRead)
+def billing_cancel(request:Request,user:User=Depends(get_current_user),db:Session=Depends(get_db)):
+    try: row=cancel_subscription(db,user,request.app.state.settings)
+    except (BillingValidationError,BillingConflictError,BillingNotFoundError) as exc: db.rollback(); raise _billing_http_error(exc) from exc
+    db.commit(); db.refresh(row); return _subscription_read(row)
+
+@router.post('/billing/subscription/resume',response_model=BillingSubscriptionRead)
+def billing_resume(request:Request,user:User=Depends(get_current_user),db:Session=Depends(get_db)):
+    try: row=resume_subscription(db,user,request.app.state.settings)
+    except (BillingValidationError,BillingConflictError,BillingNotFoundError) as exc: db.rollback(); raise _billing_http_error(exc) from exc
+    db.commit(); db.refresh(row); return _subscription_read(row)
+
+@router.get('/billing/payments',response_model=list[PaymentRead])
+def billing_payments(limit:int=Query(default=100,ge=1,le=500),user:User=Depends(get_current_user),db:Session=Depends(get_db)):
+    return list_billing_payments(db,user.id,limit=limit)
 
 @router.post('/organizations',response_model=OrganizationRead,status_code=status.HTTP_201_CREATED)
 def create_org(payload:OrganizationCreate,user:User=Depends(get_current_user),db:Session=Depends(get_db)):
@@ -98,9 +146,7 @@ def keys(user:User=Depends(get_current_user),db:Session=Depends(get_db)): return
 
 @router.get('/api-telemetry')
 def api_telemetry(api_key_id:str|None=Query(default=None),limit:int=Query(default=100,ge=1,le=500),user:User=Depends(get_current_user),db:Session=Depends(get_db)):
-    owned=list(db.scalars(select(ApiKey).where(ApiKey.owner_id==user.id).order_by(ApiKey.created_at.desc())).all())
-    visible=[row for row in owned if _api_key_management_visible(db,user,row)]
-    by_id={row.id:row for row in visible}
+    owned=list(db.scalars(select(ApiKey).where(ApiKey.owner_id==user.id).order_by(ApiKey.created_at.desc())).all()); visible=[row for row in owned if _api_key_management_visible(db,user,row)]; by_id={row.id:row for row in visible}
     if api_key_id and api_key_id not in by_id: raise HTTPException(status_code=404,detail='API key not found')
     selected_ids=[api_key_id] if api_key_id else list(by_id)
     if not selected_ids:return []
@@ -113,7 +159,6 @@ def revoke(api_key_id:str,user:User=Depends(get_current_user),db:Session=Depends
     if row is None or row.owner_id!=user.id: raise HTTPException(status_code=404,detail='API key not found')
     if row.status!='revoked': row.status='revoked'; row.revoked_at=datetime.now(timezone.utc)
     db.commit()
-
 
 @router.post('/api-keys/{api_key_id}/rotate',response_model=ApiKeyCreated,status_code=status.HTTP_201_CREATED)
 def rotate_key(api_key_id:str,request:Request,user:User=Depends(get_current_user),db:Session=Depends(get_db)):
@@ -130,8 +175,10 @@ def payment(payload:PaymentIngest,request:Request,x_x1_payment_secret:str=Header
     if not expected or not hmac.compare_digest(x_x1_payment_secret,expected): raise HTTPException(status_code=403,detail='Payment ingestion disabled or secret invalid')
     if payload.user_id and db.get(User,payload.user_id) is None: raise HTTPException(status_code=404,detail='Payment user not found')
     if payload.organization_id and db.get(Organization,payload.organization_id) is None: raise HTTPException(status_code=404,detail='Payment organization not found')
-    try: row,_=ingest_payment(db,payload.model_dump(mode='json'))
-    except ValueError as exc: db.rollback(); raise HTTPException(status_code=409,detail=str(exc)) from exc
+    try:
+        row,_=ingest_payment(db,payload.model_dump(mode='json'))
+        apply_payment_record(db,row,request.app.state.settings)
+    except (ValueError,BillingValidationError,BillingConflictError,BillingNotFoundError) as exc: db.rollback(); raise HTTPException(status_code=409,detail=str(exc)) from exc
     db.commit(); db.refresh(row); return row
 
 @router.get('/payments/reconciliation')

@@ -21,6 +21,7 @@ from app.models_sprint53 import *  # noqa: F401,F403
 from app.models_sprint59 import *  # noqa: F401,F403
 from app.models_sprint61 import *  # noqa: F401,F403
 from app.models_sprint62 import *  # noqa: F401,F403
+from app.models_sprint69 import *  # noqa: F401,F403
 
 # Successful canonical assistant/usage writes make the matching ChatRun
 # terminal in the same flush, closing the restart window before transport ack.

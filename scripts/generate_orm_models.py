@@ -73,6 +73,7 @@ EXTERNAL_TABLES = {
     "api_keys", "api_rate_limit_windows", "api_request_telemetry",
     "autonomous_development_checkpoints", "autonomous_development_ledgers",
     "beta_participants", "beta_snapshots", "beta_waves", "capacity_plans",
+    "billing_checkouts", "billing_subscriptions",
     "chat_runs", "circuit_breaker_events", "complaint_cases",
     "compute_breakdown_events", "conversation_memories", "image_edit_requests",
     "image_references", "measured_plan_catalogs", "organization_budgets",

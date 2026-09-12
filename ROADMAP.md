@@ -163,3 +163,18 @@ Self-Service API Console:
 - user-scoped management telemetry показывает endpoint, HTTP status, latency, quality, resource cost и request id без API-secret;
 - responsive mobile-first UI, quickstart и безопасные рекомендации по scopes/rotation;
 - отдельный `api_console_audit` добавлен в полный release regression вместе с расширенным API contract audit.
+
+## Sprint 69 — DONE
+
+Billing & Subscriptions:
+
+- server-owned цены X1/Pro/Max/Business и provider-neutral checkout intents с request idempotency;
+- клиент checkout передаёт только plan + idempotency key: amount/currency всегда фиксируются сервером;
+- подтверждённый `PaymentRecord` применяется к checkout только после exact user/amount/currency verification;
+- один checkout нельзя повторно списать вторым payment event, а replay не продлевает период дважды;
+- payment активирует/продлевает `BillingSubscription` и в той же транзакции применяет measured `UserQuota`;
+- cancel-at-period-end и resume не обрывают уже оплаченный период;
+- истёкшая подписка лениво reconciles через canonical quota path и возвращает Free;
+- full refund последнего оплаченного периода немедленно снимает entitlement; replay старого payment не восстанавливает доступ;
+- добавлены persistent `billing_subscriptions` / `billing_checkouts`, Alembic migration и ORM source-integrity ownership;
+- billing API, anti-tampering integration tests и `billing_contract_audit` включены в полный release regression.

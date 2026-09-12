@@ -45,6 +45,11 @@ def get_or_create_quota(db: Session, user: User, settings: Settings) -> UserQuot
         )
         db.add(quota)
         db.flush()
+    try:
+        from app.services.billing import reconcile_user_subscription
+        reconcile_user_subscription(db, user, settings, quota=quota)
+    except ImportError:
+        pass
     _sync_measured_policy(db, quota, settings)
     return quota
 
