@@ -45,6 +45,14 @@ def host_ram_gib() -> float:
     return 0.0
 
 
+def minimum_supported_ram_gib() -> float:
+    try:
+        payload = json.loads((ROOT / "model-manifest.json").read_text("utf-8"))
+        return float((payload.get("host_policy") or {})["minimum_detected_ram_gib"])
+    except Exception:
+        return float("inf")
+
+
 def current_git_head() -> str:
     try:
         result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5, shell=False)
@@ -52,6 +60,19 @@ def current_git_head() -> str:
         return ""
     value = result.stdout.strip().lower()
     return value if result.returncode == 0 and len(value) == 40 and all(char in "0123456789abcdef" for char in value) else ""
+
+
+def verify_clean_worktree() -> dict:
+    result = run("git_worktree_clean", ["git", "status", "--porcelain", "--untracked-files=all"], 30)
+    if result.get("status") != "passed":
+        return result
+    rows = [row for row in (result.get("stdout") or "").splitlines() if row.strip()]
+    result.pop("stdout", None)
+    result["dirty_entry_count"] = len(rows)
+    if rows:
+        result["status"] = "failed"
+        result["reason"] = "working_tree_not_clean"
+    return result
 
 
 def _sha256_file(path: Path) -> str:
@@ -222,7 +243,7 @@ def promote_model_baseline() -> dict:
     if not passed:
         return {"status": "failed", "reason": "candidate_not_accepted"}
     data["baseline"] = True
-    data["accepted_by"] = "x1-release-candidate-v3"
+    data["accepted_by"] = "x1-release-candidate-v4"
     data["accepted_at"] = datetime.now(timezone.utc).isoformat()
     MODEL_BASELINE.parent.mkdir(parents=True, exist_ok=True)
     tmp = MODEL_BASELINE.with_suffix(MODEL_BASELINE.suffix + ".tmp")
@@ -233,15 +254,24 @@ def promote_model_baseline() -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="X1 MVP freeze / release candidate gate")
-    parser.add_argument("--allow-nonreference-host", action="store_true")
+    parser.add_argument("--allow-nonreference-host", action="store_true", help="Deprecated compatibility flag; RAM support is derived from model-manifest.json")
     parser.add_argument("--report", default="backups/rc-release-candidate-latest.json")
     parser.add_argument("--timeout", type=int, default=7200)
     args = parser.parse_args()
 
     checks: list[dict] = []
+    checks.append(verify_clean_worktree())
     ram = host_ram_gib()
-    reference = 31.0 <= ram < 40.0
-    checks.append({"name": "reference_32gib_host", "status": "passed" if reference or args.allow_nonreference_host else "failed", "ram_gib": round(ram, 3), "override": bool(args.allow_nonreference_host)})
+    minimum_ram = minimum_supported_ram_gib()
+    supported = ram >= minimum_ram
+    checks.append({
+        "name": "supported_host_ram",
+        "status": "passed" if supported else "failed",
+        "ram_gib": round(ram, 3),
+        "minimum_ram_gib": minimum_ram if minimum_ram != float("inf") else None,
+        "reference_32gib_band": bool(31.0 <= ram < 40.0),
+        "legacy_override_ignored": bool(args.allow_nonreference_host),
+    })
 
     checks.append(run("static_360_security_audit", ["python3", "-m", "scripts.rc_security_audit"], 300))
     checks.append(run("business_logic_contract_audit", ["python3", "-m", "scripts.business_logic_contract_audit"], 300))
@@ -300,6 +330,7 @@ def main() -> int:
         "status": "passed" if not failed else "failed",
         "feature_freeze_after_sprint": 84,
         "reference_host_ram_gib": round(ram, 3),
+        "minimum_supported_ram_gib": minimum_ram if minimum_ram != float("inf") else None,
         "git_head": current_git_head(),
         "source_fingerprint": source_fingerprint(ROOT).get("source_fingerprint"),
         "critical_regression_cases_required": 0,
