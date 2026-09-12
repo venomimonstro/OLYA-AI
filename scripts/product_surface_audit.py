@@ -71,6 +71,17 @@ def _discover_router_modules() -> list[str]:
     return sorted(set(modules))
 
 
+def _ui_source_paths() -> list[Path]:
+    paths = set((ROOT / "app").glob("*_ui.py"))
+    # Sprint 70 composes the registered user_ui controller over the preserved
+    # Sprint 60-69 workspace template. Keep that base template under the same
+    # URL/button contract audit even though it is not itself a registered router.
+    workspace_base = ROOT / "app" / "user_workspace_base.py"
+    if workspace_base.is_file():
+        paths.add(workspace_base)
+    return sorted(paths)
+
+
 def _path_shape(value: str) -> tuple[str, ...]:
     raw = str(value or "").split("?", 1)[0].split("#", 1)[0]
     raw = re.sub(r"\$\{[^}]+\}", "{param}", raw)
@@ -92,7 +103,7 @@ def _path_matches(reference: str, registered: str) -> bool:
 
 def _ui_contract_errors(registered_paths: set[str]) -> list[dict]:
     errors: list[dict] = []
-    for path in sorted((ROOT / "app").glob("*_ui.py")):
+    for path in _ui_source_paths():
         source = path.read_text("utf-8")
         rel = path.relative_to(ROOT).as_posix()
 
