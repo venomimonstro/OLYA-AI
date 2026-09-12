@@ -23,7 +23,16 @@ _SPACE_RE = re.compile(r"\s+")
 _BLOCKED_HOSTS = {"localhost", "localhost.localdomain"}
 _ALLOWED_SCHEMES = {"http", "https"}
 _ALLOWED_PORTS = {80, 443, None}
-_ALLOWED_MEDIA_TYPES = {"text/html", "application/xhtml+xml", "text/plain"}
+_ALLOWED_MEDIA_TYPES = {
+    "text/html",
+    "application/xhtml+xml",
+    "text/plain",
+    "application/xml",
+    "text/xml",
+    "application/rss+xml",
+    "application/atom+xml",
+}
+_XML_MEDIA_TYPES = {"application/xml", "text/xml", "application/rss+xml", "application/atom+xml"}
 
 
 class ResearchFetchError(RuntimeError): pass
@@ -91,6 +100,11 @@ async def validate_public_url(url: str) -> str:
 
 def extract_text(body: str, media_type: str) -> tuple[str,str]:
     if media_type == "text/plain": return "", _SPACE_RE.sub(" ",body).strip()
+    if media_type in _XML_MEDIA_TYPES:
+        # Sitemaps/RSS are data, not executable markup. Strip tags to retain
+        # URLs/text while keeping the same bounded source-context pipeline.
+        text = re.sub(r"<[^>]+>", " ", body)
+        return "", _SPACE_RE.sub(" ", html.unescape(text)).strip()
     parser=_TextExtractor(); parser.feed(body); return parser.title, parser.text()
 
 
@@ -126,7 +140,7 @@ class ResearchFetcher:
 
     async def _fetch_with_budget(self,url:str,budget:float)->FetchedPage:
         current=await validate_public_url(url); requested=current
-        headers={"User-Agent":"X1-Research/0.1 (+local research fetcher)","Accept":"text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1"}
+        headers={"User-Agent":"X1-Research/0.1 (+local research fetcher)","Accept":"text/html,application/xhtml+xml,application/xml,text/xml,text/plain;q=0.9,*/*;q=0.1"}
         timeout=httpx.Timeout(max(0.1,min(self.timeout_seconds,budget)))
         async with httpx.AsyncClient(timeout=timeout,follow_redirects=False,headers=headers,trust_env=False) as client:
             for redirect_index in range(self.max_redirects+1):
