@@ -1,6 +1,6 @@
 # Sprints 71–86 — remaining MVP plan
 
-После завершения Sprint 76 до production acceptance остаётся 10 спринтов.
+После завершения Sprint 77 до production acceptance остаётся 9 спринтов.
 
 ## Sprint 71 — DONE — Admin Control Center
 Единая операционная панель администратора: здоровье, нагрузка, очереди, capacity, billing/API/complaints/release-сигналы без дублирования существующих admin services.
@@ -20,8 +20,8 @@ Bounded priority/fair scheduler для Fast/Work/API/Deep/background с plan-awa
 ## Sprint 76 — DONE — Agent MVP Lock
 Bounded и recoverable development/engineering loop с immutable contract, budgets/checkpoints, evidence-only completion, verified execution gate, pause/resume/rollback и запретом ложного completion.
 
-## Sprint 77 — Image Studio Beta Lock
-Фиксация beta-контракта генерации/редактирования изображений: capability truth, privacy, queue/resource limits, QA и честный unavailable state.
+## Sprint 77 — DONE — Image Studio Beta Lock
+Canonical image beta contract поверх Capability Registry: honest availability, private sources, worker/quota/QA gates, explicit training consent и fail-closed Studio UI.
 
 ## Sprint 78 — Product Analytics
 Server-owned продуктовая аналитика activation, first value, retention, task success, frustration, plan conversion и resource economics без хранения лишнего пользовательского контента.
