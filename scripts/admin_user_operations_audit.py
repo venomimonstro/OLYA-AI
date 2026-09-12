@@ -47,6 +47,7 @@ def audit() -> dict:
         "ui_state": (users_ui, "/state',{method:'POST'"),
         "ui_revoke": (users_ui, "/sessions/revoke',{method:'POST'"),
         "ui_clear": (users_ui, "/control/clear',{method:'POST'"),
+        "ui_restrictions": (users_ui, "d.safety_restrictions||[]"),
         "parent_api_registration": (admin_ui, "router.include_router(admin_user_ops_router)"),
         "parent_ui_registration": (admin_ui, "router.include_router(admin_users_ui_router)"),
         "control_center_link": (admin_ui, 'href="/admin/users"'),
