@@ -131,11 +131,7 @@ async def exchange_code(db: Session, settings, *, code: str, verifier: str) -> d
                 YANDEX_TOKEN_URL,
                 auth=(owner.yandex_oauth_client_id, secret),
                 headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
-                data={
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "code_verifier": verifier,
-                },
+                data={"grant_type": "authorization_code", "code": code, "code_verifier": verifier},
             )
         response.raise_for_status()
         data = response.json()
@@ -172,6 +168,23 @@ async def fetch_profile(db: Session, settings, *, access_token: str) -> dict:
     return {"subject": subject[:160], "email": email[:320], "display_name": display_name}
 
 
+def _user_by_email_or_create(db: Session, *, email: str, display_name: str) -> User:
+    user = db.scalar(select(User).where(User.email == email))
+    if user is not None:
+        return user
+    candidate = User(email=email, password_hash=hash_password(secrets.token_urlsafe(64)), display_name=display_name)
+    try:
+        with db.begin_nested():
+            db.add(candidate)
+            db.flush()
+        return candidate
+    except IntegrityError:
+        winner = db.scalar(select(User).where(User.email == email))
+        if winner is None:
+            raise
+        return winner
+
+
 def resolve_user(db: Session, *, subject: str, email: str, display_name: str) -> User:
     identity = db.scalar(select(ExternalAuthIdentity).where(ExternalAuthIdentity.provider == YANDEX_PROVIDER, ExternalAuthIdentity.subject == subject))
     now = _now()
@@ -184,14 +197,10 @@ def resolve_user(db: Session, *, subject: str, email: str, display_name: str) ->
         ensure_email_state(db, user, mark_verified=True)
         return user
 
-    user = db.scalar(select(User).where(User.email == email))
-    if user is not None and not user.is_active:
+    user = _user_by_email_or_create(db, email=email, display_name=display_name)
+    if not user.is_active:
         raise YandexOAuthValidationError("X1 account with this email is unavailable")
-    if user is None:
-        user = User(email=email, password_hash=hash_password(secrets.token_urlsafe(64)), display_name=display_name)
-        db.add(user)
-        db.flush()
-    elif display_name and not str(user.display_name or "").strip():
+    if display_name and not str(user.display_name or "").strip():
         user.display_name = display_name
 
     ensure_email_state(db, user, mark_verified=True)
@@ -204,4 +213,6 @@ def resolve_user(db: Session, *, subject: str, email: str, display_name: str) ->
         winner = db.scalar(select(ExternalAuthIdentity).where(ExternalAuthIdentity.provider == YANDEX_PROVIDER, ExternalAuthIdentity.subject == subject))
         if winner is None or winner.user_id != user.id:
             raise YandexOAuthValidationError("Yandex identity is already linked to another account") from exc
+        winner.last_login_at = now
+        winner.email_at_link = email
     return user
