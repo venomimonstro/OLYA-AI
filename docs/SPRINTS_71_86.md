@@ -1,6 +1,6 @@
 # Sprints 71–86 — remaining MVP plan
 
-После Sprint 80 остаётся 6 спринтов до production acceptance. Sprint 80 harness готов, но реальный green load result требует target server и будет обязательным входом Sprint86.
+После Sprint 81 остаётся 5 спринтов до production acceptance. Sprint80 target load run остаётся обязательным внешним gate.
 
 ## Sprint 71 — DONE — Admin Control Center
 ## Sprint 72 — DONE — Admin User Operations
@@ -11,12 +11,8 @@
 ## Sprint 77 — DONE — Image Studio Beta Lock
 ## Sprint 78 — DONE — Product Analytics
 ## Sprint 79 — DONE — Frontend Polish / Minimal UI
-
-## Sprint 80 — HARNESS DONE — 10-User Real Load Acceptance
-Executable real-server harness требует ≥10 уникальных authenticated users и fail-closed по p95/error-rate/queue/throughput. Green target run ещё не заявлен.
-
-## Sprint 81 — Security MVP Pen-Test Simulation
-Системная симуляция атак по auth/API/files/research/sandbox/Git/billing/admin с regression cases для найденных дефектов.
+## Sprint 80 — HARNESS DONE / TARGET RUN REQUIRED — 10-User Real Load Acceptance
+## Sprint 81 — DONE — Security MVP Pen-Test Simulation
 
 ## Sprint 82 — Crash / Recovery / Data Integrity
 Kill/restart/DB/network/disk сценарии, exactly-once критических операций, восстановление незавершённых jobs и проверка отсутствия повреждения данных.
