@@ -73,6 +73,7 @@ class TaskSolvePlan:
 class TaskExecution:
     plan: TaskSolvePlan
     source_ids: list[str] = field(default_factory=list)
+    public_sources: list[dict] = field(default_factory=list)
     discovered_hits: int = 0
     fetched_sources: int = 0
     failed_fetches: int = 0
@@ -92,6 +93,7 @@ class TaskExecution:
             "failed_fetches": self.failed_fetches,
             "independent_hosts": self.independent_hosts,
             "website_checks": len(self.website_signals),
+            "sources": list(self.public_sources[:10]),
             "warnings": list(self.warnings[:5]),
         }
 
@@ -138,7 +140,7 @@ def _origin_aux_urls(url: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys((url, f"{origin}/robots.txt", f"{origin}/sitemap.xml")))
 
 
-def plan_task(question: str, *, max_queries: int = 4) -> TaskSolvePlan:
+def plan_task(question: str, *, max_queries: int = 4, force_web: bool = False) -> TaskSolvePlan:
     clean = " ".join(str(question or "").split()).strip()
     if not clean:
         return TaskSolvePlan(kind="direct", requires_web=False, reason="empty")
@@ -166,14 +168,14 @@ def plan_task(question: str, *, max_queries: int = 4) -> TaskSolvePlan:
             reason="local_recommendation",
         )
     freshness = classify_freshness(clean)
-    if freshness.required or any(marker in normalized for marker in _WEB_ACTION_MARKERS):
+    if freshness.required or force_web or any(marker in normalized for marker in _WEB_ACTION_MARKERS):
         planned = plan_research(clean)
         return TaskSolvePlan(
             kind="web_research", requires_web=True, queries=tuple(planned.queries[:max_queries]), source_mix=tuple(planned.source_mix),
             max_sources=5, force_freshness=bool(freshness.required), freshness_category=freshness.category,
             freshness_reason=freshness.reason,
             public_steps=("Ищу релевантные источники", "Сверяю несколько доменов", "Отделяю подтверждённые факты от предположений", "Формирую итог"),
-            reason="fresh_or_explicit_web_task",
+            reason="forced_web" if force_web and not freshness.required else "fresh_or_explicit_web_task",
         )
     return TaskSolvePlan(kind="direct", requires_web=False, reason="model_answer_sufficient")
 
@@ -253,7 +255,8 @@ def _website_signal_message(execution: TaskExecution) -> ChatMessage | None:
             f"title={row.get('title','')!r} title_chars={row.get('title_chars','n/a')}\n"
             f"meta_description={row.get('meta_description','')!r} meta_description_chars={row.get('meta_description_chars','n/a')}\n"
             f"canonical={row.get('canonical','')!r} robots={row.get('robots','')!r} noindex={row.get('noindex','n/a')}\n"
-            f"lang={row.get('lang','')!r} h1_count={row.get('h1_count','n/a')} h2_count={row.get('h2_count','n/a')} structured_data_blocks={row.get('structured_data_blocks','n/a')}"
+            f"lang={row.get('lang','')!r} h1_count={row.get('h1_count','n/a')} h2_count={row.get('h2_count','n/a')} structured_data_blocks={row.get('structured_data_blocks','n/a')}\n"
+            f"resource_preview={str(row.get('content_preview') or '')[:800]!r}"
         )
     return ChatMessage(role="user", content="\n\n".join(blocks))
 
@@ -271,8 +274,8 @@ def _discovery_message(execution: TaskExecution, rows: list[dict]) -> ChatMessag
     return ChatMessage(role="user", content="\n\n".join(blocks))
 
 
-async def execute_task_solver(*, db: Session, user: User, settings, discovery, fetcher, question: str, project_id: str | None) -> TaskExecution:
-    plan = plan_task(question, max_queries=int(getattr(settings, "research_max_search_queries", 4))); execution = TaskExecution(plan=plan)
+async def execute_task_solver(*, db: Session, user: User, settings, discovery, fetcher, question: str, project_id: str | None, force_web: bool = False) -> TaskExecution:
+    plan = plan_task(question, max_queries=int(getattr(settings, "research_max_search_queries", 4)), force_web=force_web); execution = TaskExecution(plan=plan)
     if not plan.requires_web: return execution
     require_capability(db, user.id, "research")
     gathered: list[SearchHit] = []
@@ -303,16 +306,26 @@ async def execute_task_solver(*, db: Session, user: User, settings, discovery, f
         if plan.kind == "website_audit":
             path = urlsplit(requested_url).path.casefold()
             resource = "robots" if path.endswith("/robots.txt") else ("sitemap" if "sitemap" in path else "page")
-            execution.website_signals.append({"resource": resource, "url": page.final_url, "http_status": page.http_status, "media_type": page.media_type, **dict(getattr(page, "metadata", {}) or {})})
+            execution.website_signals.append({
+                "resource": resource, "url": page.final_url, "http_status": page.http_status, "media_type": page.media_type,
+                "content_preview": page.content[:800] if resource in {"robots", "sitemap"} else "",
+                **dict(getattr(page, "metadata", {}) or {}),
+            })
         try:
             with db.begin_nested(): source = _store_page(db, user_id=user.id, project_id=project_id, page=page)
             source_rows.append(source)
         except Exception:
             failed += 1
     if source_rows: db.commit()
-    execution.source_ids = list(dict.fromkeys(source.id for source in source_rows))[:10]
+    unique_sources: list[ResearchSource] = []
+    seen_source_ids: set[str] = set()
+    for source in source_rows:
+        if source.id in seen_source_ids: continue
+        seen_source_ids.add(source.id); unique_sources.append(source)
+    execution.source_ids = [source.id for source in unique_sources[:10]]
+    execution.public_sources = [{"title": source.title, "url": source.final_url or source.url} for source in unique_sources[:10]]
     execution.fetched_sources = len(execution.source_ids); execution.failed_fetches = failed
-    execution.independent_hosts = len({_host(source.final_url or source.url) for source in source_rows if _host(source.final_url or source.url)})
+    execution.independent_hosts = len({_host(source.final_url or source.url) for source in unique_sources if _host(source.final_url or source.url)})
     execution.context_messages.append(_contract_message(execution))
     website_message = _website_signal_message(execution)
     if website_message is not None: execution.context_messages.append(website_message)
