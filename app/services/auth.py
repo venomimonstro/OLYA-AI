@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db import get_db
 from app.models import AuthSession, User
+from app.services.deadline import begin_deadline_from_headers
 
 
 _password_scheme = "scrypt-v1"
@@ -94,10 +95,6 @@ def create_session(db: Session, user: User) -> tuple[str, AuthSession]:
 def _expensive_public_request(request: Request) -> bool:
     """Identify public operations that can consume scarce CPU/RAM/disk/network."""
     path = request.url.path.rstrip("/")
-    # Recovery/status/cancel are lifecycle controls for work that was already
-    # admitted. They must remain available if rollout exposure changes or a user
-    # circuit breaker opens after the run started; otherwise the user can neither
-    # retrieve nor explicitly stop their already accepted local inference.
     if path.startswith("/v1/chat/runs/"):
         return False
     if path.startswith(
@@ -161,9 +158,6 @@ def _enforce_resource_lane(request: Request, db: Session, user: User) -> None:
     if not channel:
         return
 
-    # Do not admit durable image work into a queue with no consumer. A stale or
-    # absent worker otherwise leaves jobs queued indefinitely and lets clients
-    # consume storage/DB rows while the capability is effectively down.
     if channel == "image_worker" and image_operation_enabled:
         from app.services.image_worker_state import image_worker_snapshot
         worker = image_worker_snapshot(db, stale_seconds=90)
@@ -194,16 +188,21 @@ def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials
     user = db.get(User, session.user_id)
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account unavailable")
+    settings = getattr(request.app.state, "settings", get_settings())
+    try:
+        budget = begin_deadline_from_headers(
+            request.headers,
+            default_seconds=float(settings.request_timeout_seconds),
+            source="session",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    request.state.x1_deadline_seconds = budget.budget_seconds
     _enforce_public_exposure(request, db, user)
     _enforce_resource_lane(request, db, user)
     last_seen = session.last_seen_at if session.last_seen_at.tzinfo else session.last_seen_at.replace(tzinfo=timezone.utc)
     if (now - last_seen).total_seconds() > 300:
         session.last_seen_at = now
-    # A FastAPI yield dependency lives until a StreamingResponse closes. End the
-    # authentication transaction unconditionally so long chat/SSE connections do
-    # not pin a PostgreSQL connection for the duration of local inference. The
-    # Session object remains reusable by normal handlers and starts a fresh
-    # transaction on their next DB operation.
     db.commit()
     request.state.auth_session_id = session.id
     return user
