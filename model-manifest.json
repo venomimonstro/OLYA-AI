@@ -21,12 +21,11 @@
     "size_bytes": 20419565568
   },
   "host_policy": {
-    "minimum_detected_ram_gib": 5,
+    "minimum_detected_ram_gib": 8,
     "non_llama_reserve_gib": 2,
-    "llama_memory_cap_gib": 4,
+    "llama_memory_cap_gib": 6,
     "llama_min_memory_gib": 3,
     "context_tiers": [
-      {"min_ram_gib": 5, "max_ram_gib_exclusive": 8, "tokens": 4096},
       {"min_ram_gib": 8, "max_ram_gib_exclusive": 16, "tokens": 8192},
       {"min_ram_gib": 16, "max_ram_gib_exclusive": null, "tokens": 12288}
     ]
@@ -34,9 +33,12 @@
   "low_ram_policy": {
     "automatic_downgrade": false,
     "starter_profile": "starter_6gb",
+    "minimum_detected_ram_gib": 5,
     "primary_target_ram_gib": 6,
     "primary_target_cpu_cores": 4,
     "primary_target_disk_gib": 80,
-    "reason": "The production starter profile is explicitly pinned to Qwen3-4B Q4_K_M. X1 never silently changes model or quantization; larger models require a separate acceptance profile."
+    "context_tokens": 4096,
+    "llama_memory_limit": "3200m",
+    "reason": "The low-RAM starter is an explicit deployment profile, not a silent downgrade. Generic/full installation requires at least 8 GiB and may enable heavy workers; starter_6gb keeps those workers disabled."
   }
 }
