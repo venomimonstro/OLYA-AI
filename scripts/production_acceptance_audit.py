@@ -10,11 +10,13 @@ ROOT = Path(__file__).resolve().parents[1]
 def audit() -> dict:
     errors: list[dict] = []
     source = (ROOT / "scripts/production_acceptance.py").read_text("utf-8")
+    orchestrator = (ROOT / "scripts/final_release_acceptance.py").read_text("utf-8")
     health = (ROOT / "app/api/routes/health.py").read_text("utf-8")
     provenance = (ROOT / "scripts/build_provenance.py").read_text("utf-8")
     dockerfile = (ROOT / "Dockerfile").read_text("utf-8")
     regression = (ROOT / "scripts/run_full_regression.py").read_text("utf-8")
     roadmap = (ROOT / "docs/SPRINTS_71_86.md").read_text("utf-8")
+    runbook = (ROOT / "docs/PRODUCTION_RELEASE_RUNBOOK.md").read_text("utf-8")
 
     for token in (
         '"x1-production-acceptance-v2"',
@@ -58,6 +60,31 @@ def audit() -> dict:
     if "python -m scripts.build_provenance" not in dockerfile or "/app/BUILD_PROVENANCE.json" not in dockerfile:
         errors.append({"code": "docker_provenance_embedding_missing"})
 
+    for token in (
+        '"x1-final-release-acceptance-v1"',
+        "X1_LOAD_TOKENS",
+        "X1_PRODUCTION_ADMIN_TOKEN",
+        "scripts/load_acceptance.py",
+        "scripts/rc_release_candidate.py",
+        "scripts/production_acceptance.py",
+        '"accepted_for_launch": status == "passed"',
+        "if load[\"status\"] != \"passed\"",
+        "if rc[\"status\"] != \"passed\"",
+    ):
+        if token not in orchestrator:
+            errors.append({"code": "final_release_orchestrator_contract_missing", "token": token})
+    if "shell=True" in orchestrator or "X1_LOAD_TOKENS=" in orchestrator or "X1_PRODUCTION_ADMIN_TOKEN=" in orchestrator:
+        errors.append({"code": "final_release_orchestrator_secret_or_shell_violation"})
+
+    for token in (
+        "scripts/final_release_acceptance.py",
+        "X1_LOAD_TOKENS",
+        "X1_PRODUCTION_ADMIN_TOKEN",
+        '"accepted_for_launch": true',
+    ):
+        if token not in runbook:
+            errors.append({"code": "production_runbook_contract_missing", "token": token})
+
     if "shell=True" in source:
         errors.append({"code": "production_acceptance_shell_execution_forbidden"})
     if "admin-token" in source and "--admin-token-env" not in source:
@@ -68,7 +95,7 @@ def audit() -> dict:
         errors.append({"code": "roadmap_must_not_claim_unrun_production_acceptance"})
 
     return {
-        "format": "x1-production-acceptance-audit-v2",
+        "format": "x1-production-acceptance-audit-v3",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "requires_external_production_run": True,
@@ -76,6 +103,7 @@ def audit() -> dict:
         "requires_runtime_build_provenance": True,
         "requires_external_https_or_loopback": True,
         "requires_live_billing_configuration": True,
+        "one_command_release_workflow": True,
     }
 
 
