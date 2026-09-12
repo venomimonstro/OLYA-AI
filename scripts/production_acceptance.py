@@ -8,6 +8,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,7 +68,7 @@ def _provenance_from_command(check: dict) -> tuple[dict, dict | None]:
 
 
 def http_json(name: str, url: str, token: str = "", timeout: float = 30.0) -> tuple[dict, dict | None]:
-    headers = {"Accept": "application/json", "User-Agent": "X1-Production-Acceptance/1"}
+    headers = {"Accept": "application/json", "User-Agent": "X1-Production-Acceptance/2"}
     if token:
         headers["Authorization"] = "Bearer " + token
     try:
@@ -83,7 +84,15 @@ def http_json(name: str, url: str, token: str = "", timeout: float = 30.0) -> tu
         return {"name": name, "status": "failed", "error": type(exc).__name__}, None
 
 
-def evidence(name: str, relative: str, *, expected_format: str, head: str, pass_field: str = "status") -> dict:
+def evidence(
+    name: str,
+    relative: str,
+    *,
+    expected_format: str,
+    head: str,
+    pass_field: str = "status",
+    source_fingerprint: str = "",
+) -> dict:
     path = ROOT / relative
     if not path.is_file():
         return {"name": name, "status": "failed", "reason": "missing", "path": relative}
@@ -96,13 +105,18 @@ def evidence(name: str, relative: str, *, expected_format: str, head: str, pass_
     passed = payload.get(pass_field) is True if pass_field == "passed" else payload.get(pass_field) == "passed"
     report_head = str(payload.get("git_head") or "").lower()
     same_head = bool(head and report_head == head)
+    report_fingerprint = str(payload.get("source_fingerprint") or "").lower()
+    same_source = True if not source_fingerprint else report_fingerprint == source_fingerprint
     return {
         "name": name,
-        "status": "passed" if passed and same_head else "failed",
+        "status": "passed" if passed and same_head and same_source else "failed",
         "payload_passed": passed,
         "expected_head": head,
         "report_head": report_head,
         "same_head": same_head,
+        "expected_source_fingerprint": source_fingerprint or None,
+        "report_source_fingerprint": report_fingerprint or None,
+        "same_source": same_source,
         "path": relative,
     }
 
@@ -153,7 +167,27 @@ def main() -> int:
         checks.append({"name": "current_git_head", "status": "failed", "reason": "git_head_unavailable"})
     else:
         checks.append({"name": "current_git_head", "status": "passed", "git_head": head})
+
+    worktree = command("git_worktree_clean", ["git", "status", "--porcelain", "--untracked-files=all"], timeout=30)
+    dirty_rows = [row for row in (worktree.get("stdout") or "").splitlines() if row.strip()]
+    worktree["dirty_entry_count"] = len(dirty_rows)
+    worktree.pop("stdout", None)
+    if dirty_rows:
+        worktree["status"] = "failed"
+        worktree["reason"] = "working_tree_not_clean"
+    checks.append(worktree)
     checks.append({"name": "admin_token_supplied", "status": "passed" if token else "failed"})
+
+    parsed_target = urlsplit(args.base_url)
+    local_hosts = {"127.0.0.1", "localhost", "::1"}
+    transport_ok = parsed_target.scheme == "https" or (parsed_target.scheme == "http" and (parsed_target.hostname or "") in local_hosts)
+    checks.append({
+        "name": "production_transport",
+        "status": "passed" if transport_ok else "failed",
+        "scheme": parsed_target.scheme,
+        "host": parsed_target.hostname,
+        "policy": "HTTPS required except loopback acceptance",
+    })
 
     candidate_provenance_check = command(
         "candidate_source_provenance",
@@ -165,8 +199,8 @@ def main() -> int:
     candidate_fingerprint = str((candidate_provenance or {}).get("source_fingerprint") or "")
 
     # Candidate/evidence must be generated from exactly this immutable source revision.
-    checks.append(evidence("release_candidate", "backups/rc-release-candidate-latest.json", expected_format="x1-release-candidate-v3", head=head))
-    checks.append(evidence("target_load", "backups/load-acceptance-latest.json", expected_format="x1-real-load-acceptance-v1", head=head, pass_field="passed"))
+    checks.append(evidence("release_candidate", "backups/rc-release-candidate-latest.json", expected_format="x1-release-candidate-v4", head=head, source_fingerprint=candidate_fingerprint))
+    checks.append(evidence("target_load", "backups/load-acceptance-latest.json", expected_format="x1-real-load-acceptance-v2", head=head, pass_field="passed", source_fingerprint=candidate_fingerprint))
     checks.append(evidence("release_gate", "backups/release-gate-latest.json", expected_format="x1-release-gate-v4", head=head))
     checks.append(generic_evidence("restore_drill", "backups/restore-drill-latest.json"))
     checks.append(generic_evidence("runtime_chaos", "backups/rc-chaos-runtime-latest.json"))
@@ -203,6 +237,16 @@ def main() -> int:
     checks.append(internal_http_probe("searxng_health", "http://searxng:8080/search?q=x1-production-acceptance&format=json"))
     checks.append(internal_http_probe("sandbox_worker_health", "http://sandbox-worker:8090/health"))
     checks.append(internal_http_probe("document_worker_health", "http://document-worker:8091/health"))
+
+    billing_code = (
+        "from app.core.config import get_settings; "
+        "from app.services.billing import checkout_url; "
+        "s=get_settings(); "
+        "assert checkout_url(s,'production-acceptance-probe') is not None; "
+        "assert bool(str(s.payment_ingest_secret or '').strip()); "
+        "assert any(int(getattr(s,f'billing_price_{p}_minor',0))>0 for p in ('x1','pro','max','business'))"
+    )
+    checks.append(command("billing_runtime_config", ["docker", "compose", "exec", "-T", "app", "python", "-c", billing_code], timeout=30))
 
     ready_check, ready = http_json("public_ready", args.base_url.rstrip("/") + "/ready", timeout=30)
     if ready_check["status"] == "passed" and str((ready or {}).get("status") or "") != "stable":
