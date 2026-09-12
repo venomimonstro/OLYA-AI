@@ -1,8 +1,8 @@
 # Sprints 71–86 — remaining MVP plan
 
-После завершения Sprint 70 до production acceptance остаётся 16 спринтов.
+После завершения Sprint 71 до production acceptance остаётся 15 спринтов.
 
-## Sprint 71 — Admin Control Center
+## Sprint 71 — DONE — Admin Control Center
 Единая операционная панель администратора: здоровье, нагрузка, очереди, capacity, billing/API/complaints/release-сигналы без дублирования существующих admin services.
 
 ## Sprint 72 — Admin User Operations
