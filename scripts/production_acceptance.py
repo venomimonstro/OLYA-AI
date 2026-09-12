@@ -11,6 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
+BUILD_PROVENANCE_FORMAT = "x1-build-provenance-v1"
 
 
 def utcnow() -> str:
@@ -38,6 +39,31 @@ def command(name: str, argv: list[str], timeout: int = 30) -> dict:
         }
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"name": name, "status": "failed", "error": type(exc).__name__}
+
+
+def _provenance_from_command(check: dict) -> tuple[dict, dict | None]:
+    if check.get("status") != "passed":
+        return check, None
+    try:
+        payload = json.loads(check.get("stdout") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        check["status"] = "failed"
+        check["error"] = type(exc).__name__
+        return check, None
+    fingerprint = str(payload.get("source_fingerprint") or "").lower()
+    valid = (
+        payload.get("format") == BUILD_PROVENANCE_FORMAT
+        and len(fingerprint) == 64
+        and all(char in "0123456789abcdef" for char in fingerprint)
+    )
+    check["format"] = payload.get("format")
+    check["source_fingerprint"] = fingerprint
+    check["file_count"] = payload.get("file_count")
+    if not valid:
+        check["status"] = "failed"
+        check["reason"] = "invalid_build_provenance"
+        return check, None
+    return check, payload
 
 
 def http_json(name: str, url: str, token: str = "", timeout: float = 30.0) -> tuple[dict, dict | None]:
@@ -129,6 +155,15 @@ def main() -> int:
         checks.append({"name": "current_git_head", "status": "passed", "git_head": head})
     checks.append({"name": "admin_token_supplied", "status": "passed" if token else "failed"})
 
+    candidate_provenance_check = command(
+        "candidate_source_provenance",
+        ["python3", "-m", "scripts.build_provenance", "--root", str(ROOT), "--no-manifest"],
+        timeout=60,
+    )
+    candidate_provenance_check, candidate_provenance = _provenance_from_command(candidate_provenance_check)
+    checks.append(candidate_provenance_check)
+    candidate_fingerprint = str((candidate_provenance or {}).get("source_fingerprint") or "")
+
     # Candidate/evidence must be generated from exactly this immutable source revision.
     checks.append(evidence("release_candidate", "backups/rc-release-candidate-latest.json", expected_format="x1-release-candidate-v3", head=head))
     checks.append(evidence("target_load", "backups/load-acceptance-latest.json", expected_format="x1-real-load-acceptance-v1", head=head, pass_field="passed"))
@@ -150,6 +185,19 @@ def main() -> int:
             running["status"] = "failed"
     checks.append(running)
 
+    runtime_provenance_check = command(
+        "runtime_source_provenance",
+        ["docker", "compose", "exec", "-T", "app", "python", "-m", "scripts.build_provenance", "--root", "/app", "--no-manifest"],
+        timeout=60,
+    )
+    runtime_provenance_check, runtime_provenance = _provenance_from_command(runtime_provenance_check)
+    runtime_fingerprint = str((runtime_provenance or {}).get("source_fingerprint") or "")
+    runtime_provenance_check["expected_source_fingerprint"] = candidate_fingerprint
+    runtime_provenance_check["same_as_candidate"] = bool(candidate_fingerprint and runtime_fingerprint == candidate_fingerprint)
+    if not runtime_provenance_check["same_as_candidate"]:
+        runtime_provenance_check["status"] = "failed"
+    checks.append(runtime_provenance_check)
+
     checks.append(command("postgresql_ready", ["docker", "compose", "exec", "-T", "db", "pg_isready", "-U", "x1", "-d", "x1"], timeout=30))
     checks.append(internal_http_probe("qwen_llama_health", "http://llama:8080/health"))
     checks.append(internal_http_probe("searxng_health", "http://searxng:8080/search?q=x1-production-acceptance&format=json"))
@@ -161,6 +209,20 @@ def main() -> int:
         ready_check["status"] = "failed"
         ready_check["ready_status"] = (ready or {}).get("status")
     checks.append(ready_check)
+
+    public_provenance_check, public_provenance = http_json("public_build_provenance", args.base_url.rstrip("/") + "/version", timeout=30)
+    public_fingerprint = str((public_provenance or {}).get("source_fingerprint") or "").lower()
+    public_provenance_check["format"] = (public_provenance or {}).get("format")
+    public_provenance_check["source_fingerprint"] = public_fingerprint
+    public_provenance_check["expected_source_fingerprint"] = candidate_fingerprint
+    public_provenance_check["same_as_candidate"] = bool(candidate_fingerprint and public_fingerprint == candidate_fingerprint)
+    if (
+        public_provenance_check["status"] != "passed"
+        or (public_provenance or {}).get("format") != BUILD_PROVENANCE_FORMAT
+        or not public_provenance_check["same_as_candidate"]
+    ):
+        public_provenance_check["status"] = "failed"
+    checks.append(public_provenance_check)
 
     if token:
         release_check, release = http_json("admin_release_readiness", args.base_url.rstrip("/") + "/v1/admin/reliability/release-readiness?refresh=true", token=token, timeout=180)
@@ -192,10 +254,11 @@ def main() -> int:
 
     failed = [row["name"] for row in checks if row.get("status") != "passed"]
     payload = {
-        "format": "x1-production-acceptance-v1",
+        "format": "x1-production-acceptance-v2",
         "status": "passed" if not failed else "failed",
         "accepted_for_launch": not failed,
         "git_head": head,
+        "source_fingerprint": candidate_fingerprint,
         "target": args.base_url,
         "require_images": bool(args.require_images),
         "checked_at": utcnow(),
