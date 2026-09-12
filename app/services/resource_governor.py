@@ -57,18 +57,32 @@ class _Waiter:
 
 
 class ResourceGovernor:
-    """Bounded priority/fair admission for scarce local inference."""
+    """Bounded priority/fair admission for scarce local inference.
 
-    def __init__(self, max_concurrent: int = 1, max_queue: int = 64, wait_timeout_seconds: float = 120.0) -> None:
+    A small CPU node intentionally decodes one generation at a time. The queue
+    keeps bursts away from llama.cpp, while the per-principal cap prevents one
+    account or API client from occupying every waiting slot.
+    """
+
+    def __init__(
+        self,
+        max_concurrent: int = 1,
+        max_queue: int = 64,
+        wait_timeout_seconds: float = 120.0,
+        max_queued_per_principal: int = 2,
+    ) -> None:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be >= 1")
         if max_queue < 0:
             raise ValueError("max_queue must be >= 0")
         if wait_timeout_seconds <= 0:
             raise ValueError("wait_timeout_seconds must be > 0")
+        if max_queued_per_principal < 1:
+            raise ValueError("max_queued_per_principal must be >= 1")
         self.max_concurrent = int(max_concurrent)
         self.max_queue = int(max_queue)
         self.wait_timeout_seconds = float(wait_timeout_seconds)
+        self.max_queued_per_principal = int(max_queued_per_principal)
         self._active = 0
         self._sequence = 0
         self._waiters: list[_Waiter] = []
@@ -76,6 +90,7 @@ class ResourceGovernor:
         self._grants_by_class: dict[str, int] = {}
         self._timeouts = 0
         self._rejections = 0
+        self._principal_rejections = 0
 
     @property
     def waiting(self) -> int:
@@ -96,6 +111,8 @@ class ResourceGovernor:
         return name if name in _PLAN_BOOST else "free"
 
     def _score(self, waiter: _Waiter, now: float) -> tuple[float, int]:
+        # Aging is stronger than the largest paid-plan boost. No Free/Deep job
+        # can starve forever, while interactive and paid work still feels faster.
         age_points = max(0.0, now - waiter.enqueued_at) / 2.0
         score = _PRIORITY_BASE[waiter.priority_class] + _PLAN_BOOST[waiter.plan] - age_points
         return score, waiter.sequence
@@ -105,6 +122,11 @@ class ResourceGovernor:
             return None
         now = monotonic()
         return min(self._waiters, key=lambda row: self._score(row, now))
+
+    def _queued_for_principal(self, principal: str) -> int:
+        if not principal:
+            return 0
+        return sum(1 for row in self._waiters if row.principal == principal)
 
     def snapshot(self) -> dict:
         by_class: dict[str, int] = {}
@@ -120,12 +142,14 @@ class ResourceGovernor:
             "max_concurrent": self.max_concurrent,
             "waiting": len(self._waiters),
             "max_queue": self.max_queue,
+            "max_queued_per_principal": self.max_queued_per_principal,
             "waiting_by_priority": by_class,
             "waiting_by_channel": by_channel,
             "oldest_wait_seconds": round(oldest_wait_seconds, 3),
             "grants_by_priority": dict(self._grants_by_class),
             "timeouts": self._timeouts,
             "rejections": self._rejections,
+            "principal_rejections": self._principal_rejections,
             "aging_seconds_per_point": 2.0,
         }
 
@@ -162,6 +186,10 @@ class ResourceGovernor:
                 if len(self._waiters) >= self.max_queue:
                     self._rejections += 1
                     raise ResourceBusyError("local inference queue is full")
+                if principal and self._queued_for_principal(principal) >= self.max_queued_per_principal:
+                    self._rejections += 1
+                    self._principal_rejections += 1
+                    raise ResourceBusyError("this account already has a request waiting for local inference")
                 self._sequence += 1
                 waiter = _Waiter(
                     sequence=self._sequence,
