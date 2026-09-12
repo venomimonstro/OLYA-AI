@@ -42,9 +42,9 @@ def restore_legacy_suite() -> None:
             if member.issym() or member.islnk() or member.isdev() or member.isfifo():
                 raise RuntimeError(f"Unsafe historical test archive member: {raw}")
             if path.is_absolute() or ".." in path.parts:
-                raise RuntimeError(f"Unsafe historical regression archive path: {raw}")
+                raise RuntimeError(f"Unsafe historical test archive path: {raw}")
             if len(path.parts) != 2 or path.parts[0] != "tests" or not path.name.startswith("test_") or path.suffix != ".py":
-                raise RuntimeError(f"Unexpected historical regression archive member: {raw}")
+                raise RuntimeError(f"Unexpected historical test archive member: {raw}")
             if path.name in found:
                 raise RuntimeError(f"Duplicate historical regression module: {path.name}")
             extracted = archive.extractfile(member)
