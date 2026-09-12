@@ -52,6 +52,16 @@ def write_report(path: Path, payload: dict) -> None:
     os.replace(tmp, path)
 
 
+def _chat_payload(user_index: int, round_index: int) -> dict:
+    prompt = f"Load acceptance user {user_index} round {round_index}: reply with OK and one short sentence."
+    return {
+        "messages": [{"role": "user", "content": prompt}],
+        "mode": "fast",
+        "verification": "off",
+        "max_output_tokens": 64,
+    }
+
+
 async def _identity(client: httpx.AsyncClient, base_url: str, token: str, timeout: float) -> str:
     response = await client.get(
         base_url.rstrip("/") + "/v1/auth/me",
@@ -73,16 +83,10 @@ async def _identity(client: httpx.AsyncClient, base_url: str, token: str, timeou
 async def _one(client: httpx.AsyncClient, base_url: str, token: str, user_index: int, round_index: int, timeout: float) -> Sample:
     started = time.perf_counter()
     try:
-        prompt = f"Load acceptance user {user_index} round {round_index}: reply with OK and one short sentence."
         response = await client.post(
             base_url.rstrip("/") + "/v1/chat",
             headers={"Authorization": "Bearer " + token, "X-X1-Deadline-Ms": str(int(timeout * 1000))},
-            json={
-                "messages": [{"role": "user", "content": prompt}],
-                "mode": "fast",
-                "verification": "off",
-                "max_output_tokens": 64,
-            },
+            json=_chat_payload(user_index, round_index),
             timeout=timeout + 5,
         )
         latency = int((time.perf_counter() - started) * 1000)
