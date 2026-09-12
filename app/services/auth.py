@@ -188,6 +188,12 @@ def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials
     user = db.get(User, session.user_id)
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account unavailable")
+    from app.services.owner_integrations import email_verification_required_for_user
+    if email_verification_required_for_user(db, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "email_verification_required", "message": "Confirm your email address before using X1."},
+        )
     settings = getattr(request.app.state, "settings", get_settings())
     try:
         budget = begin_deadline_from_headers(
