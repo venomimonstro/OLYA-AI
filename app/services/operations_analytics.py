@@ -107,7 +107,7 @@ def operations_summary(db: Session, *, window_hours: int = 24, monthly_server_co
     tables = set(inspect(db.get_bind()).get_table_names())
     revenue_minor = 0; resource_cost_microunits = 0
     if "payment_records" in tables:
-        revenue_minor = int(_optional_scalar(db,"SELECT COALESCE(SUM(amount_minor),0) FROM payment_records WHERE created_at >= :since AND status IN ('received','paid','reconciled','succeeded')",{"since":since}))
+        revenue_minor = int(_optional_scalar(db,"SELECT COALESCE(SUM(amount_minor),0) FROM payment_records WHERE created_at >= :since AND kind = 'payment' AND status IN ('received','paid','reconciled','succeeded','applied')",{"since":since}))
     if "resource_expense_events" in tables:
         resource_cost_microunits = int(_optional_scalar(db,"SELECT COALESCE(SUM(cost_microunits),0) FROM resource_expense_events WHERE created_at >= :since",{"since":since}))
     allocated_server_cost = round(monthly_server_cost_rub*(window_hours/(24*30)),2)
@@ -115,7 +115,7 @@ def operations_summary(db: Session, *, window_hours: int = 24, monthly_server_co
 
     return {
       "window_hours":window_hours,
-      "economics":{"recognized_revenue_rub":revenue_rub,"allocated_server_cost_rub":allocated_server_cost,"gross_after_server_rub":round(revenue_rub-allocated_server_cost,2),"resource_cost_microunits":resource_cost_microunits,"note":"Gross-after-server excludes taxes and other external costs; resource microunits are shown separately."},
+      "economics":{"recognized_revenue_rub":revenue_rub,"allocated_server_cost_rub":allocated_server_cost,"gross_after_server_rub":round(revenue_rub-allocated_server_cost,2),"resource_cost_microunits":resource_cost_microunits,"note":"Gross-after-server excludes taxes, acquiring fees, marketing and other external costs; resource microunits are shown separately."},
       "traffic":{"requests":len(usage),"successful":len(success),"success_rate":round(len(success)/max(1,len(usage)),4),"active_users":len(users),"p95_duration_ms":_pct(durations,.95),"p95_queue_ms":_pct(queues,.95),"inference_minutes":round(inference_ms/60000,3),"cpu_seconds_per_success":round((inference_ms/1000)/max(1,len(success)),3),"context_efficiency_ratio":round(compiled_chars/max(1,raw_chars),4),"frustration_rate":round(frustration/max(1,len(usage)),4)},
       "compute_economics":_compute_economics(db, since),
       "resources":{**_host_metrics(),"image_storage_mb":round(storage_bytes/1024/1024,2)},
