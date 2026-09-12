@@ -6,7 +6,7 @@ import html
 import ipaddress
 import re
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
@@ -24,13 +24,8 @@ _BLOCKED_HOSTS = {"localhost", "localhost.localdomain"}
 _ALLOWED_SCHEMES = {"http", "https"}
 _ALLOWED_PORTS = {80, 443, None}
 _ALLOWED_MEDIA_TYPES = {
-    "text/html",
-    "application/xhtml+xml",
-    "text/plain",
-    "application/xml",
-    "text/xml",
-    "application/rss+xml",
-    "application/atom+xml",
+    "text/html", "application/xhtml+xml", "text/plain", "application/xml", "text/xml",
+    "application/rss+xml", "application/atom+xml",
 }
 _XML_MEDIA_TYPES = {"application/xml", "text/xml", "application/rss+xml", "application/atom+xml"}
 
@@ -41,26 +36,73 @@ class UnsafeURL(ResearchFetchError): pass
 
 class _TextExtractor(HTMLParser):
     def __init__(self) -> None:
-        super().__init__(convert_charrefs=True); self.title=""; self._in_title=False; self._skip=0; self.parts:list[str]=[]
+        super().__init__(convert_charrefs=True)
+        self.title=""; self._in_title=False; self._skip=0; self.parts:list[str]=[]
+        self.meta_description=""; self.canonical=""; self.robots=""; self.lang=""
+        self.h1_count=0; self.h2_count=0; self.structured_data_count=0
+
+    @staticmethod
+    def _attrs(attrs) -> dict[str, str]:
+        return {str(k).lower(): str(v or "") for k, v in attrs if k}
+
     def handle_starttag(self, tag: str, attrs) -> None:
-        tag=tag.lower()
+        tag=tag.lower(); data=self._attrs(attrs)
+        if tag == "html" and not self.lang:
+            self.lang=data.get("lang", "")[:40]
+        if tag == "meta":
+            name=data.get("name", "").casefold()
+            if name == "description" and not self.meta_description:
+                self.meta_description=data.get("content", "")[:1000]
+            elif name in {"robots", "googlebot", "yandex"} and data.get("content"):
+                value=data.get("content", "")[:500]
+                self.robots=(self.robots+", "+value).strip(", ")[:1000]
+        elif tag == "link":
+            rel={item.casefold() for item in data.get("rel", "").split()}
+            if "canonical" in rel and not self.canonical:
+                self.canonical=data.get("href", "")[:2000]
+        elif tag == "h1":
+            self.h1_count += 1
+        elif tag == "h2":
+            self.h2_count += 1
+        if tag == "script" and data.get("type", "").casefold() == "application/ld+json":
+            self.structured_data_count += 1
         if tag in {"script","style","noscript","svg","canvas","template"}: self._skip += 1
         elif tag == "title": self._in_title=True
         elif tag in {"p","div","article","section","main","li","br","h1","h2","h3","h4","td","th"}: self.parts.append("\n")
+
     def handle_endtag(self, tag: str) -> None:
         tag=tag.lower()
         if tag in {"script","style","noscript","svg","canvas","template"} and self._skip: self._skip -= 1
         elif tag == "title": self._in_title=False
         elif tag in {"p","div","article","section","main","li","h1","h2","h3","h4","tr"}: self.parts.append("\n")
+
     def handle_data(self, data: str) -> None:
         if self._skip: return
         value=_SPACE_RE.sub(" ",data).strip()
         if not value: return
         if self._in_title and not self.title: self.title=value[:500]
         self.parts.append(value)
+
     def text(self) -> str:
         raw=" ".join(self.parts); raw=re.sub(r"[ \t]+\n","\n",raw); raw=re.sub(r"\n[ \t]+","\n",raw); raw=re.sub(r"\n{3,}","\n\n",raw)
         return html.unescape(raw).strip()
+
+    def metadata(self) -> dict:
+        robots=self.robots.casefold()
+        return {
+            "title": self.title[:500],
+            "title_chars": len(self.title),
+            "meta_description": self.meta_description,
+            "meta_description_chars": len(self.meta_description),
+            "canonical": self.canonical,
+            "robots": self.robots,
+            "noindex": "noindex" in robots,
+            "nofollow": "nofollow" in robots,
+            "lang": self.lang,
+            "h1_count": self.h1_count,
+            "h2_count": self.h2_count,
+            "structured_data_blocks": self.structured_data_count,
+        }
 
 
 def normalize_url(url: str) -> str:
@@ -98,14 +140,17 @@ async def validate_public_url(url: str) -> str:
     return normalized
 
 
-def extract_text(body: str, media_type: str) -> tuple[str,str]:
-    if media_type == "text/plain": return "", _SPACE_RE.sub(" ",body).strip()
+def extract_document(body: str, media_type: str) -> tuple[str, str, dict]:
+    if media_type == "text/plain": return "", _SPACE_RE.sub(" ",body).strip(), {}
     if media_type in _XML_MEDIA_TYPES:
-        # Sitemaps/RSS are data, not executable markup. Strip tags to retain
-        # URLs/text while keeping the same bounded source-context pipeline.
-        text = re.sub(r"<[^>]+>", " ", body)
-        return "", _SPACE_RE.sub(" ", html.unescape(text)).strip()
-    parser=_TextExtractor(); parser.feed(body); return parser.title, parser.text()
+        text=re.sub(r"<[^>]+>"," ",body)
+        return "", _SPACE_RE.sub(" ",html.unescape(text)).strip(), {}
+    parser=_TextExtractor(); parser.feed(body); return parser.title, parser.text(), parser.metadata()
+
+
+def extract_text(body: str, media_type: str) -> tuple[str,str]:
+    title, text, _metadata = extract_document(body, media_type)
+    return title, text
 
 
 def _tokens(text: str) -> set[str]: return {item.casefold() for item in _WORD_RE.findall(text)}
@@ -123,7 +168,7 @@ def lexical_excerpts(content: str, query: str, *, limit: int=8, window: int=900)
 
 @dataclass(frozen=True)
 class FetchedPage:
-    requested_url:str; final_url:str; title:str; content:str; http_status:int; media_type:str
+    requested_url:str; final_url:str; title:str; content:str; http_status:int; media_type:str; metadata:dict=field(default_factory=dict)
 
 
 class ResearchFetcher:
@@ -140,7 +185,7 @@ class ResearchFetcher:
 
     async def _fetch_with_budget(self,url:str,budget:float)->FetchedPage:
         current=await validate_public_url(url); requested=current
-        headers={"User-Agent":"X1-Research/0.1 (+local research fetcher)","Accept":"text/html,application/xhtml+xml,application/xml,text/xml,text/plain;q=0.9,*/*;q=0.1"}
+        headers={"User-Agent":"X1-Research/0.2 (+local research fetcher)","Accept":"text/html,application/xhtml+xml,application/xml,text/xml,text/plain;q=0.9,*/*;q=0.1"}
         timeout=httpx.Timeout(max(0.1,min(self.timeout_seconds,budget)))
         async with httpx.AsyncClient(timeout=timeout,follow_redirects=False,headers=headers,trust_env=False) as client:
             for redirect_index in range(self.max_redirects+1):
@@ -167,9 +212,10 @@ class ResearchFetcher:
                             size += len(chunk)
                             if size>self.max_bytes: raise ResearchFetchError("Source exceeds byte limit")
                             chunks.append(chunk)
-                        encoding=response.encoding or "utf-8"; body=b"".join(chunks).decode(encoding,errors="replace"); title,content=extract_text(body,media_type); content=content[:self.max_chars].strip()
+                        encoding=response.encoding or "utf-8"; body=b"".join(chunks).decode(encoding,errors="replace")
+                        title,content,metadata=extract_document(body,media_type); content=content[:self.max_chars].strip()
                         if not content: raise ResearchFetchError("Source contains no usable text")
-                        return FetchedPage(requested,current,title or urlsplit(current).hostname or current,content,response.status_code,media_type)
+                        return FetchedPage(requested,current,title or urlsplit(current).hostname or current,content,response.status_code,media_type,metadata)
                 except httpx.HTTPError as exc: raise ResearchFetchError(f"HTTP fetch failed: {exc.__class__.__name__}") from exc
         raise ResearchFetchError("Unable to fetch source")
 
