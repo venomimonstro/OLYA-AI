@@ -32,12 +32,18 @@ def plan_research(question: str, *, intent: str = "general", location: str | Non
         base = f"{kind} {place}"
         return ResearchPlan(
             intent="local_business",
-            queries=[base, f"{base} официальный сайт", f"{base} отзывы", f"{base} цены", f"{base} рейтинг"],
+            queries=[
+                base,
+                f"{base} отзывы Яндекс 2ГИС ПроДокторов",
+                f"{base} цены специалисты",
+                f"{base} лицензия официальный сайт",
+                f"{base} рейтинг",
+            ],
             freshness="current",
-            source_mix=["official", "maps_catalog", "reviews", "independent"],
+            source_mix=["official", "maps_catalog", "reviews", "pricing", "professional", "independent"],
             freshness_category="availability",
-            freshness_reason="Локальные компании, часы работы, цены и доступность требуют актуальной проверки.",
-            freshness_max_age_seconds=60 * 60,
+            freshness_reason="Локальные компании, репутация, специалисты, цены и доступность требуют актуальной проверки.",
+            freshness_max_age_seconds=6 * 60 * 60,
             freshness_min_independent_hosts=2,
         )
 
