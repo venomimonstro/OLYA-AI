@@ -9,6 +9,11 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    from scripts.build_provenance import FORMAT as BUILD_PROVENANCE_FORMAT, source_fingerprint
+except ModuleNotFoundError:  # direct `python scripts/rc_release_candidate.py`
+    from build_provenance import FORMAT as BUILD_PROVENANCE_FORMAT, source_fingerprint
+
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_REPORT = ROOT / "backups" / "model-regression-latest.json"
 MODEL_BASELINE = ROOT / "backups" / "model-regression-baseline.json"
@@ -78,7 +83,7 @@ def _report_passed(data: dict) -> tuple[bool, str]:
         comparison = data.get("comparison") or {}
         critical = (data.get("aggregate") or {}).get("critical_failed") or []
         return bool(comparison.get("passed")) and not critical, "comparison.passed + critical_failed=[]"
-    if data.get("format") == "x1-real-load-acceptance-v1":
+    if data.get("format") == "x1-real-load-acceptance-v2":
         return data.get("passed") is True, "passed=true"
     return data.get("status") == "passed", "status=passed"
 
@@ -97,12 +102,15 @@ def require_report(path: Path, expected_format: str | None = None) -> dict:
     if data.get("format") == "x1-model-regression-report-v1":
         item["critical_failed"] = (data.get("aggregate") or {}).get("critical_failed") or []
         item["comparison_passed"] = bool((data.get("comparison") or {}).get("passed"))
-    elif data.get("format") == "x1-real-load-acceptance-v1":
+    elif data.get("format") == "x1-real-load-acceptance-v2":
         item["virtual_users"] = data.get("virtual_users")
+        item["unique_authenticated_users"] = data.get("unique_authenticated_users")
         item["requests"] = data.get("requests")
         item["error_rate"] = data.get("error_rate")
         item["p95_latency_ms"] = (data.get("latency_ms") or {}).get("p95")
         item["report_head"] = data.get("git_head")
+        item["source_fingerprint"] = data.get("source_fingerprint")
+        item["target_build_fingerprint"] = data.get("target_build_fingerprint")
     else:
         item["payload_status"] = data.get("status")
     return item
@@ -124,8 +132,59 @@ def verify_release_head() -> dict:
     return verify_report_head(ROOT / "backups" / "release-gate-latest.json", "release_evidence_current_head")
 
 
-def verify_load_head() -> dict:
-    return verify_report_head(LOAD_REPORT, "load_evidence_current_head")
+def verify_load_identity() -> dict:
+    expected_head = current_git_head()
+    expected_fingerprint = str(source_fingerprint(ROOT).get("source_fingerprint") or "")
+    if not expected_head or not expected_fingerprint or not LOAD_REPORT.is_file():
+        return {"name": "load_evidence_current_source", "status": "failed", "expected_head": expected_head, "reason": "missing_head_fingerprint_or_report"}
+    try:
+        report = json.loads(LOAD_REPORT.read_text("utf-8"))
+    except Exception as exc:
+        return {"name": "load_evidence_current_source", "status": "failed", "expected_head": expected_head, "reason": type(exc).__name__}
+    report_head = str(report.get("git_head") or "").lower()
+    report_fingerprint = str(report.get("source_fingerprint") or "").lower()
+    target_fingerprint = str(report.get("target_build_fingerprint") or "").lower()
+    same = (
+        report.get("format") == "x1-real-load-acceptance-v2"
+        and report.get("passed") is True
+        and report_head == expected_head
+        and report_fingerprint == expected_fingerprint
+        and target_fingerprint == expected_fingerprint
+    )
+    return {
+        "name": "load_evidence_current_source",
+        "status": "passed" if same else "failed",
+        "expected_head": expected_head,
+        "report_head": report_head,
+        "expected_source_fingerprint": expected_fingerprint,
+        "report_source_fingerprint": report_fingerprint,
+        "target_build_fingerprint": target_fingerprint,
+    }
+
+
+def verify_runtime_source() -> dict:
+    expected = str(source_fingerprint(ROOT).get("source_fingerprint") or "")
+    result = run(
+        "runtime_source_provenance",
+        ["docker", "compose", "exec", "-T", "app", "python", "-m", "scripts.build_provenance", "--root", "/app", "--no-manifest"],
+        60,
+    )
+    if result.get("status") != "passed":
+        return result
+    try:
+        payload = json.loads(result.get("stdout") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return {"name": "runtime_source_provenance", "status": "failed", "error": type(exc).__name__}
+    actual = str(payload.get("source_fingerprint") or "").lower()
+    same = payload.get("format") == BUILD_PROVENANCE_FORMAT and bool(expected) and actual == expected
+    return {
+        "name": "runtime_source_provenance",
+        "status": "passed" if same else "failed",
+        "expected_source_fingerprint": expected,
+        "runtime_source_fingerprint": actual,
+        "format": payload.get("format"),
+        "file_count": payload.get("file_count"),
+    }
 
 
 def verify_model_report_current_source() -> dict:
@@ -163,7 +222,7 @@ def promote_model_baseline() -> dict:
     if not passed:
         return {"status": "failed", "reason": "candidate_not_accepted"}
     data["baseline"] = True
-    data["accepted_by"] = "x1-release-candidate-v2"
+    data["accepted_by"] = "x1-release-candidate-v3"
     data["accepted_at"] = datetime.now(timezone.utc).isoformat()
     MODEL_BASELINE.parent.mkdir(parents=True, exist_ok=True)
     tmp = MODEL_BASELINE.with_suffix(MODEL_BASELINE.suffix + ".tmp")
@@ -192,11 +251,12 @@ def main() -> int:
         max(1800, args.timeout),
     ))
     checks.append(run("host_runtime_chaos", ["python3", "-m", "scripts.rc_runtime_chaos"], 1800))
+    checks.append(verify_runtime_source())
 
     evidence = [
         ("release_gate_evidence", ROOT / "backups" / "release-gate-latest.json", "x1-release-gate-v4"),
         ("model_regression_evidence", MODEL_REPORT, "x1-model-regression-report-v1"),
-        ("target_load_evidence", LOAD_REPORT, "x1-real-load-acceptance-v1"),
+        ("target_load_evidence", LOAD_REPORT, "x1-real-load-acceptance-v2"),
         ("restore_drill_evidence", ROOT / "backups" / "restore-drill-latest.json", None),
         ("runtime_chaos_evidence", ROOT / "backups" / "rc-chaos-runtime-latest.json", "x1-rc-chaos-v1"),
     ]
@@ -208,7 +268,7 @@ def main() -> int:
     # Evidence must be from exactly the source revision being accepted. A stale
     # green JSON from an earlier checkout can never issue a new RC.
     checks.append(verify_release_head())
-    checks.append(verify_load_head())
+    checks.append(verify_load_identity())
     checks.append(verify_model_report_current_source())
 
     release_path = ROOT / "backups" / "release-gate-latest.json"
@@ -236,11 +296,12 @@ def main() -> int:
             failed.append("model_baseline_promotion")
 
     payload = {
-        "format": "x1-release-candidate-v3",
+        "format": "x1-release-candidate-v4",
         "status": "passed" if not failed else "failed",
         "feature_freeze_after_sprint": 84,
         "reference_host_ram_gib": round(ram, 3),
         "git_head": current_git_head(),
+        "source_fingerprint": source_fingerprint(ROOT).get("source_fingerprint"),
         "critical_regression_cases_required": 0,
         "model_baseline_promotion": baseline_promotion,
         "failed_checks": failed,
