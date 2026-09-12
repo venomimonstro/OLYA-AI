@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 *.pyc
 x1.db
+.x1-update.lock
 models/*.gguf
 models/*.bin
 artifacts/
