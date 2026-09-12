@@ -40,6 +40,14 @@ COPY --chown=x1:x1 tests ./tests
 COPY --chown=x1:x1 model-manifest.json ./model-manifest.json
 COPY --chown=x1:x1 regression ./regression
 
+# Production acceptance must prove that the running app image was built from
+# the same source/deployment definition as the checked-out candidate. Preserve
+# Dockerfile/Compose only as build inputs for a deterministic provenance hash.
+COPY --chown=x1:x1 Dockerfile ./build-inputs/Dockerfile
+COPY --chown=x1:x1 docker-compose.yml ./build-inputs/docker-compose.yml
+RUN python -m scripts.build_provenance --root /app --write /app/BUILD_PROVENANCE.json --no-manifest >/dev/null \
+    && chown x1:x1 /app/BUILD_PROVENANCE.json
+
 USER x1
 
 # One worker is intentional: in-memory admission/governor state is authoritative
