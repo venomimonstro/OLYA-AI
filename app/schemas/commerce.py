@@ -148,6 +148,9 @@ class BillingPlanRead(BaseModel):
     purchase_enabled: bool
     monthly_cpu_seconds: int
     resource_budget_microunits: int
+    monthly_request_units: int
+    daily_request_units: int
+    request_unit_weights: dict[str, int]
     max_concurrent_inference: int
     max_concurrent_jobs: int
 
