@@ -121,7 +121,7 @@ def consume_state(db: Session, settings, *, state: str, cookie_state: str) -> st
 
 
 async def exchange_code(db: Session, settings, *, code: str, verifier: str) -> dict:
-    owner, yandex = _settings_row(db, settings)
+    owner, _ = _settings_row(db, settings)
     secret = decrypt_secret(settings, owner.yandex_oauth_client_secret_ciphertext)
     if not code or len(code) > 2048:
         raise YandexOAuthValidationError("Yandex authorization code is invalid")
@@ -134,7 +134,6 @@ async def exchange_code(db: Session, settings, *, code: str, verifier: str) -> d
                 data={
                     "grant_type": "authorization_code",
                     "code": code,
-                    "redirect_uri": yandex["redirect_uri"],
                     "code_verifier": verifier,
                 },
             )
@@ -144,8 +143,8 @@ async def exchange_code(db: Session, settings, *, code: str, verifier: str) -> d
         raise YandexOAuthUnavailable("Yandex token exchange failed") from exc
     access_token = str(data.get("access_token") or "").strip()
     token_type = str(data.get("token_type") or "bearer").lower()
-    if not access_token or token_type not in {"bearer", "oauth"}:
-        raise YandexOAuthValidationError("Yandex did not return a usable access token")
+    if not access_token or token_type != "bearer":
+        raise YandexOAuthValidationError("Yandex did not return a usable bearer token")
     return {"access_token": access_token}
 
 
@@ -189,24 +188,14 @@ def resolve_user(db: Session, *, subject: str, email: str, display_name: str) ->
     if user is not None and not user.is_active:
         raise YandexOAuthValidationError("X1 account with this email is unavailable")
     if user is None:
-        user = User(
-            email=email,
-            password_hash=hash_password(secrets.token_urlsafe(64)),
-            display_name=display_name,
-        )
+        user = User(email=email, password_hash=hash_password(secrets.token_urlsafe(64)), display_name=display_name)
         db.add(user)
         db.flush()
     elif display_name and not str(user.display_name or "").strip():
         user.display_name = display_name
 
     ensure_email_state(db, user, mark_verified=True)
-    identity = ExternalAuthIdentity(
-        user_id=user.id,
-        provider=YANDEX_PROVIDER,
-        subject=subject,
-        email_at_link=email,
-        last_login_at=now,
-    )
+    identity = ExternalAuthIdentity(user_id=user.id, provider=YANDEX_PROVIDER, subject=subject, email_at_link=email, last_login_at=now)
     try:
         with db.begin_nested():
             db.add(identity)
