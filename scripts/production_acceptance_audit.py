@@ -54,7 +54,12 @@ def audit() -> dict:
     for token in ('@router.get("/version")', "BUILD_PROVENANCE.json", "source_fingerprint"):
         if token not in health:
             errors.append({"code": "runtime_provenance_endpoint_missing", "token": token})
-    for token in ("x1-build-provenance-v1", "build-inputs/Dockerfile", "build-inputs/docker-compose.yml"):
+    for token in (
+        'FORMAT = "x1-build-provenance-v1"',
+        '_BUILD_INPUTS = ("Dockerfile", "docker-compose.yml")',
+        'root / "build-inputs" / name',
+        'manifest[f"build-inputs/{name}"]',
+    ):
         if token not in provenance:
             errors.append({"code": "build_provenance_contract_missing", "token": token})
     if "python -m scripts.build_provenance" not in dockerfile or "/app/BUILD_PROVENANCE.json" not in dockerfile:
