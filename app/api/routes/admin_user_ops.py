@@ -8,7 +8,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import AdminAuditLog, AuthSession, User
+from app.models import AdminAuditLog, AuthSession, User, UserRestriction
 from app.services.admin import audit, require_admin
 from app.services.admin_user_controls import (
     AdminUserControlConflict,
@@ -94,6 +94,22 @@ def _subscription_payload(row) -> dict | None:
     }
 
 
+def _restriction_payload(row: UserRestriction, now: datetime) -> dict:
+    expires_at = _aware(row.expires_at)
+    effective = bool(row.active) and (expires_at is None or expires_at > now)
+    return {
+        "id": row.id,
+        "case_id": row.case_id,
+        "capability": row.capability,
+        "reason": row.reason,
+        "active": row.active,
+        "effective": effective,
+        "expires_at": row.expires_at,
+        "created_at": row.created_at,
+        "revoked_at": row.revoked_at,
+    }
+
+
 @router.get("/search")
 def search_users(
     q: str = Query(default="", max_length=200),
@@ -108,10 +124,10 @@ def search_users(
         like = f"%{term}%"
         stmt = stmt.where(or_(User.email.ilike(like), User.display_name.ilike(like), User.id == term))
     rows = list(db.scalars(stmt).all())
-    controls = {row.user_id: row for row in db.scalars(select(get_control.__annotations__["return"].__args__[0]) if False else select(User).where(User.id == "__never__")).all()} if False else {}
     result = []
     for user in rows:
         control = get_control(db, user.id)
+        state = control_dict(control)
         result.append({
             "id": user.id,
             "email": user.email,
@@ -119,7 +135,7 @@ def search_users(
             "is_active": user.is_active,
             "is_admin": user.is_admin,
             "has_control_override": control is not None,
-            "control_active": bool(control_dict(control) and control_dict(control)["active"]),
+            "control_active": bool(state and state["active"]),
             "created_at": user.created_at,
         })
     return result
@@ -144,6 +160,14 @@ def user_operations(
             .where(AuthSession.user_id == target.id)
             .order_by(AuthSession.last_seen_at.desc(), AuthSession.created_at.desc())
             .limit(20)
+        ).all()
+    )
+    restrictions = list(
+        db.scalars(
+            select(UserRestriction)
+            .where(UserRestriction.user_id == target.id)
+            .order_by(UserRestriction.created_at.desc())
+            .limit(50)
         ).all()
     )
     audit_rows = list(
@@ -173,6 +197,7 @@ def user_operations(
         },
         "billing_subscription": _subscription_payload(subscription),
         "control": control_dict(control),
+        "safety_restrictions": [_restriction_payload(row, now) for row in restrictions],
         "sessions": [_session_payload(row, now) for row in sessions],
         "audit": [
             {
@@ -250,7 +275,15 @@ def replace_user_control(
     )
     db.commit()
     db.refresh(row)
-    return {"control": control_dict(row), "effective_quota": {"plan": quota.plan, "monthly_compute_seconds_limit": quota.monthly_compute_seconds_limit, "max_concurrent_inference": quota.max_concurrent_inference, "max_concurrent_jobs": quota.max_concurrent_jobs}}
+    return {
+        "control": control_dict(row),
+        "effective_quota": {
+            "plan": quota.plan,
+            "monthly_compute_seconds_limit": quota.monthly_compute_seconds_limit,
+            "max_concurrent_inference": quota.max_concurrent_inference,
+            "max_concurrent_jobs": quota.max_concurrent_jobs,
+        },
+    }
 
 
 @router.post("/{user_id}/control/clear")
@@ -272,7 +305,15 @@ def remove_user_control(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     audit(db, admin, "user.control.clear", "user", target.id, {"reason": payload.reason, "previous": previous})
     db.commit()
-    return {"control": None, "effective_quota": {"plan": quota.plan, "monthly_compute_seconds_limit": quota.monthly_compute_seconds_limit, "max_concurrent_inference": quota.max_concurrent_inference, "max_concurrent_jobs": quota.max_concurrent_jobs}}
+    return {
+        "control": None,
+        "effective_quota": {
+            "plan": quota.plan,
+            "monthly_compute_seconds_limit": quota.monthly_compute_seconds_limit,
+            "max_concurrent_inference": quota.max_concurrent_inference,
+            "max_concurrent_jobs": quota.max_concurrent_jobs,
+        },
+    }
 
 
 @router.post("/{user_id}/state")
