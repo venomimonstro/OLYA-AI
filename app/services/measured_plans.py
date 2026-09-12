@@ -9,6 +9,7 @@ from app.models import MeasuredPlanCatalog, ResourceExpenseEvent, UsageEvent, Us
 from app.services.commerce import PLAN_POLICIES, price_resource_ms, resource_rates
 
 _channel_override: ContextVar[str | None] = ContextVar("x1_fairness_channel", default=None)
+_PLAN_NAMES = ("free", "x1", "pro", "max", "business")
 
 
 def set_channel_override(channel: str) -> Token:
@@ -23,20 +24,68 @@ def current_channel_override() -> str | None:
     return _channel_override.get()
 
 
+def request_unit_weights(settings) -> dict[str, int]:
+    return {
+        "fast": max(1, int(settings.request_unit_weight_fast)),
+        "work": max(1, int(settings.request_unit_weight_work)),
+        "deep": max(1, int(settings.request_unit_weight_deep)),
+        "api": max(1, int(settings.request_unit_weight_api)),
+    }
+
+
+def request_limits(settings, name: str) -> dict[str, int]:
+    if name not in _PLAN_NAMES:
+        return {"monthly_request_units": 0, "daily_request_units": 0}
+    return {
+        "monthly_request_units": max(0, int(getattr(settings, f"plan_monthly_request_units_{name}", 0))),
+        "daily_request_units": max(0, int(getattr(settings, f"plan_daily_request_units_{name}", 0))),
+    }
+
+
+def _channel_shares(settings) -> dict[str, float]:
+    return {
+        "fast": max(0.0, float(settings.plan_share_fast)),
+        "work": max(0.0, float(settings.plan_share_work)),
+        "deep": max(0.0, float(settings.plan_share_deep)),
+        "api": max(0.0, float(settings.plan_share_api)),
+        "image_worker": max(0.0, float(settings.plan_share_image)),
+        "sandbox": max(0.0, float(settings.plan_share_sandbox)),
+    }
+
+
+def _enrich_policy(settings, name: str, payload: dict) -> dict:
+    item = dict(payload)
+    item.update(request_limits(settings, name))
+    item["request_unit_weights"] = request_unit_weights(settings)
+    item["max_concurrent_inference"] = min(
+        max(1, int(item.get("max_concurrent_inference") or 1)),
+        max(1, int(settings.max_concurrent_generations)),
+    )
+    item["max_concurrent_jobs"] = min(
+        max(1, int(item.get("max_concurrent_jobs") or 1)),
+        max(1, int(settings.default_max_concurrent_jobs)),
+    )
+    shares = item.get("channel_shares")
+    if not isinstance(shares, dict) or not shares:
+        item["channel_shares"] = _channel_shares(settings)
+    return item
+
+
 def _fallback_policy(settings, name: str) -> dict | None:
     policy = PLAN_POLICIES.get(name)
     if policy is None:
         return None
-    return {
+    payload = {
         "name": policy.name,
         "monthly_cpu_seconds": policy.monthly_cpu_seconds,
         "resource_budget_microunits": policy.monthly_cpu_seconds * settings.commerce_cpu_microunits_per_second,
         "max_concurrent_inference": policy.max_concurrent_inference,
         "max_concurrent_jobs": policy.max_concurrent_jobs,
         "organization_enabled": policy.organization_enabled,
-        "channel_shares": {},
+        "channel_shares": _channel_shares(settings),
         "source": "fallback-static-policy",
     }
+    return _enrich_policy(settings, name, payload)
 
 
 def active_catalog(db: Session) -> MeasuredPlanCatalog | None:
@@ -48,7 +97,7 @@ def plan_policy(db: Session, settings, name: str) -> dict | None:
     if row is not None:
         payload = (row.catalog or {}).get(name)
         if isinstance(payload, dict):
-            return dict(payload)
+            return _enrich_policy(settings, name, payload)
     return _fallback_policy(settings, name)
 
 
@@ -56,18 +105,22 @@ def runtime_plan_catalog(db: Session, settings) -> list[dict]:
     row = active_catalog(db)
     if row is not None and row.catalog:
         result = []
-        for name in ("free", "x1", "pro", "max", "business"):
+        for name in _PLAN_NAMES:
             payload = row.catalog.get(name)
             if isinstance(payload, dict):
-                item = dict(payload); item["catalog_version"] = row.version; result.append(item)
+                item = _enrich_policy(settings, name, payload)
+                item["catalog_version"] = row.version
+                result.append(item)
         if result:
             return result
     rates = resource_rates(settings)
     result = []
-    for name in ("free", "x1", "pro", "max", "business"):
+    for name in _PLAN_NAMES:
         payload = _fallback_policy(settings, name)
         if payload:
-            payload["resource_rates_microunits_per_second"] = rates; payload["catalog_version"] = None; result.append(payload)
+            payload["resource_rates_microunits_per_second"] = rates
+            payload["catalog_version"] = None
+            result.append(payload)
     return result
 
 
@@ -75,7 +128,8 @@ def apply_runtime_plan_to_quota(db: Session, user: User, settings, name: str) ->
     policy = plan_policy(db, settings, name)
     if policy is None:
         raise ValueError("Unknown plan")
-    quota = db.get(UserQuota, user.id) or UserQuota(user_id=user.id); db.add(quota)
+    quota = db.get(UserQuota, user.id) or UserQuota(user_id=user.id)
+    db.add(quota)
     quota.plan = name
     quota.monthly_compute_seconds_limit = int(policy["monthly_cpu_seconds"])
     quota.max_concurrent_inference = max(1, int(policy["max_concurrent_inference"]))
@@ -105,7 +159,8 @@ def ensure_channel_budget(db: Session, user: User, settings, channel: str, reser
     share = float((policy.get("channel_shares") or {}).get(channel, 0.0))
     if share <= 0:
         return
-    total_budget = max(0, int(policy.get("resource_budget_microunits") or 0)); channel_budget = int(total_budget * share)
+    total_budget = max(0, int(policy.get("resource_budget_microunits") or 0))
+    channel_budget = int(total_budget * share)
     if channel_budget <= 0:
         return
     spent = _channel_spend(db, user.id, settings, channel, month_start())
