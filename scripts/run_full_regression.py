@@ -75,6 +75,7 @@ def main() -> int:
             ("scripts.api_contract_audit", []),
             ("scripts.api_console_audit", []),
             ("scripts.billing_contract_audit", []),
+            ("scripts.account_plan_ux_audit", []),
             ("scripts.model_regression_lab", ["--validate-only"]),
             ("scripts.rc_security_audit", []),
         ):
