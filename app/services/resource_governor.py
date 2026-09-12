@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from time import monotonic
 
@@ -25,6 +26,28 @@ _PLAN_BOOST = {
     "max": -3.0,
     "business": -4.0,
 }
+_SCHEDULER_CONTEXT: ContextVar[dict] = ContextVar("x1_inference_scheduler_context", default={})
+
+
+def set_inference_scheduler_context(*, priority_class: str, plan: str, principal: str, channel: str) -> None:
+    """Attach admission metadata to the current request/task context.
+
+    ContextVar keeps concurrent requests isolated while allowing every existing
+    `governor.slot()` call to participate without duplicating scheduler policy in
+    each endpoint.
+    """
+    _SCHEDULER_CONTEXT.set(
+        {
+            "priority_class": str(priority_class or "work"),
+            "plan": str(plan or "free"),
+            "principal": str(principal or ""),
+            "channel": str(channel or "inference"),
+        }
+    )
+
+
+def inference_scheduler_context() -> dict:
+    return dict(_SCHEDULER_CONTEXT.get() or {})
 
 
 @dataclass(eq=False)
@@ -123,13 +146,16 @@ class ResourceGovernor:
     async def slot(
         self,
         *,
-        priority_class: str = "work",
-        plan: str = "free",
-        principal: str = "",
-        channel: str = "inference",
+        priority_class: str | None = None,
+        plan: str | None = None,
+        principal: str | None = None,
+        channel: str | None = None,
     ):
-        priority_class = self._normalize_priority(priority_class)
-        plan = self._normalize_plan(plan)
+        context = inference_scheduler_context()
+        priority_class = self._normalize_priority(priority_class or context.get("priority_class") or "work")
+        plan = self._normalize_plan(plan or context.get("plan") or "free")
+        principal = str(principal if principal is not None else context.get("principal") or "")
+        channel = str(channel if channel is not None else context.get("channel") or "inference")
         waiter: _Waiter | None = None
         acquired = False
         loop = asyncio.get_running_loop()
@@ -152,8 +178,8 @@ class ResourceGovernor:
                     enqueued_at=monotonic(),
                     priority_class=priority_class,
                     plan=plan,
-                    principal=str(principal or ""),
-                    channel=str(channel or "inference"),
+                    principal=principal,
+                    channel=channel,
                 )
                 self._waiters.append(waiter)
 
