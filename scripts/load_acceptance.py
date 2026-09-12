@@ -13,6 +13,11 @@ from pathlib import Path
 
 import httpx
 
+try:
+    from scripts.build_provenance import FORMAT as BUILD_PROVENANCE_FORMAT, source_fingerprint
+except ModuleNotFoundError:  # direct `python scripts/load_acceptance.py`
+    from build_provenance import FORMAT as BUILD_PROVENANCE_FORMAT, source_fingerprint
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -62,6 +67,20 @@ def _chat_payload(user_index: int, round_index: int) -> dict:
     }
 
 
+async def _runtime_provenance(client: httpx.AsyncClient, base_url: str, timeout: float) -> dict:
+    response = await client.get(base_url.rstrip("/") + "/version", timeout=min(timeout, 30.0))
+    if response.status_code != 200:
+        raise RuntimeError(f"Load acceptance build provenance check failed with HTTP {response.status_code}")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError("Load acceptance build provenance endpoint returned invalid JSON") from exc
+    fingerprint = str(payload.get("source_fingerprint") or "").lower()
+    if payload.get("format") != BUILD_PROVENANCE_FORMAT or len(fingerprint) != 64 or not all(char in "0123456789abcdef" for char in fingerprint):
+        raise RuntimeError("Load acceptance target has invalid or missing build provenance")
+    return {"format": payload.get("format"), "source_fingerprint": fingerprint, "file_count": payload.get("file_count")}
+
+
 async def _identity(client: httpx.AsyncClient, base_url: str, token: str, timeout: float) -> str:
     response = await client.get(
         base_url.rstrip("/") + "/v1/auth/me",
@@ -103,8 +122,15 @@ async def run(base_url: str, tokens: list[str], *, rounds: int, timeout: float, 
         raise RuntimeError("Real load acceptance requires at least 10 authenticated users")
     if len(set(tokens)) != len(tokens):
         raise RuntimeError("Load acceptance tokens must be distinct sessions")
+    candidate_provenance = source_fingerprint(ROOT)
+    candidate_fingerprint = str(candidate_provenance.get("source_fingerprint") or "")
     limits = httpx.Limits(max_connections=max(20, len(tokens) * 2), max_keepalive_connections=max(10, len(tokens)))
     async with httpx.AsyncClient(trust_env=False, limits=limits) as client:
+        runtime_provenance = await _runtime_provenance(client, base_url, timeout)
+        runtime_fingerprint = str(runtime_provenance.get("source_fingerprint") or "")
+        if not candidate_fingerprint or runtime_fingerprint != candidate_fingerprint:
+            raise RuntimeError("Load acceptance target build does not match the checked-out candidate source")
+
         identities = await asyncio.gather(*[_identity(client, base_url, token, timeout) for token in tokens])
         unique_user_ids = set(identities)
         if len(unique_user_ids) != len(tokens):
@@ -128,14 +154,17 @@ async def run(base_url: str, tokens: list[str], *, rounds: int, timeout: float, 
     gates = {
         "users_at_least_10": len(tokens) >= 10,
         "unique_authenticated_users": len(unique_user_ids) == len(tokens),
+        "candidate_matches_runtime_build": runtime_fingerprint == candidate_fingerprint,
         "all_users_exercised": len({row.user for row in samples}) == len(tokens),
         "error_rate": error_rate <= max_error_rate,
         "p95_latency_ms": p95 <= p95_limit_ms,
         "successes_present": bool(successes),
     }
     return {
-        "format": "x1-real-load-acceptance-v1",
+        "format": "x1-real-load-acceptance-v2",
         "git_head": current_git_head(),
+        "source_fingerprint": candidate_fingerprint,
+        "target_build_fingerprint": runtime_fingerprint,
         "target": base_url,
         "virtual_users": len(tokens),
         "unique_authenticated_users": len(unique_user_ids),
@@ -173,7 +202,14 @@ def main() -> int:
     try:
         result = asyncio.run(run(args.base_url, tokens, rounds=max(1, min(args.rounds, 20)), timeout=max(5.0, args.timeout), p95_limit_ms=max(1000, args.p95_limit_ms), max_error_rate=max(0.0, min(args.max_error_rate, .5))))
     except RuntimeError as exc:
-        result = {"format": "x1-real-load-acceptance-v1", "git_head": current_git_head(), "passed": False, "error": str(exc)}
+        candidate = source_fingerprint(ROOT)
+        result = {
+            "format": "x1-real-load-acceptance-v2",
+            "git_head": current_git_head(),
+            "source_fingerprint": candidate.get("source_fingerprint"),
+            "passed": False,
+            "error": str(exc),
+        }
     path = Path(args.report)
     if not path.is_absolute():
         path = ROOT / path
