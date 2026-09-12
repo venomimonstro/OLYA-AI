@@ -10,6 +10,7 @@ from app.models import Conversation, EngineeringExecution, EngineeringRun, Messa
 from app.schemas.development_chat import DevelopmentChatRequest, DevelopmentChatResponse
 from app.schemas.engineering import ExecuteApprovedRequest, ExecuteRoleRequest
 from app.services.access import require_project_role
+from app.services.agent_contract import AgentContractError, require_agent_progress_budget
 from app.services.auth import get_current_user
 from app.services.autonomous_development import AutonomousDevelopmentError, serialize_ledger, sync_ledger
 from app.services.development_chat import (
@@ -76,6 +77,7 @@ async def development_chat(
         elif command == "rollback":
             text = rollback_latest(db, session)
         else:
+            require_agent_progress_budget("development next step")
             step, obj = prepare_next_step(db, session, user_id=user.id)
             action = step
             if step == "execute_role":
@@ -141,9 +143,6 @@ async def development_chat(
                     session.last_action = step
                     session.last_summary = text
 
-        # Canonical development state is persisted independently from chat prose.
-        # Meaningful control transitions force a checkpoint so restart/compaction
-        # can resume from an exact server-owned state boundary.
         sync_ledger(
             db,
             session,
@@ -160,6 +159,6 @@ async def development_chat(
     except HTTPException:
         db.rollback()
         raise
-    except (DevelopmentChatError, AutonomousDevelopmentError) as exc:
+    except (DevelopmentChatError, AutonomousDevelopmentError, AgentContractError) as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
