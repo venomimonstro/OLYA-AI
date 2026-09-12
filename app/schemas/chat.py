@@ -45,7 +45,7 @@ class ChatRequest(BaseModel):
     task_id: str | None = None
     research_source_ids: list[str] = Field(default_factory=list, max_length=10)
     development_command: Literal["auto", "status", "continue", "pause", "resume", "rollback"] | None = None
-    # Sprint 62 idempotency/reconnect key. Browser clients generate one per
+    # Durable idempotency/reconnect key. Browser clients generate one per
     # logical submission and reuse it only while reconnecting that same run.
     client_request_id: str | None = Field(default=None, min_length=12, max_length=80, pattern=r"^[A-Za-z0-9_.:-]+$")
 
@@ -61,14 +61,10 @@ class ChatUsage(BaseModel):
     compiled_message_chars: int
     mode: str
     verification: str = "auto"
-    # Sprint 43 transport telemetry. Queue wait is separated from model TTFT so
-    # operators can distinguish capacity pressure from slow prompt processing.
     queue_ms: int = 0
     ttft_ms: int | None = None
     output_tokens: int = 0
     tokens_per_second: float | None = None
-    # Sprint 48 quality economics. These fields expose whether Auto paid for an
-    # additional semantic critic/repair instead of hiding that CPU cost.
     verification_risk_score: int = 0
     verification_extra_inferences: int = 0
     critic_used: bool = False
@@ -96,12 +92,10 @@ class ChatResponse(BaseModel):
     usage: ChatUsage
     quality: QualityReport | None = None
     development: dict[str, Any] | None = None
-    # Clients need the server-owned conversation identifier after the first turn.
-    # Without it a UI must resend client-authored assistant text and loses the
-    # canonical history/trust boundary on every message.
+    # High-level, user-safe record of autonomous work performed for this turn.
+    # Never contains hidden reasoning, prompt contents or raw source bodies.
+    task_execution: dict[str, Any] | None = None
     conversation_id: str | None = None
-    # Durable run identity allows clients to distinguish a transport retry from
-    # a new logical prompt and recover the committed result after reconnect.
     run_id: str | None = None
     client_request_id: str | None = None
     file_citations: list[FileCitationRead] = Field(default_factory=list)
