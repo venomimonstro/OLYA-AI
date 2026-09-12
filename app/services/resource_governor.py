@@ -69,7 +69,7 @@ class ResourceGovernor:
         max_concurrent: int = 1,
         max_queue: int = 64,
         wait_timeout_seconds: float = 120.0,
-        max_queued_per_principal: int = 2,
+        max_queued_per_principal: int = 1,
     ) -> None:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be >= 1")
@@ -111,8 +111,6 @@ class ResourceGovernor:
         return name if name in _PLAN_BOOST else "free"
 
     def _score(self, waiter: _Waiter, now: float) -> tuple[float, int]:
-        # Aging is stronger than the largest paid-plan boost. No Free/Deep job
-        # can starve forever, while interactive and paid work still feels faster.
         age_points = max(0.0, now - waiter.enqueued_at) / 2.0
         score = _PRIORITY_BASE[waiter.priority_class] + _PLAN_BOOST[waiter.plan] - age_points
         return score, waiter.sequence
