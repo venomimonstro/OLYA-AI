@@ -7,6 +7,7 @@ from app.schemas.files import FileCitationRead
 
 ChatMode = Literal["auto", "fast", "work", "deep"]
 VerificationMode = Literal["off", "auto", "strict"]
+WebMode = Literal["auto", "always", "off"]
 RequirementKind = Literal["contains", "not_contains", "max_chars", "min_chars", "valid_json"]
 ChatRunState = Literal["running", "succeeded", "failed", "cancelled", "interrupted"]
 
@@ -38,6 +39,7 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=200)
     mode: ChatMode = "auto"
     verification: VerificationMode = "auto"
+    web_mode: WebMode = "auto"
     requirements: list[AnswerRequirement] = Field(default_factory=list, max_length=30)
     max_output_tokens: int | None = Field(default=None, ge=32, le=8192)
     project_id: str | None = None
