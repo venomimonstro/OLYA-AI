@@ -33,9 +33,13 @@ async def health() -> dict[str, str]:
 
 
 @router.get("/version")
-async def version() -> dict:
-    """Public, secret-free build identity used by deployment acceptance."""
-    return _runtime_provenance()
+async def version(request: Request) -> dict:
+    """Public, secret-free build/runtime identity used by deployment acceptance."""
+    payload = _runtime_provenance()
+    settings = getattr(request.app.state, "settings", None)
+    payload["runtime_profile"] = str(getattr(settings, "server_optimization_profile", "unknown") or "unknown")
+    payload["model"] = str(getattr(settings, "llama_model_name", "") or "")
+    return payload
 
 
 @router.get("/ready")
