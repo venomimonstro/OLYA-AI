@@ -18,6 +18,7 @@ DOMAIN_OWNERS = {
     "background_jobs": "app.services.jobs",
     "recovery_integrity": "app.services.recovery_integrity",
     "maintenance_reconciliation": "app.services.maintenance",
+    "business_logic_contract": "app.services.business_contract",
 }
 
 
