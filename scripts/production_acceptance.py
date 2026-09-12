@@ -28,6 +28,20 @@ def current_git_head() -> str:
     return value if result.returncode == 0 and len(value) == 40 and all(c in "0123456789abcdef" for c in value) else ""
 
 
+def canonical_target_url(value: str) -> str:
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("invalid target URL")
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+    display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    port = parsed.port
+    default_port = 443 if scheme == "https" else 80
+    netloc = display_host if port in {None, default_port} else f"{display_host}:{port}"
+    path = (parsed.path or "").rstrip("/")
+    return f"{scheme}://{netloc}{path}"
+
+
 def command(name: str, argv: list[str], timeout: int = 30) -> dict:
     try:
         result = subprocess.run(argv, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout, shell=False)
@@ -92,6 +106,7 @@ def evidence(
     head: str,
     pass_field: str = "status",
     source_fingerprint: str = "",
+    expected_target: str = "",
 ) -> dict:
     path = ROOT / relative
     if not path.is_file():
@@ -107,9 +122,17 @@ def evidence(
     same_head = bool(head and report_head == head)
     report_fingerprint = str(payload.get("source_fingerprint") or "").lower()
     same_source = True if not source_fingerprint else report_fingerprint == source_fingerprint
+    report_target = ""
+    same_target = True
+    if expected_target:
+        try:
+            report_target = canonical_target_url(str(payload.get("target") or ""))
+            same_target = report_target == expected_target
+        except ValueError:
+            same_target = False
     return {
         "name": name,
-        "status": "passed" if passed and same_head and same_source else "failed",
+        "status": "passed" if passed and same_head and same_source and same_target else "failed",
         "payload_passed": passed,
         "expected_head": head,
         "report_head": report_head,
@@ -117,6 +140,9 @@ def evidence(
         "expected_source_fingerprint": source_fingerprint or None,
         "report_source_fingerprint": report_fingerprint or None,
         "same_source": same_source,
+        "expected_target": expected_target or None,
+        "report_target": report_target or None,
+        "same_target": same_target,
         "path": relative,
     }
 
@@ -178,7 +204,12 @@ def main() -> int:
     checks.append(worktree)
     checks.append({"name": "admin_token_supplied", "status": "passed" if token else "failed"})
 
-    parsed_target = urlsplit(args.base_url)
+    try:
+        target_url = canonical_target_url(args.base_url)
+        parsed_target = urlsplit(target_url)
+    except ValueError:
+        target_url = args.base_url.rstrip("/")
+        parsed_target = urlsplit("")
     local_hosts = {"127.0.0.1", "localhost", "::1"}
     transport_ok = parsed_target.scheme == "https" or (parsed_target.scheme == "http" and (parsed_target.hostname or "") in local_hosts)
     checks.append({
@@ -198,9 +229,9 @@ def main() -> int:
     checks.append(candidate_provenance_check)
     candidate_fingerprint = str((candidate_provenance or {}).get("source_fingerprint") or "")
 
-    # Candidate/evidence must be generated from exactly this immutable source revision.
+    # Candidate/evidence must be generated from exactly this immutable source revision and target.
     checks.append(evidence("release_candidate", "backups/rc-release-candidate-latest.json", expected_format="x1-release-candidate-v4", head=head, source_fingerprint=candidate_fingerprint))
-    checks.append(evidence("target_load", "backups/load-acceptance-latest.json", expected_format="x1-real-load-acceptance-v2", head=head, pass_field="passed", source_fingerprint=candidate_fingerprint))
+    checks.append(evidence("target_load", "backups/load-acceptance-latest.json", expected_format="x1-real-load-acceptance-v2", head=head, pass_field="passed", source_fingerprint=candidate_fingerprint, expected_target=target_url))
     checks.append(evidence("release_gate", "backups/release-gate-latest.json", expected_format="x1-release-gate-v4", head=head))
     checks.append(generic_evidence("restore_drill", "backups/restore-drill-latest.json"))
     checks.append(generic_evidence("runtime_chaos", "backups/rc-chaos-runtime-latest.json"))
@@ -248,13 +279,13 @@ def main() -> int:
     )
     checks.append(command("billing_runtime_config", ["docker", "compose", "exec", "-T", "app", "python", "-c", billing_code], timeout=30))
 
-    ready_check, ready = http_json("public_ready", args.base_url.rstrip("/") + "/ready", timeout=30)
+    ready_check, ready = http_json("public_ready", target_url + "/ready", timeout=30)
     if ready_check["status"] == "passed" and str((ready or {}).get("status") or "") != "stable":
         ready_check["status"] = "failed"
         ready_check["ready_status"] = (ready or {}).get("status")
     checks.append(ready_check)
 
-    public_provenance_check, public_provenance = http_json("public_build_provenance", args.base_url.rstrip("/") + "/version", timeout=30)
+    public_provenance_check, public_provenance = http_json("public_build_provenance", target_url + "/version", timeout=30)
     public_fingerprint = str((public_provenance or {}).get("source_fingerprint") or "").lower()
     public_provenance_check["format"] = (public_provenance or {}).get("format")
     public_provenance_check["source_fingerprint"] = public_fingerprint
@@ -269,7 +300,7 @@ def main() -> int:
     checks.append(public_provenance_check)
 
     if token:
-        release_check, release = http_json("admin_release_readiness", args.base_url.rstrip("/") + "/v1/admin/reliability/release-readiness?refresh=true", token=token, timeout=180)
+        release_check, release = http_json("admin_release_readiness", target_url + "/v1/admin/reliability/release-readiness?refresh=true", token=token, timeout=180)
         if release_check["status"] == "passed":
             release_check["ready_for_public_release"] = bool((release or {}).get("ready_for_public_release"))
             release_check["blocker_count"] = len((release or {}).get("blockers") or [])
@@ -277,13 +308,13 @@ def main() -> int:
                 release_check["status"] = "failed"
         checks.append(release_check)
 
-        contract_check, contract = http_json("business_logic_contract", args.base_url.rstrip("/") + "/v1/admin/reliability/business-contract", token=token, timeout=60)
+        contract_check, contract = http_json("business_logic_contract", target_url + "/v1/admin/reliability/business-contract", token=token, timeout=60)
         if contract_check["status"] == "passed" and (contract or {}).get("status") != "passed":
             contract_check["status"] = "failed"
             contract_check["blocker_count"] = len((contract or {}).get("blockers") or [])
         checks.append(contract_check)
 
-        caps_check, caps = http_json("live_capability_registry", args.base_url.rstrip("/") + "/v1/admin/capabilities?live=true", token=token, timeout=60)
+        caps_check, caps = http_json("live_capability_registry", target_url + "/v1/admin/capabilities?live=true", token=token, timeout=60)
         required_caps = {"chat", "files", "documents", "research.search", "sandbox.execute", "development", "api", "billing"}
         if args.require_images:
             required_caps |= {"images.generate", "images.edit"}
@@ -303,7 +334,7 @@ def main() -> int:
         "accepted_for_launch": not failed,
         "git_head": head,
         "source_fingerprint": candidate_fingerprint,
-        "target": args.base_url,
+        "target": target_url,
         "require_images": bool(args.require_images),
         "checked_at": utcnow(),
         "failed_checks": failed,
