@@ -30,12 +30,17 @@ _MIN_SECONDS = 1.0
 _MAX_SECONDS = 900.0
 
 
-def begin_deadline_from_headers(headers, *, default_seconds: float, source: str) -> DeadlineBudget:
-    """Start one monotonic budget for the current request/task.
+def begin_deadline_from_headers(headers, *, default_seconds: float, source: str, replace: bool = False) -> DeadlineBudget:
+    """Start or reuse one monotonic budget for the current request/task.
 
-    Client budgets may shorten the server budget but can never extend it. A
-    monotonic clock makes the budget immune to wall-clock changes.
+    The outer HTTP boundary calls this with ``replace=True`` exactly once per
+    request. Inner auth/API layers reuse the existing budget, so work already
+    spent parsing/authenticating can never be added back to the deadline.
+    Client budgets may shorten the server budget but can never extend it.
     """
+    existing = _DEADLINE.get()
+    if existing is not None and not replace:
+        return existing
     server_budget = max(_MIN_SECONDS, min(_MAX_SECONDS, float(default_seconds)))
     requested: float | None = None
     try:
