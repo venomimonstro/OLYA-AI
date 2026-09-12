@@ -79,6 +79,7 @@ def main() -> int:
             ("scripts.admin_control_center_audit", []),
             ("scripts.admin_user_operations_audit", []),
             ("scripts.capability_registry_audit", []),
+            ("scripts.priority_scheduler_audit", []),
             ("scripts.model_regression_lab", ["--validate-only"]),
             ("scripts.rc_security_audit", []),
         ):
