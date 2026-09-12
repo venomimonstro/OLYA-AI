@@ -6,6 +6,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from time import monotonic
 
+from app.services.deadline import remaining_seconds
+
 
 class ResourceBusyError(RuntimeError):
     pass
@@ -30,12 +32,6 @@ _SCHEDULER_CONTEXT: ContextVar[dict] = ContextVar("x1_inference_scheduler_contex
 
 
 def set_inference_scheduler_context(*, priority_class: str, plan: str, principal: str, channel: str) -> None:
-    """Attach admission metadata to the current request/task context.
-
-    ContextVar keeps concurrent requests isolated while allowing every existing
-    `governor.slot()` call to participate without duplicating scheduler policy in
-    each endpoint.
-    """
     _SCHEDULER_CONTEXT.set(
         {
             "priority_class": str(priority_class or "work"),
@@ -61,13 +57,7 @@ class _Waiter:
 
 
 class ResourceGovernor:
-    """Bounded priority/fair admission for scarce local inference.
-
-    Priority only changes queue ordering. It never bypasses max_concurrent,
-    max_queue, per-user governors or quota checks. Waiting time continuously
-    improves a request's score, so lower-priority Deep/background work cannot
-    starve behind an endless stream of new interactive requests.
-    """
+    """Bounded priority/fair admission for scarce local inference."""
 
     def __init__(self, max_concurrent: int = 1, max_queue: int = 64, wait_timeout_seconds: float = 120.0) -> None:
         if max_concurrent < 1:
@@ -106,9 +96,6 @@ class ResourceGovernor:
         return name if name in _PLAN_BOOST else "free"
 
     def _score(self, waiter: _Waiter, now: float) -> tuple[float, int]:
-        # One priority point is recovered every two seconds waited. Because this
-        # term is intentionally unbounded, any admitted waiter eventually outranks
-        # newly-arriving work even when it started in the background class.
         age_points = max(0.0, now - waiter.enqueued_at) / 2.0
         score = _PRIORITY_BASE[waiter.priority_class] + _PLAN_BOOST[waiter.plan] - age_points
         return score, waiter.sequence
@@ -160,10 +147,13 @@ class ResourceGovernor:
         acquired = False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.wait_timeout_seconds
+        request_remaining = remaining_seconds()
+        if request_remaining is not None:
+            if request_remaining <= 0:
+                raise ResourceBusyError("request deadline exceeded before inference admission")
+            deadline = min(deadline, loop.time() + request_remaining)
 
         async with self._condition:
-            # Preserve low-latency admission when the scheduler is idle. Once
-            # anyone is queued, every newcomer joins the same ordering policy.
             if self._active < self.max_concurrent and not self._waiters:
                 self._active += 1
                 acquired = True
@@ -197,10 +187,11 @@ class ResourceGovernor:
                                 self._waiters.remove(waiter)
                             self._timeouts += 1
                             self._condition.notify_all()
+                            budget = remaining_seconds()
+                            if budget is not None and budget <= 0:
+                                raise ResourceBusyError("request deadline exceeded while waiting for inference")
                             raise ResourceBusyError("local inference queue wait timed out")
                         try:
-                            # Periodic wake-up lets aging change ordering even if
-                            # no enqueue/release event occurs during this second.
                             await asyncio.wait_for(self._condition.wait(), timeout=min(1.0, remaining))
                         except TimeoutError:
                             pass
