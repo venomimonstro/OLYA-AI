@@ -15,9 +15,48 @@ fi
 [[ "$(uname -s)" == "Linux" ]] || fail "Linux is required"
 [[ "$(uname -m)" == "x86_64" ]] || fail "x86_64 is required"
 
+install_prerequisites() {
+  if command -v apt-get >/dev/null 2>&1; then
+    info "Ensuring host prerequisites"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y ca-certificates curl git python3 docker.io util-linux
+    if ! docker compose version >/dev/null 2>&1; then
+      apt-get install -y docker-compose-v2 >/dev/null 2>&1 || apt-get install -y docker-compose-plugin >/dev/null 2>&1 || true
+    fi
+    systemctl enable --now docker >/dev/null 2>&1 || service docker start >/dev/null 2>&1 || true
+  else
+    fail "Automatic clean-server installation currently supports Debian/Ubuntu (apt-get). Install git, curl, python3, Docker and Compose v2 manually on another distro."
+  fi
+}
+
+for cmd in python3 git curl docker; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then install_prerequisites; break; fi
+done
+if ! docker compose version >/dev/null 2>&1; then install_prerequisites; fi
 for cmd in python3 git curl docker; do command -v "$cmd" >/dev/null 2>&1 || fail "$cmd is required"; done
-docker info >/dev/null 2>&1 || fail "Docker daemon is unavailable"
+docker info >/dev/null 2>&1 || { systemctl start docker >/dev/null 2>&1 || true; docker info >/dev/null 2>&1 || fail "Docker daemon is unavailable"; }
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
+
+ADMIN_EMAIL="${X1_INITIAL_ADMIN_EMAIL:-}"
+ADMIN_NAME="${X1_INITIAL_ADMIN_NAME:-Owner}"
+ADMIN_PASSWORD="${X1_INITIAL_ADMIN_PASSWORD:-}"
+if [ "${X1_SKIP_ADMIN_SETUP:-0}" != "1" ]; then
+  if [ -z "$ADMIN_EMAIL" ]; then
+    [ -t 0 ] || fail "Set X1_INITIAL_ADMIN_EMAIL for non-interactive installation"
+    read -r -p "Admin email: " ADMIN_EMAIL
+  fi
+  if [ -z "$ADMIN_PASSWORD" ]; then
+    [ -t 0 ] || fail "Set X1_INITIAL_ADMIN_PASSWORD for non-interactive installation"
+    read -r -s -p "Admin password (12+ chars): " ADMIN_PASSWORD; printf '\n'
+    read -r -s -p "Repeat admin password: " ADMIN_PASSWORD_CONFIRM; printf '\n'
+    [ "$ADMIN_PASSWORD" = "$ADMIN_PASSWORD_CONFIRM" ] || fail "Admin passwords do not match"
+    unset ADMIN_PASSWORD_CONFIRM
+  fi
+  [[ "$ADMIN_EMAIL" == *@*.* ]] || fail "Admin email is invalid"
+  [ "${#ADMIN_PASSWORD}" -ge 12 ] || fail "Admin password must contain at least 12 characters"
+  [ "${#ADMIN_PASSWORD}" -le 256 ] || fail "Admin password is too long"
+fi
 
 ram_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
 ram_gib=$((ram_kb / 1024 / 1024))
@@ -126,8 +165,6 @@ setv('X1_HTTP_LIMIT_CONCURRENCY','32')
 setv('X1_HTTP_BACKLOG','512')
 setv('X1_HTTP_KEEPALIVE_SECONDS','5')
 
-# Keep the profitable starter core online. Heavy executors can be enabled after
-# a RAM upgrade without changing user/project data.
 setv('X1_PROJECT_SANDBOX_BACKEND','disabled')
 setv('X1_DOCUMENT_RENDER_BACKEND','disabled')
 setv('X1_IMAGE_BACKEND','disabled')
@@ -135,7 +172,6 @@ setv('X1_IMAGE_EDIT_BACKEND','disabled')
 setv('X1_IMAGE_VISION_QA_URL','')
 setv('X1_PUBLIC_LAUNCH_ENFORCE_EXPOSURE','true')
 
-# Request-unit plan defaults. Actual CPU seconds remain a second hard ceiling.
 for key,value in {
     'X1_PLAN_MONTHLY_REQUEST_UNITS_FREE':'30','X1_PLAN_MONTHLY_REQUEST_UNITS_X1':'240',
     'X1_PLAN_MONTHLY_REQUEST_UNITS_PRO':'720','X1_PLAN_MONTHLY_REQUEST_UNITS_MAX':'1800',
@@ -171,6 +207,14 @@ docker compose exec -T db pg_isready -U x1 -d x1 >/dev/null 2>&1 || fail "Postgr
 
 info "Applying database migrations"
 docker compose run --rm --no-deps app alembic upgrade head
+
+if [ "${X1_SKIP_ADMIN_SETUP:-0}" != "1" ]; then
+  info "Creating/verifying initial administrator"
+  admin_payload="$(printf '%s\n%s\n%s\n' "$ADMIN_EMAIL" "$ADMIN_PASSWORD" "$ADMIN_NAME" | python3 -c 'import json,sys; a=sys.stdin.read().splitlines(); print(json.dumps({"email":a[0],"password":a[1],"display_name":a[2] if len(a)>2 else "Owner"}))')"
+  printf '%s' "$admin_payload" | docker compose run --rm -T --no-deps app python -m scripts.create_admin --stdin-json >/dev/null
+  unset admin_payload ADMIN_PASSWORD
+fi
+
 info "Starting one-slot Qwen inference and X1"
 docker compose --profile inference up -d llama app
 
@@ -195,5 +239,6 @@ bash scripts/restore_drill.sh "$backup_path" >/dev/null
 info "Starter installation complete: ${cores} CPU / about ${ram_gib} GiB RAM / ${disk_gb} GB free before installation"
 info "Always-on services: PostgreSQL + SearXNG + app + Qwen3-4B. One inference runs at a time; bursts wait in the bounded fair queue."
 info "Sandbox, document rendering and local image generation are intentionally disabled on starter_6gb and can be enabled after a RAM upgrade."
-info "Configure X1_BILLING_CHECKOUT_URL_TEMPLATE before accepting paid purchases. Payment ingest secret was generated in .env."
+info "Open /login with the administrator email you supplied, then /admin (Owner dashboard: /admin/owner)."
+info "Configure public HTTPS URL, SMTP, Yandex Metrica and YooMoney/YooKassa in /admin/integrations before public launch."
 info "X1 binds to localhost; put a TLS reverse proxy in front of it for public access."
