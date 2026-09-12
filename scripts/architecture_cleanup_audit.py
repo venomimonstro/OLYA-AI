@@ -12,7 +12,7 @@ def audit()->dict:
     base=(ROOT/'app/user_workspace_base.py').read_text('utf-8')
     legacy_admin=(ROOT/'app/api/routes/admin.py').read_text('utf-8')
     regression=(ROOT/'scripts/run_full_regression.py').read_text('utf-8')
-    required_domains=('authentication','billing','quota_entitlement','plan_policy','admin_user_override','capability_availability','inference_admission','request_deadline','agent_completion','image_beta_contract','product_analytics','background_jobs','recovery_integrity')
+    required_domains=('authentication','billing','quota_entitlement','plan_policy','admin_user_override','capability_availability','inference_admission','request_deadline','agent_completion','image_beta_contract','product_analytics','background_jobs','recovery_integrity','business_logic_contract')
     for name in required_domains:
         if f'"{name}"' not in ownership:errors.append({'code':'domain_owner_missing','domain':name})
     module=importlib.import_module('app.domain_ownership')
