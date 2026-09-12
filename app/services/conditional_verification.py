@@ -31,19 +31,17 @@ class VerificationPlan:
     run_critic: bool
     repair_deterministic: bool
     repair_critic: bool
-    critic_max_tokens: int = 700
+    critic_max_tokens: int = 420
 
     @property
     def extra_inference_budget(self) -> int:
         if self.mode == "off":
             return 0
-        if self.mode == "strict":
-            return 2
-        if self.repair_deterministic or self.run_critic:
-            return 2
-        # Formal requirements/Scope Lock may need one deterministic repair even
-        # when the primary answer later turns out clean. Reserve one call rather
-        # than making quota accounting optimistic.
+        # The starter CPU profile allows one bounded quality pass. Deterministic
+        # checks remain free; expensive semantic verification never fans out into
+        # critic + repair + critic again on a 4-core node.
+        if self.mode == "strict" or self.repair_deterministic or self.run_critic:
+            return 1
         if "explicit_requirements" in self.reasons or "scope_lock" in self.reasons:
             return 1
         return 0
@@ -101,7 +99,7 @@ def plan_verification(
         score += 2
         reasons.append("semantic_high_risk")
 
-    if len(answer) >= 5000:
+    if len(answer) >= 3500:
         score += 1
         reasons.append("long_answer")
 
@@ -119,14 +117,15 @@ def plan_verification(
         reasons.append("low_risk_transform")
 
     if verification == "strict":
+        repair = bool(failed)
         return VerificationPlan(
             mode="strict",
             risk_score=max(score, 3),
             reasons=tuple(dict.fromkeys(reasons + ["strict_requested"])),
-            run_critic=True,
-            repair_deterministic=bool(failed),
-            repair_critic=True,
-            critic_max_tokens=800,
+            run_critic=not repair,
+            repair_deterministic=repair,
+            repair_critic=False,
+            critic_max_tokens=480,
         )
 
     repair_deterministic = bool(failed)
@@ -137,8 +136,8 @@ def plan_verification(
         reasons=tuple(dict.fromkeys(reasons)),
         run_critic=run_critic,
         repair_deterministic=repair_deterministic,
-        repair_critic=run_critic,
-        critic_max_tokens=700,
+        repair_critic=False,
+        critic_max_tokens=420,
     )
 
 
@@ -152,7 +151,6 @@ def critic_has_repairable_issue(critic: dict | None) -> bool:
 
 
 def audit_with_critic_issues(audit: DeterministicAudit, critic: dict | None) -> DeterministicAudit:
-    """Convert critic major/critical findings into explicit repair targets."""
     if not critic_has_repairable_issue(critic):
         return audit
     checks = list(audit.checks)
