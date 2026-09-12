@@ -107,6 +107,7 @@ def patch_user(user_id: str, payload: AdminUserPatch, request: Request, admin: U
         monthly=payload.monthly_compute_seconds_limit if payload.monthly_compute_seconds_limit is not None else (active_existing.monthly_compute_seconds_limit if active_existing else None)
         inference=payload.max_concurrent_inference if payload.max_concurrent_inference is not None else (active_existing.max_concurrent_inference if active_existing else None)
         jobs=payload.max_concurrent_jobs if payload.max_concurrent_jobs is not None else (active_existing.max_concurrent_jobs if active_existing else None)
+        expiry=active_existing.expires_at if active_existing else None
         try:
             put_control(
                 db,target,request.app.state.settings,
@@ -116,7 +117,7 @@ def patch_user(user_id: str, payload: AdminUserPatch, request: Request, admin: U
                 monthly_compute_seconds_limit=monthly,
                 max_concurrent_inference=inference,
                 max_concurrent_jobs=jobs,
-                expires_at=None,
+                expires_at=expiry,
                 reason='Legacy admin PATCH compatibility',
             )
             get_or_create_quota(db,target,request.app.state.settings)
