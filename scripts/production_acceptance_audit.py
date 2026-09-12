@@ -25,6 +25,9 @@ def audit() -> dict:
         "x1-release-candidate-v4",
         "x1-real-load-acceptance-v2",
         "x1-release-gate-v4",
+        "canonical_target_url",
+        "expected_target=target_url",
+        '"same_target": same_target',
         "candidate_source_provenance",
         "runtime_source_provenance",
         "public_build_provenance",
@@ -69,6 +72,8 @@ def audit() -> dict:
         '"x1-final-release-acceptance-v1"',
         "X1_LOAD_TOKENS",
         "X1_PRODUCTION_ADMIN_TOKEN",
+        "_validate_target_transport(base_url)",
+        "Public final acceptance requires HTTPS before Bearer load tokens are sent",
         "scripts/load_acceptance.py",
         "scripts/rc_release_candidate.py",
         "scripts/production_acceptance.py",
@@ -100,12 +105,13 @@ def audit() -> dict:
         errors.append({"code": "roadmap_must_not_claim_unrun_production_acceptance"})
 
     return {
-        "format": "x1-production-acceptance-audit-v3",
+        "format": "x1-production-acceptance-audit-v4",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "requires_external_production_run": True,
         "requires_clean_worktree": True,
         "requires_runtime_build_provenance": True,
+        "requires_same_load_target": True,
         "requires_external_https_or_loopback": True,
         "requires_live_billing_configuration": True,
         "one_command_release_workflow": True,
