@@ -20,6 +20,13 @@ def month_start(now: datetime | None = None) -> datetime:
     return value.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
+def day_start(now: datetime | None = None) -> datetime:
+    value = now or datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 def _sync_measured_policy(db: Session, quota: UserQuota, settings: Settings) -> None:
     try:
         from app.services.measured_plans import active_catalog
@@ -27,18 +34,20 @@ def _sync_measured_policy(db: Session, quota: UserQuota, settings: Settings) -> 
         policy = (catalog.catalog or {}).get(quota.plan) if catalog is not None else None
         if isinstance(policy, dict):
             quota.monthly_compute_seconds_limit = max(1, int(policy.get("monthly_cpu_seconds") or quota.monthly_compute_seconds_limit))
-            quota.max_concurrent_inference = max(1, int(policy.get("max_concurrent_inference") or quota.max_concurrent_inference))
-            quota.max_concurrent_jobs = max(1, int(policy.get("max_concurrent_jobs") or quota.max_concurrent_jobs))
+            quota.max_concurrent_inference = min(
+                max(1, int(policy.get("max_concurrent_inference") or quota.max_concurrent_inference)),
+                max(1, int(settings.max_concurrent_generations)),
+            )
+            quota.max_concurrent_jobs = min(
+                max(1, int(policy.get("max_concurrent_jobs") or quota.max_concurrent_jobs)),
+                max(1, int(settings.default_max_concurrent_jobs)),
+            )
     except ImportError:
         return
 
 
 def _sync_canonical_entitlement(db: Session, user: User, settings: Settings, quota: UserQuota) -> UserQuota:
-    """Restore billing/free truth before applying any explicit admin override.
-
-    This makes direct mutations of UserQuota non-authoritative. A paid subscription
-    controls its plan; users without an active subscription return to Free.
-    """
+    """Restore billing/free truth before applying any explicit admin override."""
     try:
         from app.services.billing import reconcile_user_subscription
         from app.services.measured_plans import apply_runtime_plan_to_quota
@@ -78,10 +87,61 @@ def compute_seconds_used(db: Session, user_id: str, now: datetime | None = None)
     return int(total_ms) // 1000
 
 
+def _request_units_since(db: Session, user_id: str, settings: Settings, since: datetime) -> int:
+    from app.services.measured_plans import request_unit_weights
+    weights = request_unit_weights(settings)
+    fallback = weights.get("work", 2)
+    rows = db.execute(
+        select(UsageEvent.mode, func.count(UsageEvent.id))
+        .where(UsageEvent.user_id == user_id, UsageEvent.created_at >= since)
+        .group_by(UsageEvent.mode)
+    ).all()
+    return sum(int(count or 0) * int(weights.get(str(mode), fallback)) for mode, count in rows)
+
+
+def request_unit_usage(db: Session, user: User, settings: Settings, *, now: datetime | None = None) -> dict:
+    from app.services.measured_plans import plan_policy, request_unit_weights
+    quota = get_or_create_quota(db, user, settings)
+    policy = plan_policy(db, settings, quota.plan) or {}
+    monthly_limit = max(0, int(policy.get("monthly_request_units") or 0))
+    daily_limit = max(0, int(policy.get("daily_request_units") or 0))
+    monthly_used = _request_units_since(db, user.id, settings, month_start(now))
+    daily_used = _request_units_since(db, user.id, settings, day_start(now))
+    return {
+        "plan": quota.plan,
+        "monthly_request_units_limit": monthly_limit,
+        "monthly_request_units_used": monthly_used,
+        "monthly_request_units_remaining": max(0, monthly_limit - monthly_used),
+        "daily_request_units_limit": daily_limit,
+        "daily_request_units_used": daily_used,
+        "daily_request_units_remaining": max(0, daily_limit - daily_used),
+        "request_unit_weights": request_unit_weights(settings),
+    }
+
+
 def _inferred_channel(reserve_seconds: int) -> str:
-    if reserve_seconds in {15, 30}: return "fast"
-    if reserve_seconds in {60, 120}: return "work"
+    if reserve_seconds in {15, 30}:
+        return "fast"
+    if reserve_seconds in {60, 120}:
+        return "work"
     return "deep" if reserve_seconds >= 180 else "work"
+
+
+def _ensure_request_units_available(db: Session, user: User, settings: Settings, plan: str, channel: str) -> None:
+    from app.services.measured_plans import plan_policy, request_unit_weights
+    policy = plan_policy(db, settings, plan) or {}
+    weights = request_unit_weights(settings)
+    unit_cost = int(weights.get(channel, weights.get("work", 2)))
+    monthly_limit = max(0, int(policy.get("monthly_request_units") or 0))
+    daily_limit = max(0, int(policy.get("daily_request_units") or 0))
+    if monthly_limit:
+        used = _request_units_since(db, user.id, settings, month_start())
+        if used + unit_cost > monthly_limit:
+            raise QuotaExceededError("Monthly request limit exhausted for this plan")
+    if daily_limit:
+        used = _request_units_since(db, user.id, settings, day_start())
+        if used + unit_cost > daily_limit:
+            raise QuotaExceededError("Daily fair-use request limit reached; try again after 00:00 UTC")
 
 
 def ensure_compute_available(db: Session, user: User, settings: Settings, *, reserve_seconds: int = 0, channel: str | None = None) -> UserQuota:
@@ -93,9 +153,16 @@ def ensure_compute_available(db: Session, user: User, settings: Settings, *, res
 
     scheduler_channel = channel or _inferred_channel(reserve_seconds)
     try:
-        from app.services.commerce import measured_user_resources, price_resource_ms
-        from app.services.measured_plans import current_channel_override, ensure_channel_budget, plan_policy
+        from app.services.measured_plans import current_channel_override
         scheduler_channel = channel or current_channel_override() or scheduler_channel
+    except ImportError:
+        pass
+
+    _ensure_request_units_available(db, user, settings, quota.plan, scheduler_channel)
+
+    try:
+        from app.services.commerce import measured_user_resources, price_resource_ms
+        from app.services.measured_plans import ensure_channel_budget, plan_policy
         policy = plan_policy(db, settings, quota.plan)
         if policy is not None:
             measured = measured_user_resources(db, user.id, settings)
@@ -103,14 +170,13 @@ def ensure_compute_available(db: Session, user: User, settings: Settings, *, res
             total_budget = max(0, int(policy.get("resource_budget_microunits") or 0))
             if total_budget and measured["total_cost_microunits"] + reserve_cost > total_budget:
                 raise QuotaExceededError("Monthly measured resource budget exhausted")
-            try: ensure_channel_budget(db, user, settings, scheduler_channel, reserve_cost)
-            except RuntimeError as exc: raise QuotaExceededError(str(exc)) from exc
+            try:
+                ensure_channel_budget(db, user, settings, scheduler_channel, reserve_cost)
+            except RuntimeError as exc:
+                raise QuotaExceededError(str(exc)) from exc
     except ImportError:
         pass
 
-    # The request has passed quota/resource checks. Propagate the same canonical
-    # plan/user/channel into the scarce inference scheduler. This does not grant
-    # capacity; ResourceGovernor still enforces its own bounded queue/concurrency.
     try:
         from app.services.resource_governor import set_inference_scheduler_context
         priority = scheduler_channel if scheduler_channel in {"fast", "work", "deep", "api", "background"} else _inferred_channel(reserve_seconds)
