@@ -42,14 +42,14 @@ def restore_legacy_suite() -> None:
             if member.issym() or member.islnk() or member.isdev() or member.isfifo():
                 raise RuntimeError(f"Unsafe historical test archive member: {raw}")
             if path.is_absolute() or ".." in path.parts:
-                raise RuntimeError(f"Unsafe historical test archive path: {raw}")
+                raise RuntimeError(f"Unsafe historical regression archive path: {raw}")
             if len(path.parts) != 2 or path.parts[0] != "tests" or not path.name.startswith("test_") or path.suffix != ".py":
                 raise RuntimeError(f"Unexpected historical test archive member: {raw}")
             if path.name in found:
                 raise RuntimeError(f"Duplicate historical regression module: {path.name}")
             extracted = archive.extractfile(member)
             if extracted is None:
-                raise RuntimeError(f"Cannot read historical test module: {raw}")
+                raise RuntimeError(f"Cannot read historical regression module: {raw}")
             data = extracted.read()
             if len(data) > 1_000_000:
                 raise RuntimeError(f"Historical test module is unexpectedly large: {raw}")
@@ -80,6 +80,7 @@ def main() -> int:
             ("scripts.admin_user_operations_audit", []),
             ("scripts.capability_registry_audit", []),
             ("scripts.priority_scheduler_audit", []),
+            ("scripts.deadline_budget_audit", []),
             ("scripts.model_regression_lab", ["--validate-only"]),
             ("scripts.rc_security_audit", []),
         ):
