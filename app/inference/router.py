@@ -24,6 +24,11 @@ HIGH_RISK_MARKERS = (
     "проанализируй репозитор",
     "audit the repository",
     "архитектурный аудит",
+    "seo аудит",
+    "seo-аудит",
+    "seo audit",
+    "аудит сайта",
+    "site audit",
     "production incident",
     "расследуй инцидент",
     "юридический анализ",
@@ -38,6 +43,10 @@ ANALYTIC_MARKERS = (
     "архитектур",
     "оптимизируй",
     "найди причину",
+    "найди лучш",
+    "подбери лучш",
+    "посоветуй лучш",
+    "рекомендуй лучш",
     "debug",
     "root cause",
     "analyze",
@@ -96,8 +105,12 @@ def _complexity_score(normalized: str) -> tuple[int, list[str]]:
 
     analytic_hits = sum(marker in normalized for marker in ANALYTIC_MARKERS)
     if analytic_hits:
-        score += min(3, analytic_hits * 2)
+        score += min(4, analytic_hits * 2)
         reasons.append("analysis_task")
+
+    if any(marker in normalized for marker in ("найди лучш", "подбери лучш", "посоветуй лучш", "рекомендуй лучш")):
+        score += 1
+        reasons.append("comparative_recommendation")
 
     code_hits = sum(marker in normalized for marker in CODE_MARKERS)
     if code_hits >= 2:
@@ -130,7 +143,7 @@ def choose_route(text: str, requested_mode: str, normal_context: int, deep_conte
     high_risk = next((marker for marker in HIGH_RISK_MARKERS if marker in normalized), None)
     if high_risk:
         score = max(score, 7)
-        reasons.append("high_risk")
+        reasons.append("high_risk_or_audit")
 
     if requested_mode in {"fast", "work", "deep"}:
         mode: Mode = requested_mode  # type: ignore[assignment]
