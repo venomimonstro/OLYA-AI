@@ -45,6 +45,47 @@ class BudgetPreviewRequest(BaseModel):
     research_source_count: int = Field(default=0, ge=0, le=10)
 
 
+@router.get("/capacity")
+def capacity_status(request: Request, user: User = Depends(get_current_user)) -> dict:
+    _ = user
+    governor = request.app.state.governor.snapshot()
+    lane = request.app.state.overload_lanes["chat"].snapshot()
+    waiting = int(governor.get("waiting") or 0) + int(lane.waiting)
+    if lane.breaker_state != "closed":
+        state = "recovering"
+    elif waiting >= max(3, int(lane.max_queue * 0.6)):
+        state = "high_load"
+    elif waiting > 0 or int(governor.get("active") or 0) >= int(governor.get("max_concurrent") or 1):
+        state = "busy"
+    else:
+        state = "available"
+    return {
+        "state": state,
+        "runtime_profile": str(request.app.state.settings.server_optimization_profile),
+        "message": {
+            "available": "Сервер свободен.",
+            "busy": "Сейчас выполняется другой запрос; новый запрос может немного подождать.",
+            "high_load": "Высокая нагрузка: запросы выполняются по очереди.",
+            "recovering": "Сервис восстанавливается после временной перегрузки.",
+        }[state],
+        "inference": {
+            "active": int(governor.get("active") or 0),
+            "waiting": int(governor.get("waiting") or 0),
+            "max_concurrent": int(governor.get("max_concurrent") or 1),
+            "max_queue": int(governor.get("max_queue") or 0),
+            "oldest_wait_seconds": float(governor.get("oldest_wait_seconds") or 0.0),
+        },
+        "http_admission": {
+            "active": int(lane.active),
+            "waiting": int(lane.waiting),
+            "max_concurrent": int(lane.max_concurrent),
+            "max_queue": int(lane.max_queue),
+            "breaker_state": lane.breaker_state,
+        },
+        "estimated_wait_seconds": None,
+    }
+
+
 @router.get("/summary", response_model=UsageSummary)
 def usage_summary(
     request: Request,
