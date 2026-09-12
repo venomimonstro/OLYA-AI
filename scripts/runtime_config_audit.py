@@ -5,11 +5,7 @@ import json
 
 from app.core.config import get_settings
 from app.services.image_capabilities import SUPPORTED_EDIT_BACKENDS
-from app.services.image_vision_endpoint import (
-    VisionEndpointError,
-    is_self_hosted_vision_origin,
-    validate_vision_endpoint,
-)
+from app.services.image_vision_endpoint import VisionEndpointError, is_self_hosted_vision_origin, validate_vision_endpoint
 
 
 def validate(settings) -> list[str]:
@@ -25,6 +21,7 @@ def validate(settings) -> list[str]:
     require(int(settings.default_max_output_tokens) + 512 < int(settings.deep_context_tokens), "output_budget_leaves_no_prompt_headroom")
     require(int(settings.max_concurrent_generations) >= 1, "inference_concurrency_not_positive")
     require(int(settings.max_queue_size) >= 1, "inference_queue_not_positive")
+    require(int(settings.inference_max_queued_per_principal) >= 1, "inference_principal_queue_not_positive")
 
     require(int(settings.file_chunk_chars) >= 256, "file_chunk_too_small")
     require(0 <= int(settings.file_chunk_overlap_chars) < int(settings.file_chunk_chars), "file_chunk_overlap_invalid")
@@ -49,8 +46,6 @@ def validate(settings) -> list[str]:
     require(image_backend in {"disabled", "mock", "diffusers"}, "unsupported_image_generation_backend")
     require(edit_backend in SUPPORTED_EDIT_BACKENDS, "unsupported_image_edit_backend")
 
-    # Image generation/edit checkpoints are paths on our own host. A URL/model
-    # hub identifier must never become an implicit download/API escape hatch.
     image_paths = {
         "generation": str(settings.image_model_path or "").strip(),
         "edit": str(settings.image_edit_model_path or "").strip(),
@@ -69,10 +64,7 @@ def validate(settings) -> list[str]:
     vision_url = str(settings.image_vision_qa_url or "").strip()
     if vision_url:
         try:
-            validate_vision_endpoint(
-                vision_url,
-                trusted_internal_base_url=str(settings.llama_base_url or ""),
-            )
+            validate_vision_endpoint(vision_url, trusted_internal_base_url=str(settings.llama_base_url or ""))
         except VisionEndpointError:
             errors.append("image_vision_endpoint_not_self_hosted")
 
@@ -97,11 +89,22 @@ def validate(settings) -> list[str]:
     require(abs(sum(shares.values()) - 1.0) <= 0.0001, "plan_channel_shares_do_not_sum_to_one")
 
     production = str(settings.env).lower() in {"production", "prod", "stable"}
+    starter = str(settings.server_optimization_profile).lower() == "starter_6gb"
     if production:
         require(not settings.is_sqlite, "production_database_is_sqlite")
         require(image_backend != "mock", "production_image_backend_is_mock")
-        require(str(settings.document_render_backend).lower() == "remote", "production_document_renderer_not_isolated")
-        require(str(settings.project_sandbox_backend).lower() == "remote", "production_sandbox_not_isolated")
+        document_backend = str(settings.document_render_backend).lower()
+        sandbox_backend = str(settings.project_sandbox_backend).lower()
+        if starter:
+            require(document_backend in {"disabled", "remote"}, "starter_document_renderer_must_be_disabled_or_isolated")
+            require(sandbox_backend in {"disabled", "remote"}, "starter_sandbox_must_be_disabled_or_isolated")
+            require(image_backend == "disabled", "starter_image_generation_must_be_disabled")
+            require(edit_backend == "disabled", "starter_image_edit_must_be_disabled")
+            require(int(settings.max_concurrent_generations) == 1, "starter_inference_concurrency_must_be_one")
+            require(int(settings.deep_context_tokens) <= 4096, "starter_context_exceeds_4096")
+        else:
+            require(document_backend == "remote", "production_document_renderer_not_isolated")
+            require(sandbox_backend == "remote", "production_sandbox_not_isolated")
         require(bool(str(settings.database_host or "").strip()), "production_database_host_missing")
         if vision_url:
             require(is_self_hosted_vision_origin(vision_url), "production_image_vision_not_self_hosted")
@@ -113,7 +116,7 @@ def main() -> int:
     settings = get_settings()
     errors = validate(settings)
     payload = {
-        "format": "x1-runtime-config-audit-v2",
+        "format": "x1-runtime-config-audit-v3",
         "status": "passed" if not errors else "failed",
         "environment": str(settings.env),
         "server_profile": str(settings.server_optimization_profile),
