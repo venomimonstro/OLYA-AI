@@ -10,11 +10,26 @@ fail() { printf '[X1 update] ERROR: %s\n' "$*" >&2; exit 1; }
 
 if [ "$(id -u)" -ne 0 ]; then
   command -v sudo >/dev/null 2>&1 || fail "run as root or install sudo"
-  exec sudo -E env X1_INSTALL_DIR="$ROOT" bash "$0" "$@"
+  exec sudo -E env X1_INSTALL_DIR="$ROOT" X1_INSTALL_PROFILE="${X1_INSTALL_PROFILE:-auto}" bash "$0" "$@"
 fi
 command -v git >/dev/null 2>&1 || fail "git is required"
 command -v docker >/dev/null 2>&1 || fail "docker is required"
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
+
+profile_now() {
+  local requested="${X1_INSTALL_PROFILE:-auto}"
+  if [ "$requested" != "auto" ]; then printf '%s' "$requested"; return; fi
+  if [ -f .env ] && grep -q '^X1_SERVER_OPTIMIZATION_PROFILE=starter_6gb$' .env; then printf 'starter_6gb'; else printf 'full'; fi
+}
+PROFILE="$(profile_now)"
+case "$PROFILE" in starter_6gb|full) ;; *) fail "invalid install profile: $PROFILE";; esac
+install_revision() {
+  if [ "$PROFILE" = "starter_6gb" ]; then
+    X1_SKIP_ADMIN_SETUP=1 bash scripts/install_starter_6gb.sh "$@"
+  else
+    bash scripts/install.sh "$@"
+  fi
+}
 
 exec 9>"$ROOT/.x1-update.lock"
 if command -v flock >/dev/null 2>&1; then flock -n 9 || fail "another X1 update is already running"; fi
@@ -39,12 +54,14 @@ quiesce_runtime_proxy() {
   [ -z "$ids" ] || docker rm -f $ids >/dev/null 2>&1 || true
 }
 
+info "Update profile: $PROFILE"
 info "Fetching main without changing the working tree"
 git fetch origin main
 TARGET_HEAD="$(git rev-parse origin/main)"
 if [ "$OLD_HEAD" = "$TARGET_HEAD" ]; then
-  info "Already at latest main; running installer repair/verification"
-  exec bash scripts/install.sh "$@"
+  info "Already at latest main; running profile-aware repair/verification"
+  install_revision "$@"
+  exit 0
 fi
 git merge-base --is-ancestor "$OLD_HEAD" "$TARGET_HEAD" || fail "origin/main is not a fast-forward from the installed revision"
 
@@ -73,20 +90,20 @@ rollback() {
   quiesce_sandbox_containers >/dev/null 2>&1 || true
   quiesce_runtime_proxy >/dev/null 2>&1 || true
   git reset --hard "$OLD_HEAD" >/dev/null 2>&1 || true
-  # The installer mutates .env during model migrations. Code rollback without
-  # restoring .env can otherwise pair the old runtime with the new model identity.
   if [ "$ENV_EXISTED" -eq 1 ]; then cp -p "$ENV_COPY" .env; chmod 600 .env; else rm -f .env; fi
   if [ -n "$BACKUP_PATH" ] && [ -d "$BACKUP_PATH" ]; then
     X1_INSTALL_DIR="$ROOT" bash "$RESTORE_COPY" "$BACKUP_PATH" >/dev/null 2>&1 \
       || printf '[X1 update] WARNING: automatic data restore failed; backup remains at %s\n' "$BACKUP_PATH" >&2
   fi
-  docker compose build app sandbox-worker >/dev/null 2>&1 || true
-  docker compose --profile inference up -d db searxng sandbox-worker llama app >/dev/null 2>&1 || true
-  # Restore optional workers exactly when they were running before the update.
-  # document-worker is not an app dependency, so omitting this left document QA
-  # broken after an otherwise successful rollback.
-  if was_running document-worker; then docker compose up -d document-worker >/dev/null 2>&1 || true; fi
-  if was_running image-worker; then docker compose --profile images up -d image-worker >/dev/null 2>&1 || true; fi
+  if [ "$PROFILE" = "starter_6gb" ]; then
+    docker compose build --build-arg X1_RUNTIME_PROFILE=starter_6gb app >/dev/null 2>&1 || true
+    docker compose --profile inference up -d db searxng llama app >/dev/null 2>&1 || true
+  else
+    docker compose build app sandbox-worker >/dev/null 2>&1 || true
+    docker compose --profile inference up -d db searxng sandbox-worker llama app >/dev/null 2>&1 || true
+    if was_running document-worker; then docker compose up -d document-worker >/dev/null 2>&1 || true; fi
+    if was_running image-worker; then docker compose --profile images up -d image-worker >/dev/null 2>&1 || true; fi
+  fi
   cleanup_helpers
   printf '[X1 update] Previous revision and environment restored: %s\n' "$OLD_HEAD" >&2
   exit 2
@@ -109,9 +126,9 @@ X1_INSTALL_DIR="$ROOT" bash "$DRILL_COPY" "$BACKUP_PATH" >/dev/null
 
 info "Fast-forwarding code to $TARGET_HEAD"
 git merge --ff-only origin/main
-info "Installing/migrating/verifying the new revision"
-bash scripts/install.sh "$@"
-if was_running image-worker; then docker compose --profile images up -d image-worker; fi
+info "Installing/migrating/verifying the new revision with preserved profile"
+install_revision "$@"
+if [ "$PROFILE" != "starter_6gb" ] && was_running image-worker; then docker compose --profile images up -d image-worker; fi
 
 trap - ERR INT TERM
 cleanup_helpers
