@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.api.routes.capabilities import capabilities_console
 from app.main import app
-from app.services.capabilities import CAPABILITY_IDS, capability_for_request
+from app.services.capabilities import CAPABILITY_IDS, capability_for_request, unavailable_http_status
 from scripts.capability_registry_audit import audit
 
 
@@ -36,6 +36,15 @@ def test_sprint73_request_mapping_is_deterministic() -> None:
     assert capability_for_request("POST", "/v1/images/edits") == "images.edit"
     assert capability_for_request("POST", "/v1/project-sandboxes/abc/execute") == "sandbox.execute"
     assert capability_for_request("GET", "/v1/chat") is None
+
+
+def test_sprint73_unavailable_status_semantics() -> None:
+    assert unavailable_http_status({"reason": "account_inactive"}) == 403
+    assert unavailable_http_status({"reason": "safety_restriction_active"}) == 403
+    assert unavailable_http_status({"reason": "compute_quota_exhausted"}) == 429
+    assert unavailable_http_status({"reason": "active_image_limit"}) == 429
+    assert unavailable_http_status({"reason": "storage_quota_reached"}) == 507
+    assert unavailable_http_status({"reason": "inference_not_configured"}) == 503
 
 
 def test_sprint73_admin_capability_ui_is_nonce_protected() -> None:
