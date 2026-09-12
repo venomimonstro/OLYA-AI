@@ -17,6 +17,7 @@ from app.schemas.commerce import ApiChatRequest, ApiContextCreate, ApiContextRea
 from app.services.access import require_project_role
 from app.services.api_access import require_api_scope
 from app.services.commerce import ensure_organization_budget, price_resource_ms, record_telemetry
+from app.services.deadline import begin_deadline_from_headers
 from app.services.measured_plans import ensure_channel_budget, reset_channel_override, set_channel_override
 from app.services.progressive_launch import active_rollout, rollout_allows_user, user_has_open_breaker
 
@@ -97,7 +98,13 @@ def _logical_request_id(payload: ApiChatRequest, idempotency_key: str) -> str:
 
 @router.post("/chat", response_model=ChatResponse)
 async def api_chat(payload: ApiChatRequest, request: Request, response: Response, idempotency_key: str = Header(default="", alias="Idempotency-Key"), principal=Depends(require_api_scope("chat")), db: Session = Depends(get_db)):
-    key, user = principal; _require_public_api_exposure(request, db, user); context = None
+    key, user = principal
+    try:
+        deadline = begin_deadline_from_headers(request.headers, default_seconds=float(request.app.state.settings.request_timeout_seconds), source="api-key")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    request.state.x1_deadline_seconds = deadline.budget_seconds
+    _require_public_api_exposure(request, db, user); context = None
     logical_request_id = _logical_request_id(payload, idempotency_key)
     response.headers["X-Request-ID"] = logical_request_id
     if payload.context_id: context = _context_access(db, key, user, payload.context_id)
