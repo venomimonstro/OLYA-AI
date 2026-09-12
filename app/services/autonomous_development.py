@@ -21,6 +21,7 @@ from app.models import (
     EngineeringRun,
     utcnow,
 )
+from app.services.agent_contract import agent_completion_blockers, require_agent_progress_budget
 
 
 class AutonomousDevelopmentError(RuntimeError):
@@ -187,6 +188,12 @@ def _checkpoint_payload(ledger: AutonomousDevelopmentLedger, state: dict[str, An
 def sync_ledger(db: Session, session: DevelopmentChatSession, *, checkpoint_kind: str = "state", force_checkpoint: bool = False) -> AutonomousDevelopmentLedger:
     ledger = ensure_ledger(db, session)
     state = _live_state(db, ledger)
+    blockers = agent_completion_blockers(db, ledger.plan_id)
+    state["completion_gate"] = {
+        "ready": not blockers,
+        "blockers": blockers[:100],
+        "proof": "canonical_tasks_verified_evidence_and_execution_state",
+    }
     state_sha = _sha(state)
     previous_sha = _sha(ledger.current_state or {}) if ledger.current_state else ""
     ledger.current_state = state
@@ -194,23 +201,28 @@ def sync_ledger(db: Session, session: DevelopmentChatSession, *, checkpoint_kind
     ledger.completed_work = list(state["completed_work"])
     ledger.pending_work = list(state["pending_work"])
     ledger.failed_work = list(state["failed_work"])
-    ledger.status = "completed" if state["plan"]["status"] == "completed" else ("blocked" if state["failed_work"] and not state["pending_work"] else "active")
+    if state["contract"]["drift_detected"]:
+        ledger.status = "blocked"
+    elif state["plan"]["status"] == "completed":
+        ledger.status = "completed" if not blockers else "blocked"
+    else:
+        ledger.status = "blocked" if state["failed_work"] and not state["pending_work"] else "active"
     ledger.last_heartbeat_at = utcnow()
     ledger.updated_at = utcnow()
 
     if force_checkpoint or state_sha != previous_sha or not ledger.checkpoint_ref:
         if ledger.checkpoint_ref:
             ledger.revision += 1
-        checkpoint = AutonomousDevelopmentCheckpoint(
+        checkpoint_row = AutonomousDevelopmentCheckpoint(
             ledger_id=ledger.id,
             revision=ledger.revision,
             kind=checkpoint_kind[:32],
             state_sha256=state_sha,
             payload=_checkpoint_payload(ledger, state),
         )
-        db.add(checkpoint)
+        db.add(checkpoint_row)
         db.flush()
-        ledger.checkpoint_ref = checkpoint.id
+        ledger.checkpoint_ref = checkpoint_row.id
     db.flush()
     return ledger
 
@@ -223,12 +235,12 @@ def latest_checkpoint(db: Session, ledger: AutonomousDevelopmentLedger) -> Auton
     return db.scalar(select(AutonomousDevelopmentCheckpoint).where(AutonomousDevelopmentCheckpoint.ledger_id == ledger.id).order_by(AutonomousDevelopmentCheckpoint.revision.desc()))
 
 
-def _resume_dict(ledger: AutonomousDevelopmentLedger, checkpoint: AutonomousDevelopmentCheckpoint | None, *, heartbeat_was_stale: bool) -> dict[str, Any]:
+def _resume_dict(ledger: AutonomousDevelopmentLedger, checkpoint_row: AutonomousDevelopmentCheckpoint | None, *, heartbeat_was_stale: bool) -> dict[str, Any]:
     return {
         "schema": "x1.autonomous-development-state.v1",
         "ledger_id": ledger.id,
         "revision": ledger.revision,
-        "checkpoint_id": checkpoint.id if checkpoint else "",
+        "checkpoint_id": checkpoint_row.id if checkpoint_row else "",
         "contract_sha256": ledger.contract_sha256,
         "immutable_goal": ledger.immutable_goal,
         "immutable_constraints": ledger.immutable_constraints,
@@ -245,7 +257,7 @@ def _resume_dict(ledger: AutonomousDevelopmentLedger, checkpoint: AutonomousDeve
             "active": ledger.active_subagents,
             "max_parallel": ledger.max_parallel_subagents,
         },
-        "recovery": {"heartbeat_was_stale": heartbeat_was_stale, "resume_from_checkpoint": bool(checkpoint)},
+        "recovery": {"heartbeat_was_stale": heartbeat_was_stale, "resume_from_checkpoint": bool(checkpoint_row)},
     }
 
 
@@ -254,8 +266,8 @@ def resume_payload(db: Session, session: DevelopmentChatSession) -> dict[str, An
     previous_heartbeat = existing.last_heartbeat_at if existing is not None else None
     stale = bool(previous_heartbeat and previous_heartbeat < utcnow() - timedelta(minutes=10))
     ledger = sync_ledger(db, session, checkpoint_kind="resume")
-    checkpoint = latest_checkpoint(db, ledger)
-    payload = _resume_dict(ledger, checkpoint, heartbeat_was_stale=stale)
+    checkpoint_row = latest_checkpoint(db, ledger)
+    payload = _resume_dict(ledger, checkpoint_row, heartbeat_was_stale=stale)
     payload["prompt_context"] = _canonical(payload)
     return payload
 
@@ -271,7 +283,7 @@ def compact_resume_context(db: Session, session: DevelopmentChatSession, *, max_
         "immutable_goal": payload["immutable_goal"], "immutable_constraints": payload["immutable_constraints"],
         "status": payload["status"], "decisions": payload["decisions"][-30:], "completed": payload["completed"][-50:],
         "pending": payload["pending"][:80], "failed": payload["failed"][-30:], "subagent_budget": payload["subagent_budget"],
-        "recovery": payload["recovery"],
+        "recovery": payload["recovery"], "completion_gate": payload["current_state"].get("completion_gate", {}),
     }
     return _canonical(compact)[:max_chars]
 
@@ -280,19 +292,26 @@ def compact_plan_resume_context(db: Session, plan_id: str, *, max_chars: int = 1
     ledger = db.scalar(select(AutonomousDevelopmentLedger).where(AutonomousDevelopmentLedger.plan_id == plan_id).order_by(AutonomousDevelopmentLedger.updated_at.desc()))
     if ledger is None:
         return ""
-    checkpoint = latest_checkpoint(db, ledger)
-    payload = _resume_dict(ledger, checkpoint, heartbeat_was_stale=False)
+    checkpoint_row = latest_checkpoint(db, ledger)
+    payload = _resume_dict(ledger, checkpoint_row, heartbeat_was_stale=False)
     compact = {
         "schema": payload["schema"], "ledger_id": payload["ledger_id"], "revision": payload["revision"],
         "checkpoint_id": payload["checkpoint_id"], "contract_sha256": payload["contract_sha256"],
         "immutable_goal": payload["immutable_goal"], "immutable_constraints": payload["immutable_constraints"],
         "status": payload["status"], "decisions": payload["decisions"][-30:], "completed": payload["completed"][-50:],
         "pending": payload["pending"][:80], "failed": payload["failed"][-30:], "subagent_budget": payload["subagent_budget"],
+        "completion_gate": payload["current_state"].get("completion_gate", {}),
     }
     return _canonical(compact)[:max_chars]
 
 
 def consume_subagent_slot(db: Session, ledger: AutonomousDevelopmentLedger) -> None:
+    try:
+        require_agent_progress_budget("autonomous subagent admission")
+    except Exception as exc:
+        raise AutonomousDevelopmentError(str(exc)) from exc
+    if ledger.status in {"blocked", "completed"}:
+        raise AutonomousDevelopmentError(f"Autonomous ledger cannot advance from {ledger.status}")
     if ledger.subagent_calls_used >= ledger.subagent_budget:
         raise AutonomousDevelopmentError("Autonomous subagent budget exhausted")
     if ledger.active_subagents >= ledger.max_parallel_subagents:
