@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import ResearchSource, SourceEvidence
+from app.services.deadline import DeadlineExceededError, clamp_timeout_seconds
 
 
 _WORD_RE = re.compile(r"[\w\-]{2,}", re.UNICODE)
@@ -114,10 +115,19 @@ class FetchedPage:
 class ResearchFetcher:
     def __init__(self, *, timeout_seconds:float=15.0,max_bytes:int=2_000_000,max_chars:int=500_000,max_redirects:int=3)->None:
         self.timeout_seconds=timeout_seconds; self.max_bytes=max_bytes; self.max_chars=max_chars; self.max_redirects=max_redirects
+
     async def fetch(self,url:str)->FetchedPage:
+        try:
+            budget=clamp_timeout_seconds(self.timeout_seconds,stage="research fetch",minimum=0.1)
+            async with asyncio.timeout(budget):
+                return await self._fetch_with_budget(url,budget)
+        except (DeadlineExceededError,TimeoutError) as exc:
+            raise ResearchFetchError("Request deadline exceeded during research fetch") from exc
+
+    async def _fetch_with_budget(self,url:str,budget:float)->FetchedPage:
         current=await validate_public_url(url); requested=current
         headers={"User-Agent":"X1-Research/0.1 (+local research fetcher)","Accept":"text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1"}
-        timeout=httpx.Timeout(self.timeout_seconds)
+        timeout=httpx.Timeout(max(0.1,min(self.timeout_seconds,budget)))
         async with httpx.AsyncClient(timeout=timeout,follow_redirects=False,headers=headers,trust_env=False) as client:
             for redirect_index in range(self.max_redirects+1):
                 try:
