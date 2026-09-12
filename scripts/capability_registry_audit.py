@@ -28,6 +28,11 @@ def audit() -> dict:
         '"available": failed is None',
         '"reason": reason',
         '"requirements": requirements',
+        '"account_active"',
+        '"account_inactive"',
+        '"monthly_compute_budget"',
+        '"compute_quota_exhausted"',
+        "compute_seconds_used",
         "active_restriction",
         "image_worker_snapshot",
         "image_edit_capabilities",
@@ -37,6 +42,15 @@ def audit() -> dict:
     for token in required_service:
         if token not in service:
             errors.append({"code": "capability_registry_contract_missing", "token": token})
+
+    if service.find('"account_active"') > service.find("_restriction_requirement(db, user, capability_id)"):
+        errors.append({"code": "account_state_must_precede_capability_policy"})
+    if service.count("_compute_budget(db, user, quota)") < 2:
+        errors.append({"code": "compute_budget_not_applied_to_chat_and_development"})
+    if 'reason in {"account_inactive", "safety_restriction_active"}' not in service:
+        errors.append({"code": "capability_http_status_missing_account_guard"})
+    if 'reason in {"active_image_limit", "compute_quota_exhausted"}' not in service:
+        errors.append({"code": "capability_http_status_missing_quota_guard"})
 
     required_routes = [
         '@router.get("/v1/capabilities")',
