@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import ImageGeneration, User
+from app.services.billing import checkout_url
 from app.services.image_capabilities import image_edit_capabilities
 from app.services.image_references import total_user_image_storage_bytes
 from app.services.image_worker_state import image_worker_snapshot
@@ -80,6 +81,8 @@ _MESSAGES = {
     "sandbox_runtime_unavailable": "Sandbox runtime сейчас недоступен.",
     "api_disabled": "Self-service API отключён конфигурацией.",
     "billing_disabled": "Покупка платных тарифов отключена.",
+    "billing_checkout_not_configured": "Checkout платных тарифов не настроен для текущего окружения.",
+    "billing_payment_ingest_not_configured": "Приём подтверждений оплаты не настроен.",
 }
 
 _REQUEST_RULES = (
@@ -386,9 +389,19 @@ def capability_decision(app, db: Session, user: User, capability_id: str, *, liv
             "business": int(settings.billing_price_business_minor),
         }
         enabled = any(value > 0 for value in prices.values())
-        requirements.append(_requirement("paid_plan_catalog", enabled, "billing_disabled" if not enabled else None))
+        checkout_ready = checkout_url(settings, "capability-probe") is not None
+        payment_ingest_ready = bool(str(settings.payment_ingest_secret or "").strip())
+        requirements.extend(
+            [
+                _requirement("paid_plan_catalog", enabled, "billing_disabled" if not enabled else None),
+                _requirement("billing_checkout", checkout_ready, "billing_checkout_not_configured" if not checkout_ready else None),
+                _requirement("billing_payment_ingest", payment_ingest_ready, "billing_payment_ingest_not_configured" if not payment_ingest_ready else None),
+            ]
+        )
         details["currency"] = str(settings.billing_currency or "RUB").upper()
         details["purchase_enabled_plans"] = [name for name, value in prices.items() if value > 0]
+        details["checkout_configured"] = checkout_ready
+        details["payment_ingest_configured"] = payment_ingest_ready
 
     return _decision(capability_id, requirements, details=details)
 
