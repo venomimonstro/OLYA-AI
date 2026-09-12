@@ -59,6 +59,9 @@ def audit() -> dict:
         "runtime_chaos_evidence",
         '"feature_freeze_after_sprint": 84',
         '"source_fingerprint": source_fingerprint(ROOT).get("source_fingerprint")',
+        "verify_clean_worktree()",
+        "minimum_supported_ram_gib()",
+        '"supported_host_ram"',
     ):
         if token not in rc:
             errors.append({"code": "rc_gate_token_missing", "token": token})
@@ -75,7 +78,13 @@ def audit() -> dict:
         if token not in load:
             errors.append({"code": "load_evidence_token_missing", "token": token})
 
-    for token in ("x1-build-provenance-v1", "source_fingerprint", "build-inputs/Dockerfile", "build-inputs/docker-compose.yml"):
+    for token in (
+        'FORMAT = "x1-build-provenance-v1"',
+        '_BUILD_INPUTS = ("Dockerfile", "docker-compose.yml")',
+        'root / "build-inputs" / name',
+        'manifest[f"build-inputs/{name}"]',
+        "source_fingerprint",
+    ):
         if token not in provenance:
             errors.append({"code": "build_provenance_contract_missing", "token": token})
     if "python -m scripts.build_provenance" not in dockerfile or "/app/BUILD_PROVENANCE.json" not in dockerfile:
