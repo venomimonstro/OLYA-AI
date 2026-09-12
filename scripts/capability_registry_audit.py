@@ -38,6 +38,14 @@ def audit() -> dict:
         "image_edit_capabilities",
         "sandbox_capabilities",
         "get_or_create_quota",
+        "from app.services.billing import checkout_url",
+        'checkout_url(settings, "capability-probe") is not None',
+        '"billing_checkout"',
+        '"billing_payment_ingest"',
+        '"billing_checkout_not_configured"',
+        '"billing_payment_ingest_not_configured"',
+        'details["checkout_configured"] = checkout_ready',
+        'details["payment_ingest_configured"] = payment_ingest_ready',
     ]
     for token in required_service:
         if token not in service:
@@ -51,6 +59,13 @@ def audit() -> dict:
         errors.append({"code": "capability_http_status_missing_account_guard"})
     if 'reason in {"active_image_limit", "compute_quota_exhausted"}' not in service:
         errors.append({"code": "capability_http_status_missing_quota_guard"})
+
+    # Billing availability is a purchase contract, not merely a visible price.
+    # The service may inspect the secret but must expose only a boolean state.
+    if 'payment_ingest_ready = bool(str(settings.payment_ingest_secret or "").strip())' not in service:
+        errors.append({"code": "billing_capability_missing_payment_ingest_guard"})
+    if 'details["payment_ingest_secret"]' in service or 'details.update({"payment_ingest_secret"' in service:
+        errors.append({"code": "billing_capability_secret_leak"})
 
     required_routes = [
         '@router.get("/v1/capabilities")',
@@ -99,13 +114,14 @@ def audit() -> dict:
         if token in routes:
             errors.append({"code": "capability_secret_surface_leak", "token": token})
 
-    if '("scripts.capability_registry_audit", [])' not in regression:
+    if '("scripts.capability_registry_audit", [])' not in regression and '("scripts.capability_registry_audit",[])' not in regression:
         errors.append({"code": "full_regression_missing_capability_registry_audit"})
 
     return {
-        "format": "x1-capability-registry-audit-v1",
+        "format": "x1-capability-registry-audit-v2",
         "status": "passed" if not errors else "failed",
         "errors": errors,
+        "billing_requires_real_purchase_path": True,
     }
 
 
