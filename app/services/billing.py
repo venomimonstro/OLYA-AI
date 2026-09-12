@@ -29,9 +29,17 @@ def billing_price_minor(settings, plan: str) -> int:
 def _payment_flow_ready(settings)->bool:
     return bool(str(getattr(settings,"payment_ingest_secret","") or "").strip()) and checkout_url(settings,"availability-probe") is not None
 
+def _direct_provider_ready(db: Session, settings) -> bool:
+    try:
+        from app.services.payment_providers import provider_readiness
+        providers = provider_readiness(db, settings).get("providers") or {}
+        return any(bool((providers.get(name) or {}).get("ready")) for name in ("yoomoney", "yookassa"))
+    except Exception:
+        return False
+
 def billing_plan_catalog(db: Session, settings) -> list[dict]:
     policies={str(x["name"]):x for x in runtime_plan_catalog(db,settings)}; result=[]
-    payment_flow_ready=_payment_flow_ready(settings)
+    payment_flow_ready=_payment_flow_ready(settings) or _direct_provider_ready(db,settings)
     for name in ("free",*BILLABLE_PLANS):
         policy=policies.get(name)
         if not policy: continue
@@ -64,13 +72,13 @@ def checkout_url(settings, checkout_id: str) -> str | None:
 
 def _by_identity(db,user_id,key): return db.scalar(select(BillingCheckout).where(BillingCheckout.user_id==user_id,BillingCheckout.idempotency_key==key))
 
-def create_checkout(db:Session,user:User,settings,*,plan:str,idempotency_key:str)->BillingCheckout:
+def create_checkout(db:Session,user:User,settings,*,plan:str,idempotency_key:str,direct_provider_ready:bool=False)->BillingCheckout:
     plan=plan.strip().lower(); key=idempotency_key.strip()
     if plan not in BILLABLE_PLANS: raise BillingValidationError("Only paid plans can be purchased")
     if plan not in {str(x["name"]) for x in runtime_plan_catalog(db,settings)}: raise BillingValidationError("Plan is not available")
     amount=billing_price_minor(settings,plan)
     if amount<=0: raise BillingConflictError("Plan purchasing is disabled")
-    if _production(settings) and not _payment_flow_ready(settings):
+    if _production(settings) and not (_payment_flow_ready(settings) or bool(direct_provider_ready)):
         raise BillingConflictError("Paid checkout is not configured")
     existing=_by_identity(db,user.id,key)
     if existing:
