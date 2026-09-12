@@ -34,6 +34,10 @@ class OwnerIntegrationSettings(Base):
     smtp_use_ssl: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     auth_email_verification_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
+    yandex_oauth_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    yandex_oauth_client_id: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    yandex_oauth_client_secret_ciphertext: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
     metrika_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     metrika_counter_id: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     metrika_webvisor: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -74,6 +78,36 @@ class AuthEmailToken(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     purpose: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class ExternalAuthIdentity(Base):
+    __tablename__ = "external_auth_identities"
+    __table_args__ = (
+        UniqueConstraint("provider", "subject", name="uq_external_auth_provider_subject"),
+        UniqueConstraint("provider", "user_id", name="uq_external_auth_provider_user"),
+        Index("ix_external_auth_user_provider", "user_id", "provider"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    subject: Mapped[str] = mapped_column(String(160), nullable=False)
+    email_at_link: Mapped[str] = mapped_column(String(320), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    last_login_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class OAuthLoginState(Base):
+    __tablename__ = "oauth_login_states"
+    __table_args__ = (Index("ix_oauth_login_states_expiry", "provider", "expires_at", "used_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    provider: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    state_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    pkce_verifier_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
