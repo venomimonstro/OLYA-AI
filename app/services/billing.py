@@ -19,15 +19,19 @@ class BillingNotFoundError(BillingError): pass
 
 def utcnow(): return datetime.now(timezone.utc)
 def _aware(value): return None if value is None else value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+def _production(settings)->bool: return str(getattr(settings,"env","development") or "development").lower() in {"production","prod","stable"}
 
 def billing_price_minor(settings, plan: str) -> int:
     if plan == "free": return 0
     if plan not in BILLABLE_PLANS: raise BillingValidationError("Unknown billing plan")
     return max(0, int(getattr(settings, f"billing_price_{plan}_minor", 0)))
 
+def _payment_flow_ready(settings)->bool:
+    return bool(str(getattr(settings,"payment_ingest_secret","") or "").strip()) and checkout_url(settings,"availability-probe") is not None
+
 def billing_plan_catalog(db: Session, settings) -> list[dict]:
     policies={str(x["name"]):x for x in runtime_plan_catalog(db,settings)}; result=[]
-    payment_flow_ready=bool(str(getattr(settings,"payment_ingest_secret","") or "").strip()) and checkout_url(settings,"catalog-probe") is not None
+    payment_flow_ready=_payment_flow_ready(settings)
     for name in ("free",*BILLABLE_PLANS):
         policy=policies.get(name)
         if not policy: continue
@@ -37,7 +41,7 @@ def billing_plan_catalog(db: Session, settings) -> list[dict]:
             "amount_minor":amount,
             "currency":str(settings.billing_currency).upper(),
             "period_days":max(1,int(settings.billing_period_days)),
-            "purchase_enabled":name!="free" and amount>0 and payment_flow_ready,
+            "purchase_enabled":name!="free" and amount>0 and (payment_flow_ready or not _production(settings)),
             "monthly_cpu_seconds":int(policy.get("monthly_cpu_seconds") or 0),
             "resource_budget_microunits":int(policy.get("resource_budget_microunits") or 0),
             "monthly_request_units":int(policy.get("monthly_request_units") or 0),
@@ -55,7 +59,7 @@ def checkout_url(settings, checkout_id: str) -> str | None:
     try: parsed=urlsplit(url)
     except ValueError: return None
     if parsed.scheme not in {"http","https"} or not parsed.netloc or parsed.username or parsed.password: return None
-    if str(getattr(settings,"env","development")).lower() in {"production","prod","stable"} and parsed.scheme!="https": return None
+    if _production(settings) and parsed.scheme!="https": return None
     return url
 
 def _by_identity(db,user_id,key): return db.scalar(select(BillingCheckout).where(BillingCheckout.user_id==user_id,BillingCheckout.idempotency_key==key))
@@ -66,7 +70,7 @@ def create_checkout(db:Session,user:User,settings,*,plan:str,idempotency_key:str
     if plan not in {str(x["name"]) for x in runtime_plan_catalog(db,settings)}: raise BillingValidationError("Plan is not available")
     amount=billing_price_minor(settings,plan)
     if amount<=0: raise BillingConflictError("Plan purchasing is disabled")
-    if checkout_url(settings,"availability-probe") is None or not str(getattr(settings,"payment_ingest_secret","") or "").strip():
+    if _production(settings) and not _payment_flow_ready(settings):
         raise BillingConflictError("Paid checkout is not configured")
     existing=_by_identity(db,user.id,key)
     if existing:
