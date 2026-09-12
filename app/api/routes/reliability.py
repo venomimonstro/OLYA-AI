@@ -8,6 +8,7 @@ from app.db import get_db
 from app.models import PublicRollout, SystemHealthSnapshot, User
 from app.services.adaptive_capacity import active_plan, plan_dict
 from app.services.admin import audit, require_admin
+from app.services.business_contract import evaluate_business_contract
 from app.services.capacity import read_capacity_report
 from app.services.progressive_launch import active_measured_catalog, catalog_dict, evaluate_public_launch, rollout_dict
 from app.services.system_observability import STABLE, collect_system_health, latest_checkpoints
@@ -36,6 +37,12 @@ async def run_deep_reliability_check(request: Request, admin: User = Depends(req
     db.commit()
     result["checkpoints"] = latest_checkpoints(db, stale_after_seconds=int(getattr(request.app.state.settings, "health_checkpoint_stale_seconds", 300)))
     return result
+
+
+@router.get("/business-contract")
+def business_contract(request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    _ = admin
+    return evaluate_business_contract(db, request.app.state.settings)
 
 
 def _runtime_capacity_match(request: Request, plan) -> tuple[bool, dict]:
@@ -82,6 +89,16 @@ async def release_readiness(request: Request, refresh: bool = Query(default=True
         elif item.get("status") != STABLE:
             blockers.append({"key": key, "status": item.get("status"), "message": item.get("message", ""), "root_cause": item.get("root_cause", ""), "recommended_action": (item.get("details") or {}).get("recommended_action", item.get("recommended_action", ""))})
 
+    business = evaluate_business_contract(db, request.app.state.settings)
+    if business.get("status") != "passed":
+        blockers.append({
+            "key": "business.logic_contract",
+            "status": "failed",
+            "message": "Business logic contract has cross-domain invariant violations",
+            "recommended_action": "Resolve billing/quota/org/API/project/task/agent invariant violations before release.",
+            "reasons": (business.get("blockers") or [])[:50],
+        })
+
     capacity = read_capacity_report(request.app.state.settings)
     if capacity.get("status") != "passed":
         blockers.append({"key": "ops.capacity_calibration", "status": capacity.get("status", "missing"), "message": "Target-node capacity calibration is not current", "recommended_action": "Run python3 scripts/capacity_calibrate.py on the deployed CPU/RAM node.", "reasons": capacity.get("reasons") or []})
@@ -108,13 +125,14 @@ async def release_readiness(request: Request, refresh: bool = Query(default=True
         if launch_evaluation.get("status") != "stable":
             blockers.append({"key": "ops.public_launch_guardrails", "status": "degraded", "message": "Public launch watchdog has blockers", "recommended_action": "Resolve circuit breakers/system regressions before increasing public exposure.", "reasons": launch_evaluation.get("blockers") or []})
 
-    required_extra = ["ops.capacity_calibration", "ops.capacity_plan", "ops.measured_plan_catalog"]
+    required_extra = ["business.logic_contract", "ops.capacity_calibration", "ops.capacity_plan", "ops.measured_plan_catalog"]
     if exposure_enforced:
         required_extra += ["ops.public_rollout", "ops.public_launch_guardrails"]
     return {
         "ready_for_public_release": not blockers,
         "app_version": str(getattr(request.app, "version", "unknown")),
         "required_checkpoints": [*required, *required_extra],
+        "business_contract": business,
         "capacity": capacity,
         "capacity_plan": plan_dict(capacity_plan) if capacity_plan else None,
         "capacity_runtime_match": runtime_match,
