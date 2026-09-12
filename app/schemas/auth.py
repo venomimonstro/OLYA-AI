@@ -52,10 +52,11 @@ class VerifyEmailRequest(BaseModel):
 
 
 class AuthResponse(BaseModel):
-    access_token: str
+    access_token: str | None = None
     token_type: str = "bearer"
     user_id: str
     verification_required: bool = False
+    is_admin: bool = False
 
 
 class MeResponse(BaseModel):
