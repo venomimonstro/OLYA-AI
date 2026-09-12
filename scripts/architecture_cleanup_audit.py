@@ -34,6 +34,7 @@ def audit()->dict:
     if '@router.get("/app"' not in base:errors.append({'code':'legacy_template_route_marker_missing','note':'base remains template-compatible but is not registered'})
     if 'setattr(quota' in legacy_admin or 'quota.plan =' in legacy_admin or 'quota.plan=' in legacy_admin:errors.append({'code':'legacy_admin_direct_quota_mutation'})
     if 'put_control(' not in legacy_admin or 'get_or_create_quota(' not in legacy_admin:errors.append({'code':'legacy_admin_not_canonical_adapter'})
+    if 'expiry=active_existing.expires_at if active_existing else None' not in legacy_admin or 'expires_at=expiry' not in legacy_admin:errors.append({'code':'legacy_admin_override_expiry_not_preserved'})
     if '("scripts.architecture_cleanup_audit",[])' not in regression and '("scripts.architecture_cleanup_audit", [])' not in regression:errors.append({'code':'regression_missing_architecture_cleanup'})
     return {'format':'x1-architecture-cleanup-audit-v1','status':'passed' if not errors else 'failed','errors':errors,'registered_route_keys':len(keys),'domain_owners':module.DOMAIN_OWNERS}
 def main()->int:
