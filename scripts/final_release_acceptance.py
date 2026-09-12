@@ -25,6 +25,18 @@ def _required_environment(name: str) -> str:
     return value
 
 
+def _validate_target_transport(base_url: str) -> None:
+    try:
+        parsed = urlsplit(base_url)
+    except ValueError as exc:
+        raise RuntimeError("Invalid production base URL") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise RuntimeError("Invalid production base URL")
+    local_hosts = {"127.0.0.1", "localhost", "::1"}
+    if parsed.scheme != "https" and parsed.hostname.lower() not in local_hosts:
+        raise RuntimeError("Public final acceptance requires HTTPS before Bearer load tokens are sent")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run X1 target load, RC gate and final production acceptance in the required order")
     parser.add_argument("--base-url", default=os.environ.get("X1_PRODUCTION_BASE_URL", ""), help="deployed target URL; public targets must use HTTPS")
@@ -39,17 +51,12 @@ def main() -> int:
     try:
         _required_environment("X1_LOAD_TOKENS")
         _required_environment("X1_PRODUCTION_ADMIN_TOKEN")
+        base_url = args.base_url.strip()
+        if not base_url:
+            raise RuntimeError("--base-url or X1_PRODUCTION_BASE_URL is required")
+        _validate_target_transport(base_url)
     except RuntimeError as exc:
         print(json.dumps({"format": "x1-final-release-acceptance-v1", "status": "failed", "error": str(exc)}, ensure_ascii=False, indent=2))
-        return 2
-
-    base_url = args.base_url.strip()
-    if not base_url:
-        print(json.dumps({"format": "x1-final-release-acceptance-v1", "status": "failed", "error": "--base-url or X1_PRODUCTION_BASE_URL is required"}, ensure_ascii=False, indent=2))
-        return 2
-    parsed = urlsplit(base_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
-        print(json.dumps({"format": "x1-final-release-acceptance-v1", "status": "failed", "error": "Invalid production base URL"}, ensure_ascii=False, indent=2))
         return 2
 
     env = dict(os.environ)
@@ -101,7 +108,7 @@ def main() -> int:
         "format": "x1-final-release-acceptance-v1",
         "status": status,
         "accepted_for_launch": status == "passed",
-        "target": base_url,
+        "target": base_url.rstrip("/"),
         "require_images": bool(args.require_images),
         "steps": steps,
         "reports": {
