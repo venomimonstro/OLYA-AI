@@ -47,7 +47,6 @@ def _sync_measured_policy(db: Session, quota: UserQuota, settings: Settings) -> 
 
 
 def _sync_canonical_entitlement(db: Session, user: User, settings: Settings, quota: UserQuota) -> UserQuota:
-    """Restore billing/free truth before applying any explicit admin override."""
     try:
         from app.services.billing import reconcile_user_subscription
         from app.services.measured_plans import apply_runtime_plan_to_quota
@@ -93,7 +92,11 @@ def _request_units_since(db: Session, user_id: str, settings: Settings, since: d
     fallback = weights.get("work", 2)
     rows = db.execute(
         select(UsageEvent.mode, func.count(UsageEvent.id))
-        .where(UsageEvent.user_id == user_id, UsageEvent.created_at >= since)
+        .where(
+            UsageEvent.user_id == user_id,
+            UsageEvent.created_at >= since,
+            UsageEvent.success.is_(True),
+        )
         .group_by(UsageEvent.mode)
     ).all()
     return sum(int(count or 0) * int(weights.get(str(mode), fallback)) for mode, count in rows)
@@ -127,11 +130,11 @@ def _inferred_channel(reserve_seconds: int) -> str:
     return "deep" if reserve_seconds >= 180 else "work"
 
 
-def _ensure_request_units_available(db: Session, user: User, settings: Settings, plan: str, channel: str) -> None:
+def _ensure_request_units_available(db: Session, user: User, settings: Settings, plan: str, mode: str) -> None:
     from app.services.measured_plans import plan_policy, request_unit_weights
     policy = plan_policy(db, settings, plan) or {}
     weights = request_unit_weights(settings)
-    unit_cost = int(weights.get(channel, weights.get("work", 2)))
+    unit_cost = int(weights.get(mode, weights.get("work", 2)))
     monthly_limit = max(0, int(policy.get("monthly_request_units") or 0))
     daily_limit = max(0, int(policy.get("daily_request_units") or 0))
     if monthly_limit:
@@ -151,14 +154,17 @@ def ensure_compute_available(db: Session, user: User, settings: Settings, *, res
     if used + reserve_seconds > quota.monthly_compute_seconds_limit:
         raise QuotaExceededError("Monthly local compute budget exhausted")
 
-    scheduler_channel = channel or _inferred_channel(reserve_seconds)
+    # Request units represent answer complexity, not the transport channel. API
+    # calls therefore cost the same Fast/Work/Deep units as UI calls.
+    request_mode = _inferred_channel(reserve_seconds)
+    _ensure_request_units_available(db, user, settings, quota.plan, request_mode)
+
+    scheduler_channel = channel or request_mode
     try:
         from app.services.measured_plans import current_channel_override
         scheduler_channel = channel or current_channel_override() or scheduler_channel
     except ImportError:
         pass
-
-    _ensure_request_units_available(db, user, settings, quota.plan, scheduler_channel)
 
     try:
         from app.services.commerce import measured_user_resources, price_resource_ms
@@ -179,7 +185,7 @@ def ensure_compute_available(db: Session, user: User, settings: Settings, *, res
 
     try:
         from app.services.resource_governor import set_inference_scheduler_context
-        priority = scheduler_channel if scheduler_channel in {"fast", "work", "deep", "api", "background"} else _inferred_channel(reserve_seconds)
+        priority = scheduler_channel if scheduler_channel in {"fast", "work", "deep", "api", "background"} else request_mode
         set_inference_scheduler_context(
             priority_class=priority,
             plan=quota.plan,
