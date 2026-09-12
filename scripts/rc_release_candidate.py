@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_REPORT = ROOT / "backups" / "model-regression-latest.json"
 MODEL_BASELINE = ROOT / "backups" / "model-regression-baseline.json"
+LOAD_REPORT = ROOT / "backups" / "load-acceptance-latest.json"
 _MODEL_FINGERPRINT_FILES = (
     "model-manifest.json",
     "app/inference/client.py",
@@ -77,6 +78,8 @@ def _report_passed(data: dict) -> tuple[bool, str]:
         comparison = data.get("comparison") or {}
         critical = (data.get("aggregate") or {}).get("critical_failed") or []
         return bool(comparison.get("passed")) and not critical, "comparison.passed + critical_failed=[]"
+    if data.get("format") == "x1-real-load-acceptance-v1":
+        return data.get("passed") is True, "passed=true"
     return data.get("status") == "passed", "status=passed"
 
 
@@ -94,22 +97,35 @@ def require_report(path: Path, expected_format: str | None = None) -> dict:
     if data.get("format") == "x1-model-regression-report-v1":
         item["critical_failed"] = (data.get("aggregate") or {}).get("critical_failed") or []
         item["comparison_passed"] = bool((data.get("comparison") or {}).get("passed"))
+    elif data.get("format") == "x1-real-load-acceptance-v1":
+        item["virtual_users"] = data.get("virtual_users")
+        item["requests"] = data.get("requests")
+        item["error_rate"] = data.get("error_rate")
+        item["p95_latency_ms"] = (data.get("latency_ms") or {}).get("p95")
+        item["report_head"] = data.get("git_head")
     else:
         item["payload_status"] = data.get("status")
     return item
 
 
-def verify_release_head() -> dict:
+def verify_report_head(path: Path, name: str) -> dict:
     expected = current_git_head()
-    path = ROOT / "backups" / "release-gate-latest.json"
     if not expected or not path.is_file():
-        return {"name": "release_evidence_current_head", "status": "failed", "expected_head": expected, "reason": "missing_head_or_report"}
+        return {"name": name, "status": "failed", "expected_head": expected, "reason": "missing_head_or_report"}
     try:
         report = json.loads(path.read_text("utf-8"))
     except Exception as exc:
-        return {"name": "release_evidence_current_head", "status": "failed", "expected_head": expected, "reason": type(exc).__name__}
+        return {"name": name, "status": "failed", "expected_head": expected, "reason": type(exc).__name__}
     actual = str(report.get("git_head") or "").lower()
-    return {"name": "release_evidence_current_head", "status": "passed" if actual == expected else "failed", "expected_head": expected, "report_head": actual}
+    return {"name": name, "status": "passed" if actual == expected else "failed", "expected_head": expected, "report_head": actual}
+
+
+def verify_release_head() -> dict:
+    return verify_report_head(ROOT / "backups" / "release-gate-latest.json", "release_evidence_current_head")
+
+
+def verify_load_head() -> dict:
+    return verify_report_head(LOAD_REPORT, "load_evidence_current_head")
 
 
 def verify_model_report_current_source() -> dict:
@@ -147,7 +163,7 @@ def promote_model_baseline() -> dict:
     if not passed:
         return {"status": "failed", "reason": "candidate_not_accepted"}
     data["baseline"] = True
-    data["accepted_by"] = "x1-release-candidate-v1"
+    data["accepted_by"] = "x1-release-candidate-v2"
     data["accepted_at"] = datetime.now(timezone.utc).isoformat()
     MODEL_BASELINE.parent.mkdir(parents=True, exist_ok=True)
     tmp = MODEL_BASELINE.with_suffix(MODEL_BASELINE.suffix + ".tmp")
@@ -157,7 +173,7 @@ def promote_model_baseline() -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="X1 Sprint 58 final 32-GiB release candidate gate")
+    parser = argparse.ArgumentParser(description="X1 MVP freeze / release candidate gate")
     parser.add_argument("--allow-nonreference-host", action="store_true")
     parser.add_argument("--report", default="backups/rc-release-candidate-latest.json")
     parser.add_argument("--timeout", type=int, default=7200)
@@ -169,6 +185,7 @@ def main() -> int:
     checks.append({"name": "reference_32gib_host", "status": "passed" if reference or args.allow_nonreference_host else "failed", "ram_gib": round(ram, 3), "override": bool(args.allow_nonreference_host)})
 
     checks.append(run("static_360_security_audit", ["python3", "-m", "scripts.rc_security_audit"], 300))
+    checks.append(run("business_logic_contract_audit", ["python3", "-m", "scripts.business_logic_contract_audit"], 300))
     checks.append(run(
         "full_runtime_release_gate",
         ["python3", "scripts/release_gate.py", "--runtime", "--live-inference", "--user-journey", "--chaos"],
@@ -179,6 +196,7 @@ def main() -> int:
     evidence = [
         ("release_gate_evidence", ROOT / "backups" / "release-gate-latest.json", "x1-release-gate-v4"),
         ("model_regression_evidence", MODEL_REPORT, "x1-model-regression-report-v1"),
+        ("target_load_evidence", LOAD_REPORT, "x1-real-load-acceptance-v1"),
         ("restore_drill_evidence", ROOT / "backups" / "restore-drill-latest.json", None),
         ("runtime_chaos_evidence", ROOT / "backups" / "rc-chaos-runtime-latest.json", "x1-rc-chaos-v1"),
     ]
@@ -187,9 +205,10 @@ def main() -> int:
         item["name"] = name
         checks.append(item)
 
-    # Evidence must be from exactly the code/image inputs being accepted. This
-    # prevents a stale green JSON from a previous checkout being promoted.
+    # Evidence must be from exactly the source revision being accepted. A stale
+    # green JSON from an earlier checkout can never issue a new RC.
     checks.append(verify_release_head())
+    checks.append(verify_load_head())
     checks.append(verify_model_report_current_source())
 
     release_path = ROOT / "backups" / "release-gate-latest.json"
@@ -217,8 +236,9 @@ def main() -> int:
             failed.append("model_baseline_promotion")
 
     payload = {
-        "format": "x1-release-candidate-v2",
+        "format": "x1-release-candidate-v3",
         "status": "passed" if not failed else "failed",
+        "feature_freeze_after_sprint": 84,
         "reference_host_ram_gib": round(ram, 3),
         "git_head": current_git_head(),
         "critical_regression_cases_required": 0,
