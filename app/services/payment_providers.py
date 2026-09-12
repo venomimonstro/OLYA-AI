@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 from sqlalchemy import select
@@ -128,7 +128,7 @@ def verify_yoomoney_notification(db: Session, settings, params: dict[str, str]) 
     if not supplied:
         raise PaymentProviderValidationError("YooMoney notification signature is missing")
     canonical_pairs = sorted((str(k), str(v)) for k, v in params.items() if k != "sign")
-    canonical = urlencode(canonical_pairs)
+    canonical = urlencode(canonical_pairs, quote_via=quote, safe="")
     secret = decrypt_secret(settings, owner.yoomoney_notification_secret_ciphertext).encode("utf-8")
     expected = hmac.new(secret, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(supplied, expected):
@@ -145,9 +145,8 @@ def verify_yoomoney_notification(db: Session, settings, params: dict[str, str]) 
         raise PaymentProviderValidationError("YooMoney checkout is unknown")
     if str(params.get("currency") or "") != "643":
         raise PaymentProviderValidationError("YooMoney currency must be RUB (643)")
-    # withdraw_amount is the amount withdrawn from the payer. It is the only
-    # value that can be compared with our server-owned checkout price without
-    # accidentally accepting a commission-reduced amount received by wallet.
+    # The form `sum` is the sender-side amount. YooMoney reports that exact
+    # charged amount as withdraw_amount; `amount` is net after commission.
     if decimal_to_minor(str(params.get("withdraw_amount") or "")) != int(checkout.amount_minor):
         raise PaymentProviderValidationError("YooMoney amount does not match checkout")
     return checkout
