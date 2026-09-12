@@ -23,8 +23,6 @@ from app.services.owner_integrations import (
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
 
-# Non-existent accounts still execute one real scrypt verification. This removes
-# the large timing gap that would otherwise help remote account enumeration.
 _DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
 
 
@@ -55,24 +53,21 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Account already exists") from exc
     db.refresh(user)
 
-    delivery_ok = True
     if verification_required:
         try:
             send_verification_email(db, request.app.state.settings, user)
             db.commit()
-        except Exception:
+        except Exception as exc:
             db.rollback()
-            delivery_ok = False
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "verification_delivery_failed", "message": "Account created, but the verification email could not be sent. Try resend shortly."},
+            ) from exc
+        # Do not create a usable application session before email verification.
+        return AuthResponse(access_token=None, user_id=user.id, verification_required=True, is_admin=False)
 
     token, _ = create_session(db, user)
-    if verification_required and not delivery_ok:
-        # Account creation succeeded, but make the recoverable state explicit;
-        # the user can request a resend without creating a duplicate account.
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "verification_delivery_failed", "message": "Account created, but the verification email could not be sent. Try resend shortly."},
-        )
-    return AuthResponse(access_token=token, user_id=user.id, verification_required=verification_required)
+    return AuthResponse(access_token=token, user_id=user.id, verification_required=False, is_admin=bool(user.is_admin))
 
 
 @router.post("/login", response_model=AuthResponse)
@@ -90,7 +85,7 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
             detail={"code": "email_verification_required", "message": "Confirm your email address before signing in."},
         )
     token, _ = create_session(db, user)
-    return AuthResponse(access_token=token, user_id=user.id, verification_required=False)
+    return AuthResponse(access_token=token, user_id=user.id, verification_required=False, is_admin=bool(user.is_admin))
 
 
 @router.post("/verification/resend", status_code=status.HTTP_204_NO_CONTENT)
@@ -111,8 +106,6 @@ def resend_verification(payload: PasswordResetRequest, request: Request, db: Ses
         db.commit()
     except Exception:
         db.rollback()
-        # Preserve account-enumeration resistance: delivery errors are not tied
-        # to whether the submitted address exists.
         return
 
 
