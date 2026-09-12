@@ -12,7 +12,7 @@ from app.services.auth import get_current_user
 from app.services.budget_transparency import budget_snapshot
 from app.services.conditional_verification import plan_verification
 from app.services.freshness import classify_freshness
-from app.services.quota import compute_seconds_used, get_or_create_quota
+from app.services.quota import compute_seconds_used, get_or_create_quota, request_unit_usage
 
 router = APIRouter(prefix="/v1/usage", tags=["usage"])
 
@@ -28,6 +28,13 @@ class UsageSummary(BaseModel):
     context_saved_percent: float
     monthly_compute_seconds_used: int
     monthly_compute_seconds_limit: int
+    monthly_request_units_used: int
+    monthly_request_units_limit: int
+    monthly_request_units_remaining: int
+    daily_request_units_used: int
+    daily_request_units_limit: int
+    daily_request_units_remaining: int
+    request_unit_weights: dict[str, int]
     plan: str
 
 
@@ -61,6 +68,7 @@ def usage_summary(
     saved = 0.0 if raw_chars <= 0 else max(0.0, min(100.0, (1 - compiled_chars / raw_chars) * 100))
     quota = get_or_create_quota(db, user, request.app.state.settings)
     monthly_used = compute_seconds_used(db, user.id)
+    request_units = request_unit_usage(db, user, request.app.state.settings)
     db.commit()
     return UsageSummary(
         events=events,
@@ -73,6 +81,13 @@ def usage_summary(
         context_saved_percent=round(saved, 2),
         monthly_compute_seconds_used=monthly_used,
         monthly_compute_seconds_limit=quota.monthly_compute_seconds_limit,
+        monthly_request_units_used=request_units["monthly_request_units_used"],
+        monthly_request_units_limit=request_units["monthly_request_units_limit"],
+        monthly_request_units_remaining=request_units["monthly_request_units_remaining"],
+        daily_request_units_used=request_units["daily_request_units_used"],
+        daily_request_units_limit=request_units["daily_request_units_limit"],
+        daily_request_units_remaining=request_units["daily_request_units_remaining"],
+        request_unit_weights=request_units["request_unit_weights"],
         plan=quota.plan,
     )
 
@@ -85,6 +100,7 @@ def current_budget(
     db: Session = Depends(get_db),
 ) -> dict:
     result = budget_snapshot(db, user, request.app.state.settings, include_details=details)
+    result["request_units"] = request_unit_usage(db, user, request.app.state.settings)
     db.commit()
     return result
 
@@ -115,6 +131,15 @@ def budget_preview(
         projected_verification_extra=verification.extra_inference_budget,
         include_details=False,
     )
+    units = request_unit_usage(db, user, settings)
+    weight = int(units["request_unit_weights"].get(route.mode, units["request_unit_weights"].get("work", 2)))
+    result["request_units"] = {
+        **units,
+        "projected_mode": route.mode,
+        "projected_request_units": weight,
+        "monthly_request_units_remaining_after": max(0, units["monthly_request_units_remaining"] - weight),
+        "daily_request_units_remaining_after": max(0, units["daily_request_units_remaining"] - weight),
+    }
     result["route"] = {
         "requested_mode": payload.mode,
         "selected_mode": route.mode,
