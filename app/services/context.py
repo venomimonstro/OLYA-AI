@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 from app.schemas.chat import ChatMessage
+from app.services.answer_contract import build_answer_contract
+from app.services.evidence_context import set_evidence_context
 from app.services.scope_lock import compile_scope_contract, scope_guard_message
 
 
 _COMPACT_MARKER = "\n[…older content compacted by X1…]\n"
+_EVIDENCE_MARKERS = (
+    "UNTRUSTED RESEARCH SOURCE EXCERPTS",
+    "X1 CURRENT-EVIDENCE CONTRACT",
+    "X1 SOURCE SECURITY",
+    "X1 SOURCE FRESHNESS",
+    "OBSERVED TECHNICAL SEO SIGNALS",
+    "UNTRUSTED SEARCH-DISCOVERY SIGNALS",
+    "DETERMINISTIC COMPARISON SIGNAL",
+    "[SOURCE ",
+)
 _CORE_SYSTEM_POLICY = (
     "You are X1. Optimize for correctness, usefulness and clear uncertainty. "
     "Solve the user's task as completely as available tools and evidence allow. When the task is reasonably clear, do not ask follow-up questions merely to optimize preferences; use sensible low-risk defaults, state only assumptions that materially affect the result, and deliver a useful completed answer. "
@@ -47,6 +59,26 @@ class ContextCompiler:
     def _clip(self, text: str) -> str:
         return self._clip_to(text, self.max_message_chars)
 
+    @classmethod
+    def _evidence_digest(cls, messages: list[ChatMessage], task_context: list[ChatMessage], limit: int = 7_000) -> str:
+        candidates: list[str] = []
+        for message in [*messages, *task_context]:
+            content = str(message.content or "")
+            if any(marker in content for marker in _EVIDENCE_MARKERS):
+                candidates.append(content)
+        if not candidates:
+            return ""
+        pieces: list[str] = []
+        remaining = max(0, int(limit))
+        for content in candidates[-6:]:
+            if remaining <= 0:
+                break
+            clipped = cls._clip_to(content, min(2_800, remaining))
+            if clipped:
+                pieces.append(clipped)
+                remaining -= len(clipped) + 2
+        return "\n\n".join(pieces)
+
     def compile(self, messages: list[ChatMessage], *, max_chars: int | None = None) -> list[ChatMessage]:
         budget_total = max(128, int(max_chars or self.max_chars))
         task_context: list[ChatMessage] = []
@@ -55,6 +87,11 @@ class ContextCompiler:
             task_context = current_task_solver_context()
         except ImportError:
             task_context = []
+
+        # Preserve a bounded, request-local evidence view for the semantic critic.
+        # This is derived from the same source/task context used by the primary
+        # answer and never contains hidden chain-of-thought.
+        set_evidence_context(self._evidence_digest(messages, task_context))
 
         task_systems = [message for message in task_context if message.role == "system"][-2:]
         task_data = [message for message in task_context if message.role != "system"][-2:]
@@ -65,15 +102,16 @@ class ContextCompiler:
         latest_user = next((message.content for message in reversed(messages) if message.role == "user"), "")
         scope_contract = compile_scope_contract(latest_user)
         scope_guard = scope_guard_message(scope_contract)
+        answer_contract = build_answer_contract(latest_user).as_message()
 
-        fixed = [ChatMessage(role="system", content=_CORE_SYSTEM_POLICY)]
+        fixed = [ChatMessage(role="system", content=_CORE_SYSTEM_POLICY), answer_contract]
         if scope_guard is not None:
             fixed.append(scope_guard)
         fixed_chars = sum(len(message.content) for message in fixed)
 
         # Keep at least 55% of the available prompt for recent conversation and
-        # the current user request. Optional system/project/task context shares
-        # the remainder and is clipped deterministically.
+        # evidence. The answer contract is intentionally short and fixed because
+        # shaping a better first draft is cheaper than an extra inference pass.
         conversation_reserve = max(1024, int(budget_total * 0.55))
         optional_budget = max(0, budget_total - conversation_reserve - fixed_chars)
         supplied_systems: list[ChatMessage] = []
@@ -87,7 +125,7 @@ class ContextCompiler:
                     supplied_systems.append(ChatMessage(role="system", content=content))
                     remaining -= len(content)
 
-        systems = [fixed[0], *supplied_systems]
+        systems = [fixed[0], fixed[1], *supplied_systems]
         if scope_guard is not None:
             systems.append(scope_guard)
         system_chars = sum(len(message.content) for message in systems)
