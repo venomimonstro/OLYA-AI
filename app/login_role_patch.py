@@ -20,7 +20,7 @@ def install_login_role_patch() -> None:
         )
 
         old_existing = "if(existing){if(oauth==='yandex'){const uid=sessionStorage.getItem('x1_user_id')||'';window.x1MetrikaUser&&window.x1MetrikaUser(uid);window.x1MetrikaGoal&&window.x1MetrikaGoal('yandex_login_success')}location.replace('/app')}"
-        new_existing = "if(existing){if(oauth==='yandex'){const uid=sessionStorage.getItem('x1_user_id')||'';window.x1MetrikaUser&&window.x1MetrikaUser(uid);window.x1MetrikaGoal&&window.x1MetrikaGoal('yandex_login_success')}fetch('/v1/auth/me',{headers:{Authorization:'Bearer '+existing},credentials:'omit'}).then(r=>r.ok?r.json():null).then(me=>location.replace(me?.is_admin?'/admin/owner':'/app')).catch(()=>location.replace('/app'))}"
+        new_existing = "if(existing){if(oauth==='yandex'){const uid=sessionStorage.getItem('x1_user_id')||'';window.x1MetrikaUser&&window.x1MetrikaUser(uid);window.x1MetrikaGoal&&window.x1MetrikaGoal('yandex_login_success')}const requested=new URLSearchParams(location.search).get('next')||'';fetch('/v1/auth/me',{headers:{Authorization:'Bearer '+existing},credentials:'omit'}).then(r=>r.ok?r.json():null).then(me=>{if(me?.is_admin){location.replace('/admin/owner');return}if(requested==='/admin'||requested.startsWith('/admin/')){sessionStorage.removeItem('x1_access_token');sessionStorage.removeItem('x1AdminToken');sessionStorage.removeItem('x1_user_id');return}location.replace('/app')}).catch(()=>{if(!(requested==='/admin'||requested.startsWith('/admin/')))location.replace('/app')})}"
         body = body.replace(old_existing, new_existing)
 
         headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
