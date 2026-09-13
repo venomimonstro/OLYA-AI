@@ -7,6 +7,8 @@ OLYA AI UX refresh consistently.
 
 from app.admin_surface_patch import install_admin_surface_patch
 from app.product_ui_refresh import install_product_ui_refresh
+from app.user_surface_finalizer import install_user_surface_finalizer
 
 install_admin_surface_patch()
 install_product_ui_refresh()
+install_user_surface_finalizer()
