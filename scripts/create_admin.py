@@ -4,11 +4,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.db import SessionLocal
-from app.models import User
+from app.models import AuthSession, User
 from app.services.auth import hash_password, normalize_email
 from app.services.owner_integrations import ensure_email_state
 
@@ -36,6 +37,7 @@ def ensure_admin(payload: dict, *, reset_password: bool = False) -> dict:
         user = db.scalar(select(User).where(User.email == email))
         created = user is None
         password_changed = False
+        sessions_revoked = 0
         if user is None:
             user = User(
                 email=email,
@@ -55,6 +57,12 @@ def ensure_admin(payload: dict, *, reset_password: bool = False) -> dict:
             if reset_password:
                 user.password_hash = hash_password(password)
                 password_changed = True
+                result = db.execute(
+                    update(AuthSession)
+                    .where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
+                    .values(revoked_at=datetime.now(timezone.utc))
+                )
+                sessions_revoked = max(0, int(result.rowcount or 0))
         ensure_email_state(db, user, mark_verified=True)
         db.commit()
         return {
@@ -62,6 +70,7 @@ def ensure_admin(payload: dict, *, reset_password: bool = False) -> dict:
             "user_id": user.id,
             "email": user.email,
             "password_changed": password_changed,
+            "sessions_revoked": sessions_revoked,
         }
     finally:
         db.close()
@@ -70,7 +79,7 @@ def ensure_admin(payload: dict, *, reset_password: bool = False) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Create or ensure the first X1 administrator without exposing password in argv")
     parser.add_argument("--stdin-json", action="store_true", required=True)
-    parser.add_argument("--reset-password", action="store_true", help="explicitly replace password for an existing account")
+    parser.add_argument("--reset-password", action="store_true", help="explicitly replace password for an existing account and revoke old sessions")
     args = parser.parse_args()
     payload = _payload_from_stdin()
     try:
