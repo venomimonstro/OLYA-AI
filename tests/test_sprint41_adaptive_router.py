@@ -1,11 +1,12 @@
 from app.inference.router import choose_route
 
 
-def test_simple_transformation_uses_fast_without_reasoning():
+def test_simple_transformation_uses_work_quality_floor_without_reasoning():
     route = choose_route("Перепиши это предложение короче", "auto", 8192, 8192)
-    assert route.mode == "fast"
+    assert route.mode == "work"
     assert route.reasoning is False
-    assert route.max_context_tokens <= 4096
+    assert route.max_context_tokens == 8192
+    assert route.max_output_tokens >= 1000
 
 
 def test_basic_question_does_not_waste_thinking_budget():
@@ -13,6 +14,7 @@ def test_basic_question_does_not_waste_thinking_budget():
     assert route.mode == "work"
     assert route.reasoning is False
     assert route.complexity_score < 3
+    assert route.max_output_tokens >= 1000
 
 
 def test_medium_analytical_work_gets_thinking_without_full_deep_budget():
@@ -25,6 +27,7 @@ def test_medium_analytical_work_gets_thinking_without_full_deep_budget():
     assert route.mode == "work"
     assert route.reasoning is True
     assert route.max_context_tokens == 8192
+    assert route.max_output_tokens >= 1600
 
 
 def test_security_audit_is_always_deep_even_when_prompt_is_short():
@@ -40,11 +43,12 @@ def test_large_rewrite_does_not_become_deep_only_because_input_is_long():
     assert route.reasoning is False
 
 
-def test_explicit_mode_is_honored_but_never_breaks_physical_context_ceiling():
+def test_legacy_explicit_fast_is_upgraded_to_work_and_context_ceiling_is_respected():
     fast = choose_route("Проведи аудит безопасности", "fast", 16384, 8192)
-    assert fast.mode == "fast"
-    assert fast.reasoning is False
-    assert fast.max_context_tokens <= 4096
+    assert fast.mode == "work"
+    assert fast.reasoning is True
+    assert fast.max_context_tokens == 8192
+    assert "fast_upgraded_to_work" in fast.reason
 
     deep = choose_route("кратко", "deep", 16384, 8192)
     assert deep.mode == "deep"
