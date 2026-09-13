@@ -46,7 +46,7 @@ def _redirect_to_login(request: Request) -> None:
     target = request.url.path
     if request.url.query:
         target += "?" + request.url.query
-    location = "/login?next=" + quote(target, safe="/")
+    location = "/admin/login?next=" + quote(target, safe="/")
     raise HTTPException(
         status_code=status.HTTP_303_SEE_OTHER,
         detail="Administrator sign-in required",
