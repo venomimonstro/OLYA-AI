@@ -149,12 +149,12 @@ def choose_route(text: str, requested_mode: str, normal_context: int, deep_conte
         score = max(score, 7)
         reasons.append("high_risk_or_audit")
 
-    # Fast is kept as an API-compatible input only. Existing clients do not
-    # break, but the request is upgraded to Work to avoid low-quality 448–700
-    # token responses with reasoning disabled.
+    # Fast is retained only as a backwards-compatible request value. Treat it
+    # like Auto rather than a real quality lane: ordinary legacy requests get
+    # Work, while complex/risky legacy requests may still escalate to Deep.
     if requested_mode == "fast":
-        mode: Mode = "work"
-        reasons.insert(0, "fast_upgraded_to_work")
+        reasons.insert(0, "fast_upgraded_to_auto")
+        mode: Mode = "deep" if high_risk or score >= 6 else "work"
     elif requested_mode in {"work", "deep"}:
         mode = requested_mode  # type: ignore[assignment]
         reasons.insert(0, "user_selected")
