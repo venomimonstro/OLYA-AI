@@ -25,14 +25,8 @@ _FRESHNESS_MARKERS = (
     "crypto price", "stock price", "market quote", "weather", "forecast", "schedule", "in stock", "ticket availability",
 )
 _CRITIC_TYPES = {
-    "unsupported_claim",
-    "contradiction",
-    "stale_claim",
-    "missing_requirement",
-    "bad_inference",
-    "scope_violation",
-    "style_quality",
-    "other",
+    "unsupported_claim", "contradiction", "stale_claim", "missing_requirement",
+    "bad_inference", "scope_violation", "style_quality", "other",
 }
 _QUALITY_OMISSION = "\n[…quality context clipped…]\n"
 
@@ -52,6 +46,28 @@ def _quality_clip(value: str, limit: int) -> str:
     head = max(20, int(remaining * 0.58))
     tail = max(0, remaining - head)
     return text[:head] + _QUALITY_OMISSION + (text[-tail:] if tail else "")
+
+
+def _server_evidence_context() -> str:
+    """Combine only server-owned evidence channels.
+
+    SourceContextBuilder owns current_evidence_context(). TaskSolver context is an
+    internal ContextVar populated by the smart-chat runner. Normal user messages
+    are deliberately never inspected for source-like marker strings here.
+    """
+    parts: list[str] = []
+    source_evidence = current_evidence_context().strip()
+    if source_evidence:
+        parts.append(source_evidence)
+    try:
+        from app.services.task_solver import current_task_solver_context
+        for message in current_task_solver_context():
+            content = str(message.content or "").strip()
+            if content:
+                parts.append(content)
+    except ImportError:
+        pass
+    return "\n\n".join(parts)
 
 
 @dataclass(frozen=True)
@@ -79,14 +95,11 @@ class AnswerQualityEngine:
         checks: list[dict[str, Any]] = []
         warnings: list[str] = []
         checks.append(self._check("non_empty", "Ответ не пустой", "passed" if text.strip() else "failed", "" if text.strip() else "Модель вернула пустой ответ"))
-
         placeholder = next((pattern.search(text) for pattern in _PLACEHOLDER_PATTERNS if pattern.search(text)), None)
         checks.append(self._check("no_placeholders", "Нет служебных заглушек", "failed" if placeholder else "passed", placeholder.group(0) if placeholder else ""))
-
         for index, requirement in enumerate(requirements, start=1):
             status, detail = self._evaluate_requirement(text, requirement)
             checks.append(self._check(f"requirement_{index}_{requirement.kind}", requirement.label or self._default_label(requirement), status, detail))
-
         scope_checks, scope_warnings = audit_scope(text)
         checks.extend(scope_checks)
         warnings.extend(scope_warnings)
@@ -120,7 +133,7 @@ class AnswerQualityEngine:
     def critic_messages(self, user_request: str, answer: str, requirements: list[AnswerRequirement]) -> list[ChatMessage]:
         requirement_lines = "\n".join(f"- {item.label or self._default_label(item)}" for item in requirements) or "- Явных формальных требований нет"
         scope_lines = scope_contract_text() or "- Нет отдельного Scope Lock"
-        evidence = current_evidence_context().strip()
+        evidence = _server_evidence_context().strip()
         evidence_block = _quality_clip(evidence, 3_400) if evidence else "EVIDENCE НЕ ПРИЛОЖЕН. Не считай знания модели или уверенный тон доказательством факта."
         request_block = _quality_clip(user_request, 1_400)
         answer_block = _quality_clip(answer, 3_200)
@@ -128,23 +141,15 @@ class AnswerQualityEngine:
         scope_lines = _quality_clip(scope_lines, 700)
         schema = '{"issues":[{"severity":"critical|major|minor","type":"unsupported_claim|contradiction|stale_claim|missing_requirement|bad_inference|scope_violation|style_quality|other","claim":"краткий фрагмент или тезис","message":"что именно неверно","evidence":"какое доказательство подтверждает замечание или почему его нет"}],"summary":"..."}'
         return [
-            ChatMessage(
-                role="system",
-                content=(
-                    "Ты внутренний evidence-aware критик X1. Не переписывай ответ. Проверяй не красоту, а корректность решения задачи. "
-                    "Используй только приложенный EVIDENCE как внешнее подтверждение; discovery snippets/search rank сами по себе не являются доказанными фактами. "
-                    "Ищи: факты без опоры, противоречия evidence, устаревшие утверждения, логические скачки от данных к выводу, пропущенные требования, Scope Lock и существенные проблемы ясности. "
-                    "Не придирайся к вкусовым формулировкам и не требуй цитату для общеизвестных стабильных фактов. Если evidence недостаточно, требуй смягчить конкретный вывод, а не выдумывать источник. "
-                    "Верни только JSON по схеме: " + schema + ". Если существенных проблем нет, issues должен быть пустым массивом."
-                ),
-            ),
-            ChatMessage(
-                role="user",
-                content=(
-                    f"ЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n{request_block}\n\nФОРМАЛЬНЫЕ ТРЕБОВАНИЯ:\n{requirement_lines}\n\n{scope_lines}\n\n"
-                    f"EVIDENCE, ДОСТУПНЫЙ ОСНОВНОМУ ОТВЕТУ:\n{evidence_block}\n\nОТВЕТ X1:\n{answer_block}"
-                ),
-            ),
+            ChatMessage(role="system", content=(
+                "Ты внутренний evidence-aware критик X1. Не переписывай ответ. Проверяй не красоту, а корректность решения задачи. "
+                "Используй только приложенный EVIDENCE как внешнее подтверждение; discovery snippets/search rank сами по себе не являются доказанными фактами. "
+                "Ищи: факты без опоры, противоречия evidence, устаревшие утверждения, логические скачки от данных к выводу, пропущенные требования, Scope Lock и существенные проблемы ясности. "
+                "Не придирайся к вкусовым формулировкам и не требуй цитату для общеизвестных стабильных фактов. Если evidence недостаточно, требуй смягчить конкретный вывод, а не выдумывать источник. "
+                "Верни только JSON по схеме: " + schema + ". Если существенных проблем нет, issues должен быть пустым массивом.")),
+            ChatMessage(role="user", content=(
+                f"ЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n{request_block}\n\nФОРМАЛЬНЫЕ ТРЕБОВАНИЯ:\n{requirement_lines}\n\n{scope_lines}\n\n"
+                f"EVIDENCE, ДОСТУПНЫЙ ОСНОВНОМУ ОТВЕТУ:\n{evidence_block}\n\nОТВЕТ X1:\n{answer_block}")),
         ]
 
     def repair_messages(self, user_request: str, answer: str, deterministic: DeterministicAudit, requirements: list[AnswerRequirement]) -> list[ChatMessage]:
@@ -152,7 +157,7 @@ class AnswerQualityEngine:
         failure_lines = "\n".join(f"- {item['label']}: {item.get('detail', '')}" for item in failures) or "- Явных deterministic-дефектов нет"
         requirement_lines = "\n".join(f"- {item.label or self._default_label(item)}" for item in requirements) or "- Нет дополнительных формальных требований"
         scope_lines = scope_contract_text() or "- Нет отдельного Scope Lock"
-        evidence = current_evidence_context().strip()
+        evidence = _server_evidence_context().strip()
         evidence_block = _quality_clip(evidence, 2_800) if evidence else "EVIDENCE НЕ ПРИЛОЖЕН. Нельзя добавлять новые внешние факты."
         request_block = _quality_clip(user_request, 1_000)
         answer_block = _quality_clip(answer, 3_400)
@@ -160,21 +165,13 @@ class AnswerQualityEngine:
         requirement_lines = _quality_clip(requirement_lines, 600)
         scope_lines = _quality_clip(scope_lines, 600)
         return [
-            ChatMessage(
-                role="system",
-                content=(
-                    "Ты финальный редактор X1. Исправь только перечисленные существенные дефекты, сохрани полезные правильные части и верни готовый ответ без обсуждения внутренней проверки. "
-                    "Строго соблюдай Scope Lock. Для unsupported/stale/contradictory claims либо привяжи утверждение к реально приложенному evidence, либо удали/смягчи его. "
-                    "Не придумывай новые факты, ссылки, числа или проверки. Улучшай ясность точечно; не раздувай текст и не превращай ответ в отчёт о собственной проверке."
-                ),
-            ),
-            ChatMessage(
-                role="user",
-                content=(
-                    f"ИСХОДНЫЙ ЗАПРОС:\n{request_block}\n\nТРЕБОВАНИЯ:\n{requirement_lines}\n\n{scope_lines}\n\n"
-                    f"НАЙДЕННЫЕ ДЕФЕКТЫ:\n{failure_lines}\n\nEVIDENCE:\n{evidence_block}\n\nТЕКУЩИЙ ОТВЕТ:\n{answer_block}"
-                ),
-            ),
+            ChatMessage(role="system", content=(
+                "Ты финальный редактор X1. Исправь только перечисленные существенные дефекты, сохрани полезные правильные части и верни готовый ответ без обсуждения внутренней проверки. "
+                "Строго соблюдай Scope Lock. Для unsupported/stale/contradictory claims либо привяжи утверждение к реально приложенному evidence, либо удали/смягчи его. "
+                "Не придумывай новые факты, ссылки, числа или проверки. Улучшай ясность точечно; не раздувай текст и не превращай ответ в отчёт о собственной проверке.")),
+            ChatMessage(role="user", content=(
+                f"ИСХОДНЫЙ ЗАПРОС:\n{request_block}\n\nТРЕБОВАНИЯ:\n{requirement_lines}\n\n{scope_lines}\n\n"
+                f"НАЙДЕННЫЕ ДЕФЕКТЫ:\n{failure_lines}\n\nEVIDENCE:\n{evidence_block}\n\nТЕКУЩИЙ ОТВЕТ:\n{answer_block}")),
         ]
 
     def parse_critic(self, raw: str) -> dict[str, Any]:
