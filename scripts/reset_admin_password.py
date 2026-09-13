@@ -4,7 +4,16 @@ import argparse
 import getpass
 import secrets
 import string
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+# When executed as `python scripts/reset_admin_password.py`, Python adds only
+# /app/scripts to sys.path. Add the repository root so `import app` works both
+# as a standalone script and as `python -m scripts.reset_admin_password`.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from sqlalchemy import select, update
 
