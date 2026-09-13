@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.services.admin_browser_session import set_admin_browser_session
 from app.services.auth import create_session
 from app.services.auth_rate_limit import enforce_auth_rate_limit
 from app.services.owner_integrations import integration_snapshot
@@ -77,8 +78,6 @@ def auth_providers(request: Request, db: Session = Depends(get_db)) -> dict:
 
 @router.get("/yandex/start")
 def yandex_start(request: Request, db: Session = Depends(get_db)):
-    # OAuth has no email identity before the redirect. Use global + IP buckets;
-    # never put unrelated users into one fabricated shared email bucket.
     enforce_auth_rate_limit(request, email="", action="yandex_oauth", environment=request.app.state.settings.env)
     try:
         authorization = create_authorization(db, request.app.state.settings)
@@ -119,7 +118,9 @@ async def yandex_callback(
         user = resolve_user(db, subject=profile["subject"], email=profile["email"], display_name=profile["display_name"])
         db.commit()
         local_token, _ = create_session(db, user)
-        return _completion_page(token=local_token, user_id=user.id, is_admin=bool(user.is_admin))
+        response = _completion_page(token=local_token, user_id=user.id, is_admin=bool(user.is_admin))
+        set_admin_browser_session(response, request, token=local_token, is_admin=bool(user.is_admin))
+        return response
     except YandexOAuthError as exc:
         db.rollback()
         return _completion_page(error=str(exc))
