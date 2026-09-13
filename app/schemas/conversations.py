@@ -8,6 +8,11 @@ class ConversationCreate(BaseModel):
     title: str = Field(default="Новый чат", min_length=1, max_length=200)
 
 
+class ConversationUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    project_id: str | None = None
+
+
 class ConversationResponse(BaseModel):
     id: str
     project_id: str | None
