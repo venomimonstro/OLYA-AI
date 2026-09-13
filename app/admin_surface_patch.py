@@ -15,6 +15,7 @@ _NAV = (
     ("Integrations", "/admin/integrations", "integrations"),
     ("Support", "/admin/support", "support"),
     ("Users", "/admin/users", "users"),
+    ("Testers", "/admin/testers", "testers"),
     ("Capabilities", "/admin/capabilities", "capabilities"),
     ("Analytics", "/admin/analytics", "analytics"),
     ("Beta", "/admin/beta", "beta"),
@@ -23,7 +24,7 @@ _NAV = (
 )
 
 _ADMIN_MARKERS = (
-    "X1 Admin", "OLYA AI · Owner", "X1 Closed-Beta", "X1 Beta Operations",
+    "X1 Admin", "OLYA AI · Owner", "OLYA AI · Testers", "X1 Closed-Beta", "X1 Beta Operations",
     "X1 Public Launch", "X1 Progressive Public Launch", "X1 Media Center",
     "/v1/admin/", 'href="/admin',
 )
@@ -34,7 +35,7 @@ def _active_key(document: str) -> str:
     title = re.sub(r"\s+", " ", match.group(1)).casefold() if match else ""
     for marker, key in (
         ("owner", "owner"), ("integrat", "integrations"), ("support", "support"),
-        ("users", "users"), ("capabil", "capabilities"), ("analytic", "analytics"),
+        ("testers", "testers"), ("users", "users"), ("capabil", "capabilities"), ("analytic", "analytics"),
         ("beta", "beta"), ("launch", "launch"), ("media", "media"),
     ):
         if marker in title:
