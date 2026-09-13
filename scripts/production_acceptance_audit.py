@@ -29,6 +29,10 @@ def audit() -> dict:
         "searxng_health", "sandbox_worker_health", "document_worker_health", "/v1/admin/reliability/release-readiness?refresh=true",
         "/v1/admin/reliability/business-contract", "/v1/admin/capabilities?live=true",
         '"chat", "files", "documents", "research.search", "sandbox.execute", "development", "api", "billing"',
+        'parser.add_argument("--require-sandbox"', 'parser.add_argument("--require-documents"',
+        'required.discard("sandbox-worker")', 'required.discard("document-worker")',
+        'required_caps.discard("documents")', 'required_caps.discard("sandbox.execute")',
+        '"require_sandbox": bool(args.require_sandbox)', '"require_documents": bool(args.require_documents)',
         "return 0 if payload[\"accepted_for_launch\"] else 2",
     ):
         if token not in source:
@@ -82,7 +86,7 @@ def audit() -> dict:
         errors.append({"code": "roadmap_must_not_claim_unrun_production_acceptance"})
 
     return {
-        "format": "x1-production-acceptance-audit-v6",
+        "format": "x1-production-acceptance-audit-v7",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "requires_external_production_run": True,
@@ -93,6 +97,7 @@ def audit() -> dict:
         "requires_live_billing_configuration": True,
         "requires_live_user_quality": True,
         "requires_build_bound_quality_evidence": True,
+        "starter_optional_workers_are_profile_aware": True,
         "one_command_release_workflow": True,
     }
 
