@@ -32,6 +32,22 @@ def _verification_required(db: Session) -> bool:
     return bool(row and row.auth_email_verification_required)
 
 
+def _authenticate_password_user(payload: LoginRequest, request: Request, db: Session, *, action: str = "login") -> User:
+    email = normalize_email(payload.email)
+    enforce_auth_rate_limit(request, email=email, action=action, environment=request.app.state.settings.env)
+    user = db.scalar(select(User).where(User.email == email))
+    candidate_hash = user.password_hash if user is not None else _DUMMY_PASSWORD_HASH
+    password_ok = verify_password(payload.password, candidate_hash)
+    if user is None or not user.is_active or not password_ok:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+    if email_verification_required_for_user(db, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "email_verification_required", "message": "Confirm your email address before signing in."},
+        )
+    return user
+
+
 @router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterRequest, request: Request, response: Response, db: Session = Depends(get_db)) -> AuthResponse:
     email = normalize_email(payload.email)
@@ -68,27 +84,30 @@ def register(payload: RegisterRequest, request: Request, response: Response, db:
         return AuthResponse(access_token=None, user_id=user.id, verification_required=True, is_admin=False)
 
     token, _ = create_session(db, user)
-    set_admin_browser_session(response, request, token=token, is_admin=bool(user.is_admin))
+    clear_admin_browser_session(response)
     return AuthResponse(access_token=token, user_id=user.id, verification_required=False, is_admin=bool(user.is_admin))
 
 
 @router.post("/login", response_model=AuthResponse)
 def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)) -> AuthResponse:
-    email = normalize_email(payload.email)
-    enforce_auth_rate_limit(request, email=email, action="login", environment=request.app.state.settings.env)
-    user = db.scalar(select(User).where(User.email == email))
-    candidate_hash = user.password_hash if user is not None else _DUMMY_PASSWORD_HASH
-    password_ok = verify_password(payload.password, candidate_hash)
-    if user is None or not user.is_active or not password_ok:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
-    if email_verification_required_for_user(db, user):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": "email_verification_required", "message": "Confirm your email address before signing in."},
-        )
+    user = _authenticate_password_user(payload, request, db, action="login")
     token, _ = create_session(db, user)
-    set_admin_browser_session(response, request, token=token, is_admin=bool(user.is_admin))
+    # Normal user sign-in never opens the administration surface. Even an
+    # administrator must use /admin/login to create the scoped admin cookie.
+    clear_admin_browser_session(response)
     return AuthResponse(access_token=token, user_id=user.id, verification_required=False, is_admin=bool(user.is_admin))
+
+
+@router.post("/admin/login", response_model=AuthResponse)
+def admin_login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)) -> AuthResponse:
+    user = _authenticate_password_user(payload, request, db, action="login")
+    if not bool(user.is_admin):
+        # Do not disclose whether a valid ordinary account exists.
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid administrator credentials")
+    token, _ = create_session(db, user)
+    set_admin_browser_session(response, request, token=token, is_admin=True)
+    response.headers["Cache-Control"] = "no-store"
+    return AuthResponse(access_token=token, user_id=user.id, verification_required=False, is_admin=True)
 
 
 @router.post("/verification/resend", status_code=status.HTTP_204_NO_CONTENT)
