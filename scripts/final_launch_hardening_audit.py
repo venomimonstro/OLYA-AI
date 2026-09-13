@@ -159,7 +159,18 @@ def audit() -> dict:
         if exposed in integration_service:
             errors.append({"code": "integration_snapshot_may_expose_secret", "token": exposed})
 
-    _require(errors, "app/api/routes/auth.py", ("send_verification_email", "email_verification_required_for_user", "password-reset/request", "password-reset/confirm", "verification/resend", "update(AuthSession)"), "auth_recovery_contract_missing")
+    reset_start = integration_service.find("def send_password_reset_email")
+    reset_end = integration_service.find("\ndef metrika_goal_catalog", reset_start)
+    reset_block = integration_service[reset_start:reset_end] if reset_start >= 0 and reset_end > reset_start else ""
+    if not reset_block:
+        errors.append({"code": "password_reset_email_function_missing"})
+    else:
+        if "mark_verified=True" in reset_block:
+            errors.append({"code": "password_reset_request_must_not_verify_email"})
+        if "state = ensure_email_state(db, user)" not in reset_block:
+            errors.append({"code": "password_reset_email_state_contract_missing"})
+
+    _require(errors, "app/api/routes/auth.py", ("send_verification_email", "email_verification_required_for_user", "password-reset/request", "password-reset/confirm", "verification/resend", "update(AuthSession)", "ensure_email_state(db, user, mark_verified=True)"), "auth_recovery_contract_missing")
     _require(errors, "app/api/routes/support.py", ("open_count >= 3", 'row.status = "waiting_admin"', 'row.status = "waiting_user"', "support.reply", "support.update"), "support_contract_missing")
 
     _require(
@@ -182,9 +193,24 @@ def audit() -> dict:
     _require(errors, "app/admin_ui.py", ("/admin/owner", "/admin/integrations", "/admin/support", "/v1/admin/owner-dashboard?days=30"), "owner_control_center_navigation_missing")
     _require(errors, "app/owner_dashboard_ui.py", ("MRR", "ARPPU", "activation", "D7 retention", "request success", "support ждёт", "SMTP", "ЮKassa", "ЮMoney"), "owner_dashboard_metric_missing")
 
-    _require(errors, "scripts/install_starter_6gb.sh", ("docker.io", "docker-compose-v2", "X1_INITIAL_ADMIN_EMAIL", "X1_INITIAL_ADMIN_PASSWORD", "scripts.create_admin --stdin-json", "X1_SERVER_OPTIMIZATION_PROFILE','starter_6gb'", "Qwen3-4B-Q4_K_M"), "starter_one_command_install_missing")
+    _require(errors, "scripts/install_starter_6gb.sh", ("docker.io", "docker-compose-v2", "X1_INITIAL_ADMIN_EMAIL", "X1_INITIAL_ADMIN_PASSWORD", "scripts.create_admin --stdin-json", "X1_SERVER_OPTIMIZATION_PROFILE','starter_6gb'", "Qwen3-4B-Q4_K_M", "X1_PROJECT_SANDBOX_BACKEND','disabled'", "X1_DOCUMENT_RENDER_BACKEND','disabled'", "X1_IMAGE_BACKEND','disabled'"), "starter_one_command_install_missing")
     _require(errors, "scripts/bootstrap.sh", ("X1_INSTALL_PROFILE", "starter_6gb", "profile_from_host"), "profile_aware_bootstrap_missing")
     _require(errors, "scripts/update.sh", ("X1_SKIP_ADMIN_SETUP=1", "profile_now", "starter_6gb", "install_revision"), "profile_aware_update_missing")
+    _require(
+        errors,
+        "scripts/production_acceptance.py",
+        (
+            'parser.add_argument("--require-sandbox"',
+            'parser.add_argument("--require-documents"',
+            'required.discard("sandbox-worker")',
+            'required.discard("document-worker")',
+            'required_caps.discard("documents")',
+            'required_caps.discard("sandbox.execute")',
+            "if args.require_sandbox:",
+            "if args.require_documents:",
+        ),
+        "starter_optional_worker_acceptance_missing",
+    )
 
     _require(errors, "app/services/api_access.py", ("ApiRateLimitWindow", "request_count < api_key.rate_limit_per_minute", "Retry-After", "X-RateLimit-Remaining"), "api_abuse_guard_missing")
     _require(errors, "app/services/progressive_launch.py", ("public_launch_max_requests_per_user_hour", "trip_breaker", 'scope=f"user:{user_id}"'), "chat_abuse_breaker_missing")
@@ -198,11 +224,12 @@ def audit() -> dict:
         errors.append({"code": "final_launch_audit_not_release_gated"})
 
     return {
-        "format": "x1-final-launch-hardening-audit-v2",
+        "format": "x1-final-launch-hardening-audit-v3",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "static_launch_contract": {
             "auth_email": True,
+            "password_reset_verification_safe": True,
             "yandex_oauth": True,
             "support_tickets": True,
             "owner_dashboard": True,
@@ -211,6 +238,7 @@ def audit() -> dict:
             "yoomoney_hmac_sha256": True,
             "yookassa_server_verification": True,
             "one_command_starter": True,
+            "starter_optional_workers": True,
             "abuse_guards": True,
             "starter_answer_quality_envelope": True,
             "launch_bundle_registered": True,
