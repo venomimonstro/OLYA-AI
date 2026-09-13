@@ -6,7 +6,6 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from app.api.routes.launch_bundle import router as launch_bundle_router
 from app.db import get_db
 from app.services.system_observability import CRITICAL, collect_system_health
 
@@ -35,7 +34,6 @@ async def health() -> dict[str, str]:
 
 @router.get("/version")
 async def version(request: Request) -> dict:
-    """Public, secret-free build/runtime identity used by deployment acceptance."""
     payload = _runtime_provenance()
     settings = getattr(request.app.state, "settings", None)
     payload["runtime_profile"] = str(getattr(settings, "server_optimization_profile", "unknown") or "unknown")
@@ -54,10 +52,3 @@ async def ready(request: Request, db: Session = Depends(get_db)):
         "checked_at": result["checked_at"],
     }
     return JSONResponse(status_code=503 if critical else 200, content=jsonable_encoder(body))
-
-
-# Launch operations are bundled here because the main application eagerly
-# registers the health router (including concrete nested routes) at boot. This
-# keeps production fail-closed: a broken launch integration prevents startup
-# rather than silently disappearing from the route table.
-router.include_router(launch_bundle_router)
