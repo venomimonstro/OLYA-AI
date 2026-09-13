@@ -8,19 +8,20 @@ policy apply consistently to normal chat, streaming chat and verification calls.
 from app.runtime_quality_patch import install_runtime_quality_patch
 from app.identity_patch import install_identity_patch
 from app.admin_surface_patch import install_admin_surface_patch
-from app.login_role_patch import install_login_role_patch
 from app.tester_access_patch import install_tester_access_patch
 
 install_runtime_quality_patch()
 install_identity_patch()
 install_admin_surface_patch()
-install_login_role_patch()
 install_tester_access_patch()
 
-# Public attribution is presentation-only. It is installed here before main.py
-# imports the public UI router, so the landing page footer is decorated once
-# without changing authentication, chat, billing or API behavior.
+# Public attribution and the dedicated administrator login are registered before
+# main.py includes the public UI router. Normal /login remains a user-only entry
+# point and never redirects into the administration surface.
 from app import public_ui as _public_ui
+from app.admin_login_ui import router as _admin_login_router
+
+_public_ui.router.include_router(_admin_login_router)
 
 _original_public_page = _public_ui._page
 if not getattr(_original_public_page, "_x1_creator_credit", False):
