@@ -10,6 +10,8 @@ from app.services.commerce import PLAN_POLICIES, price_resource_ms, resource_rat
 
 _channel_override: ContextVar[str | None] = ContextVar("x1_fairness_channel", default=None)
 _PLAN_NAMES = ("free", "x1", "pro", "max", "business")
+_TEMP_FREE_DAILY_REQUEST_LIMIT = 30
+_TEMP_FREE_MONTHLY_REQUEST_LIMIT = 930
 
 
 def set_channel_override(channel: str) -> Token:
@@ -37,6 +39,14 @@ def request_unit_weights(settings) -> dict[str, int]:
 def request_limits(settings, name: str) -> dict[str, int]:
     if name not in _PLAN_NAMES:
         return {"monthly_request_units": 0, "daily_request_units": 0}
+    if name == "free":
+        # Temporary launch allowance: 30 literal successful requests per day.
+        # Keep the public catalog aligned with quota.py even when an older .env
+        # still contains the historical 6/day and 30/month starter values.
+        return {
+            "monthly_request_units": max(_TEMP_FREE_MONTHLY_REQUEST_LIMIT, int(getattr(settings, "plan_monthly_request_units_free", 0))),
+            "daily_request_units": max(_TEMP_FREE_DAILY_REQUEST_LIMIT, int(getattr(settings, "plan_daily_request_units_free", 0))),
+        }
     return {
         "monthly_request_units": max(0, int(getattr(settings, f"plan_monthly_request_units_{name}", 0))),
         "daily_request_units": max(0, int(getattr(settings, f"plan_daily_request_units_{name}", 0))),
