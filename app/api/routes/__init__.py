@@ -8,10 +8,12 @@ policy apply consistently to normal chat, streaming chat and verification calls.
 from app.runtime_quality_patch import install_runtime_quality_patch
 from app.identity_patch import install_identity_patch
 from app.admin_surface_patch import install_admin_surface_patch
+from app.login_role_patch import install_login_role_patch
 
 install_runtime_quality_patch()
 install_identity_patch()
 install_admin_surface_patch()
+install_login_role_patch()
 
 # Public attribution is presentation-only. It is installed here before main.py
 # imports the public UI router, so the landing page footer is decorated once
