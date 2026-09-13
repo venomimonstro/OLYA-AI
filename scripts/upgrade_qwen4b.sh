@@ -15,6 +15,7 @@ fi
 
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 command -v docker >/dev/null 2>&1 || fail "docker is required"
+command -v curl >/dev/null 2>&1 || fail "curl is required"
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
 [ -f model-manifest.json ] || fail "model-manifest.json is missing"
 [ -f .env ] || { [ -f .env.example ] || fail ".env and .env.example are missing"; cp .env.example .env; }
@@ -100,9 +101,17 @@ path.write_text('\n'.join(lines).rstrip() + '\n', 'utf-8')
 PY
 chmod 600 .env
 
+app_port=$(awk -F= '$1=="X1_PORT"{print $2}' .env | tail -n1 | tr -d '[:space:]')
+app_port=${app_port:-8000}
+
 info "Downloading and SHA-256 verifying pinned Qwen3-4B Q4_K_M (~2.5 GB)"
 python3 scripts/download_model.py --profile primary
 python3 scripts/download_model.py --profile primary --verify-only >/dev/null
+
+info "Building app with the current Qwen3-4B quality/runtime code"
+docker compose build app
+info "Ensuring PostgreSQL and private search are available"
+docker compose up -d db searxng
 
 info "Recreating local inference with the 4B model"
 docker compose --profile inference pull llama >/dev/null
@@ -117,15 +126,15 @@ for _ in $(seq 1 120); do
 done
 docker compose exec -T llama sh -lc 'curl -fsS http://127.0.0.1:8080/health >/dev/null' >/dev/null 2>&1 || fail "Qwen3-4B did not become healthy"
 
-info "Recreating app so it receives the new inference settings"
+info "Recreating app so it receives the new model and timeout settings"
 docker compose up -d --force-recreate app
 for _ in $(seq 1 90); do
-  if curl -fsS "http://127.0.0.1:${X1_PORT:-8000}/health" >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:${app_port}/health" >/dev/null 2>&1; then
     break
   fi
   sleep 2
 done
-curl -fsS "http://127.0.0.1:${X1_PORT:-8000}/health" >/dev/null 2>&1 || fail "OLYA AI app did not become healthy"
+curl -fsS "http://127.0.0.1:${app_port}/health" >/dev/null 2>&1 || fail "OLYA AI app did not become healthy"
 
 info "Running a real non-thinking inference smoke test"
 docker compose exec -T app python - <<'PY'
