@@ -1,9 +1,10 @@
 from app.admin_surface_patch import _decorate, _is_admin_html_route
 
 
-def test_admin_html_routes_are_guarded_but_admin_api_is_not():
+def test_admin_html_routes_are_guarded_but_login_and_admin_api_are_not():
     assert _is_admin_html_route('/admin', {'GET'}, False)
     assert _is_admin_html_route('/admin/users', {'GET'}, False)
+    assert not _is_admin_html_route('/admin/login', {'GET'}, False)
     assert not _is_admin_html_route('/admin/users', {'GET'}, True)
     assert not _is_admin_html_route('/v1/admin/users', {'GET'}, False)
 
@@ -18,6 +19,7 @@ def test_admin_page_gets_one_persistent_shell_and_only_manual_token_controls_are
     assert 'body>header{display:none!important}' in rendered
     assert '<button id="save">save</button>' in rendered
     assert '<style nonce="abc">' in rendered
+    assert '/admin/login?next=' in rendered
     assert _decorate(rendered) == rendered
 
 
