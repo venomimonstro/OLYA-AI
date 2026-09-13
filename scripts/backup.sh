@@ -14,6 +14,29 @@ docker compose version >/dev/null 2>&1 || { echo "docker compose required" >&2; 
 [ ! -e "$FINAL_DEST" ] || { echo "backup destination already exists: $FINAL_DEST" >&2; exit 2; }
 [ -d "$DATA_ROOT" ] || mkdir -p "$DATA_ROOT"
 DATA_ROOT="$(cd "$DATA_ROOT" && pwd)"
+DEST_PARENT="$(dirname "$FINAL_DEST")"
+mkdir -p "$DEST_PARENT"
+DEST_PARENT="$(cd "$DEST_PARENT" && pwd)"
+
+# Fail before quiescing the application if the destination filesystem cannot
+# safely hold a full data copy plus an upper-bound estimate of the database.
+# A disk-full during backup is especially dangerous on a small single-node host:
+# the same filesystem may also serve PostgreSQL bind data, logs and user files.
+data_kb="$(du -sk "$DATA_ROOT" | awk 'NR==1 {print $1+0}')"
+db_bytes="$(docker compose exec -T db psql -U x1 -d x1 -Atqc "SELECT pg_database_size('x1')" 2>/dev/null || printf '0')"
+case "$db_bytes" in ''|*[!0-9]*) db_bytes=0 ;; esac
+db_kb=$(( (db_bytes + 1023) / 1024 ))
+payload_kb=$(( data_kb + db_kb ))
+reserve_kb=2097152
+growth_kb=$(( payload_kb / 5 ))
+if (( growth_kb > reserve_kb )); then reserve_kb=$growth_kb; fi
+required_kb=$(( payload_kb + reserve_kb ))
+free_kb="$(df -Pk "$DEST_PARENT" | awk 'NR==2 {print $4+0}')"
+if (( free_kb < required_kb )); then
+  printf 'backup refused: insufficient free disk; free=%s MiB required_safe=%s MiB data=%s MiB db_estimate=%s MiB\n' \
+    "$((free_kb/1024))" "$((required_kb/1024))" "$((data_kb/1024))" "$((db_kb/1024))" >&2
+  exit 4
+fi
 
 # DB rows and files form one logical state. A pg_dump followed by a filesystem
 # archive while requests are writing can restore dangling DB/file references.
@@ -107,6 +130,8 @@ git rev-parse HEAD > "$TMP_DEST/git-head.txt" 2>/dev/null || true
   printf 'format=x1-backup-v4\n'
   printf 'data_root=%s\n' "$DATA_ROOT"
   printf 'writers_quiesced=%s\n' "$WRITERS_QUIESCED"
+  printf 'preflight_free_kb=%s\n' "$free_kb"
+  printf 'preflight_required_kb=%s\n' "$required_kb"
 } > "$TMP_DEST/METADATA"
 
 (
@@ -117,7 +142,6 @@ git rev-parse HEAD > "$TMP_DEST/git-head.txt" 2>/dev/null || true
   sha256sum -c SHA256SUMS >/dev/null
 )
 
-mkdir -p "$(dirname "$FINAL_DEST")"
 mv "$TMP_DEST" "$FINAL_DEST"
 if [ "$WRITERS_QUIESCED" -eq 1 ]; then
   resume_writers || {
