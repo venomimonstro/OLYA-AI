@@ -20,9 +20,12 @@ def test_landing_and_auth_use_unified_light_product_surface(client):
 def test_workspace_is_chat_first_and_has_no_visible_fast_mode(client):
     html = client.get("/app").text
     assert "OLYA_PRODUCT_SURFACE_V2" in html
+    assert "OLYA_CHAT_FINAL_POLISH" in html
     assert "composer-tools" in html
     assert "chat-attach" in html
     assert "prompt-suggestions" in html
+    assert "syncSend" in html
+    assert "composer:focus-within" in html
     assert '<option value="fast">Fast</option>' not in html
     assert "Стандарт" in html
     assert "Глубокий" in html
