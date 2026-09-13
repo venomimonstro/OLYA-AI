@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import Conversation, ConversationMemory, Message, User
-from app.schemas.conversations import ConversationCreate, ConversationResponse, MessageResponse
+from app.schemas.conversations import ConversationCreate, ConversationResponse, ConversationUpdate, MessageResponse
 from app.services.access import require_project_role
 from app.services.auth import get_current_user
 
@@ -46,6 +46,15 @@ def _can_write(db: Session, user: User, conversation: Conversation) -> None:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
 
+def _can_manage(db: Session, user: User, conversation: Conversation) -> None:
+    if conversation.owner_id == user.id:
+        return
+    if conversation.project_id:
+        require_project_role(db, user, conversation.project_id, "manager")
+        return
+    raise HTTPException(status_code=404, detail="Conversation not found")
+
+
 def _conversation(db: Session, user: User, conversation_id: str, *, write: bool = False) -> Conversation:
     conversation = db.get(Conversation, conversation_id)
     if conversation is None:
@@ -75,6 +84,7 @@ def create_conversation(
 def list_conversations(
     response: Response,
     project_id: str | None = None,
+    all_projects: bool = False,
     limit: int = Query(default=50, ge=1, le=100),
     before: datetime | None = None,
     user: User = Depends(get_current_user),
@@ -84,12 +94,58 @@ def list_conversations(
     if project_id:
         require_project_role(db, user, project_id, "viewer")
         stmt = select(Conversation).where(Conversation.project_id == project_id)
+    elif all_projects:
+        # Personal global history includes the user's chats regardless of folder/project.
+        stmt = select(Conversation).where(Conversation.owner_id == user.id)
     else:
         stmt = select(Conversation).where(Conversation.owner_id == user.id, Conversation.project_id.is_(None))
     if before is not None:
         stmt = stmt.where(Conversation.updated_at < before)
     stmt = stmt.order_by(Conversation.updated_at.desc()).limit(limit)
     return [ConversationResponse.model_validate(item, from_attributes=True) for item in db.scalars(stmt).all()]
+
+
+@router.patch("/{conversation_id}", response_model=ConversationResponse)
+def update_conversation(
+    conversation_id: str,
+    payload: ConversationUpdate,
+    response: Response,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ConversationResponse:
+    _private(response)
+    conversation = _conversation(db, user, conversation_id, write=True)
+    changes = payload.model_dump(exclude_unset=True)
+    if "title" in changes:
+        title = (changes["title"] or "").strip()
+        if not title:
+            raise HTTPException(status_code=422, detail="Conversation title cannot be empty")
+        conversation.title = title
+    if "project_id" in changes:
+        target_project_id = changes["project_id"] or None
+        if target_project_id != conversation.project_id:
+            if conversation.owner_id != user.id:
+                raise HTTPException(status_code=403, detail="Only the conversation owner can move it between projects")
+            if target_project_id:
+                require_project_role(db, user, target_project_id, "member")
+            conversation.project_id = target_project_id
+    db.commit()
+    db.refresh(conversation)
+    return ConversationResponse.model_validate(conversation, from_attributes=True)
+
+
+@router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_conversation(
+    conversation_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    _can_manage(db, user, conversation)
+    db.delete(conversation)
+    db.commit()
 
 
 @router.get("/{conversation_id}/messages", response_model=list[MessageResponse])
@@ -119,7 +175,7 @@ def list_conversation_memory(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[ConversationMemoryResponse]:
-    """Expose what Sprint 45 has remembered so memory is never opaque."""
+    """Expose remembered facts so memory is never opaque."""
     _private(response)
     conversation = _conversation(db, user, conversation_id)
     stmt = select(ConversationMemory).where(ConversationMemory.conversation_id == conversation.id)
