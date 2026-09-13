@@ -8,6 +8,7 @@ from app.core.config import get_settings
 from app.models import Project, ResearchSource, User
 from app.schemas.chat import ChatMessage
 from app.services.access import project_role
+from app.services.evidence_context import set_evidence_context
 from app.services.freshness import classify_freshness
 from app.services.research import lexical_excerpts
 from app.services.source_trust import assess_source, sanitize_excerpt
@@ -15,10 +16,26 @@ from app.services.source_trust import assess_source, sanitize_excerpt
 FRESHNESS_SENTINEL = "x1://freshness-required"
 DEFAULT_FRESHNESS_MAX_AGE_SECONDS = 15 * 60
 DEFAULT_FRESHNESS_MIN_INDEPENDENT_HOSTS = 2
+_EVIDENCE_MAX_CHARS = 12_000
 
 
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _publish_server_evidence(messages: list[ChatMessage]) -> None:
+    # Only this trusted builder promotes source material into the semantic critic
+    # evidence channel. User-authored lookalike markers never reach this function.
+    parts: list[str] = []
+    remaining = _EVIDENCE_MAX_CHARS
+    for message in messages:
+        content = str(message.content or "")
+        if not content or remaining <= 0:
+            continue
+        clipped = content[:remaining]
+        parts.append(clipped)
+        remaining -= len(clipped) + 2
+    set_evidence_context("\n\n".join(parts))
 
 
 class SourceContextBuilder:
@@ -36,6 +53,7 @@ class SourceContextBuilder:
         freshness_max_age_seconds: int | None = None,
         freshness_min_independent_hosts: int | None = None,
     ) -> tuple[list[ChatMessage], set[str]]:
+        set_evidence_context("")
         if not query.strip():
             return [], set()
 
@@ -66,7 +84,7 @@ class SourceContextBuilder:
         if not source_ids:
             if not freshness_required:
                 return [], set()
-            return [
+            messages = [
                 ChatMessage(
                     role="system",
                     content=(
@@ -76,7 +94,9 @@ class SourceContextBuilder:
                         "exact or verified from model memory. Clearly say which current facts still require research."
                     ),
                 )
-            ], freshness_marker
+            ]
+            _publish_server_evidence(messages)
+            return messages, freshness_marker
 
         now = datetime.now(timezone.utc)
         max_age = timedelta(seconds=max(60, configured_age))
@@ -183,6 +203,7 @@ class SourceContextBuilder:
             )
 
         if not selected:
+            _publish_server_evidence(messages)
             return messages, verified_urls
 
         blocks = [
@@ -203,4 +224,5 @@ class SourceContextBuilder:
                 f"Security flags: {', '.join(flags) if flags else 'none'}\nExcerpt:\n{safe_excerpt}"
             )
         messages.append(ChatMessage(role="user", content="\n\n".join(blocks)))
+        _publish_server_evidence(messages)
         return messages, verified_urls
