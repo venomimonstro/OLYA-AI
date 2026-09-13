@@ -12,8 +12,8 @@ from app.services.scope_lock import compile_scope_contract
 _HIGH_RISK = re.compile(
     r"\b(?:аудит|проверь|проверить|безопасност|уязвим|архитектур|миграц|production|продакшн|"
     r"код|программ|договор|юрид|закон|налог|финанс|расч[её]т|экономик|инвестиц|медицин|диагноз|"
-    r"сравни|исследован|источник|документ|регламент|security|audit|architecture|migration|code|"
-    r"legal|financial|medical|research|compare|verify)\b",
+    r"сравни|исследован|источник|документ|регламент|лучший|лучшая|лучшие|найди\s+лучш|подбери|посоветуй|рекомендуй|"
+    r"security|audit|architecture|migration|code|legal|financial|medical|research|compare|verify|best|recommend)\b",
     re.IGNORECASE,
 )
 _LOW_RISK_TRANSFORM = re.compile(
