@@ -74,7 +74,11 @@ CODE_MARKERS = (
     "баг",
 )
 
-FAST_MARKERS = (
+# These signals still lower complexity a little because transformations usually
+# need less planning. They no longer force the deliberately tiny Fast route:
+# in practice that route produced answers that were too short and brittle for
+# the product-quality bar. Auto now bottoms out at Work.
+LIGHT_TASK_MARKERS = (
     "перепиши",
     "rephrase",
     "сократи",
@@ -125,11 +129,11 @@ def _complexity_score(normalized: str) -> tuple[int, list[str]]:
         score += 2
         reasons.append("multi_deliverable")
 
-    if any(marker in normalized for marker in FAST_MARKERS):
-        score -= 3 if size < 4_000 else 1
-        reasons.append("transformation_task")
+    if any(marker in normalized for marker in LIGHT_TASK_MARKERS):
+        score -= 2 if size < 4_000 else 1
+        reasons.append("light_transformation_task")
 
-    return max(-3, min(10, score)), reasons
+    return max(-2, min(10, score)), reasons
 
 
 def choose_route(text: str, requested_mode: str, normal_context: int, deep_context: int) -> RouteDecision:
@@ -145,41 +149,38 @@ def choose_route(text: str, requested_mode: str, normal_context: int, deep_conte
         score = max(score, 7)
         reasons.append("high_risk_or_audit")
 
-    if requested_mode in {"fast", "work", "deep"}:
-        mode: Mode = requested_mode  # type: ignore[assignment]
+    # Fast is kept as an API-compatible input only. Existing clients do not
+    # break, but the request is upgraded to Work to avoid low-quality 448–700
+    # token responses with reasoning disabled.
+    if requested_mode == "fast":
+        mode: Mode = "work"
+        reasons.insert(0, "fast_upgraded_to_work")
+    elif requested_mode in {"work", "deep"}:
+        mode = requested_mode  # type: ignore[assignment]
         reasons.insert(0, "user_selected")
     elif high_risk or score >= 6:
         mode = "deep"
-    elif any(marker in normalized for marker in FAST_MARKERS) and score <= 0:
-        mode = "fast"
     else:
         mode = "work"
-
-    if mode == "fast":
-        return RouteDecision(
-            mode="fast",
-            max_context_tokens=min(normal_limit, 4096),
-            max_output_tokens=448 if starter_4k else 700,
-            reasoning=False,
-            complexity_score=score,
-            reason=",".join(reasons) or "fast_default",
-        )
 
     if mode == "deep":
         return RouteDecision(
             mode="deep",
             max_context_tokens=deep_limit,
-            max_output_tokens=1024 if starter_4k else 2200,
+            max_output_tokens=1200 if starter_4k else 2400,
             reasoning=True,
             complexity_score=score,
             reason=",".join(reasons) or "deep_default",
         )
 
-    work_reasoning = score >= 3
+    # Work is now the quality floor. Even straightforward questions get enough
+    # output budget for a complete answer; reasoning turns on automatically for
+    # analytical or multi-step tasks.
+    work_reasoning = score >= 2
     return RouteDecision(
         mode="work",
         max_context_tokens=normal_limit,
-        max_output_tokens=(768 if work_reasoning else 640) if starter_4k else (1400 if work_reasoning else 1200),
+        max_output_tokens=(900 if work_reasoning else 760) if starter_4k else (1700 if work_reasoning else 1450),
         reasoning=work_reasoning,
         complexity_score=score,
         reason=",".join(reasons) or "work_default",
