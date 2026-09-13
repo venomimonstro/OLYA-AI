@@ -295,7 +295,7 @@ def send_password_reset_email(db: Session, settings, user: User) -> None:
     row = get_owner_settings(db)
     if row is None or not row.public_base_url:
         raise RuntimeError("Public base URL is not configured")
-    state = ensure_email_state(db, user, mark_verified=True)
+    state = ensure_email_state(db, user)
     raw, _ = create_email_token(db, user, purpose="password_reset")
     state.last_password_reset_sent_at = utcnow()
     url = f"{row.public_base_url.rstrip('/')}/reset-password?token={raw}"
