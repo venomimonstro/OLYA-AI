@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.schemas.chat import AnswerRequirement, ChatMessage
+from app.services.evidence_context import current_evidence_context
 from app.services.scope_lock import audit_scope, get_scope_contract, scope_contract_text
 
 _PLACEHOLDER_PATTERNS = (
@@ -23,6 +24,16 @@ _FRESHNESS_MARKERS = (
     "наличие товара", "доступность билетов", "доступные билеты", "exchange rate", "bitcoin price",
     "crypto price", "stock price", "market quote", "weather", "forecast", "schedule", "in stock", "ticket availability",
 )
+_CRITIC_TYPES = {
+    "unsupported_claim",
+    "contradiction",
+    "stale_claim",
+    "missing_requirement",
+    "bad_inference",
+    "scope_violation",
+    "style_quality",
+    "other",
+}
 
 
 def needs_fresh_grounding(text: str) -> bool:
@@ -49,7 +60,7 @@ class DeterministicAudit:
 
 
 class AnswerQualityEngine:
-    """Cheap deterministic gates plus conditional critic/repair."""
+    """Cheap deterministic gates plus evidence-aware conditional critic/repair."""
 
     def deterministic(self, text: str, requirements: list[AnswerRequirement], verified_urls: set[str] | None = None, *, freshness_required: bool = False) -> DeterministicAudit:
         checks: list[dict[str, Any]] = []
@@ -66,11 +77,6 @@ class AnswerQualityEngine:
         scope_checks, scope_warnings = audit_scope(text)
         checks.extend(scope_checks)
         warnings.extend(scope_warnings)
-        # Auto verification historically repairs only when payload.requirements is
-        # truthy. Scope Lock is itself an explicit user requirement, so add a
-        # harmless internal sentinel to the same list. This makes a failed scope
-        # gate enter the existing single repair pass without extra inference on a
-        # successful answer. The sentinel is added after normal requirement checks.
         if get_scope_contract().active and not requirements:
             requirements.append(AnswerRequirement(kind="min_chars", value=1, label="Внутренний Scope Lock активен"))
 
@@ -101,19 +107,52 @@ class AnswerQualityEngine:
     def critic_messages(self, user_request: str, answer: str, requirements: list[AnswerRequirement]) -> list[ChatMessage]:
         requirement_lines = "\n".join(f"- {item.label or self._default_label(item)}" for item in requirements) or "- Явных формальных требований нет"
         scope_lines = scope_contract_text() or "- Нет отдельного Scope Lock"
+        evidence = current_evidence_context().strip()
+        evidence_block = evidence if evidence else "EVIDENCE НЕ ПРИЛОЖЕН. Не считай знания модели или уверенный тон доказательством факта."
+        schema = '{"issues":[{"severity":"critical|major|minor","type":"unsupported_claim|contradiction|stale_claim|missing_requirement|bad_inference|scope_violation|style_quality|other","claim":"краткий фрагмент или тезис","message":"что именно неверно","evidence":"какое доказательство подтверждает замечание или почему его нет"}],"summary":"..."}'
         return [
-            ChatMessage(role="system", content=("Ты внутренний критик X1. Не переписывай ответ и не утверждай, что факты проверены. Найди только явные противоречия запросу, нарушения Scope Lock, пропущенные требования, внутренние противоречия и неподтверждённые утверждения. Верни только JSON: " + '{"issues":[{"severity":"critical|major|minor","message":"..."}],"summary":"..."}. Если явных проблем нет, issues должен быть пустым массивом.')),
-            ChatMessage(role="user", content=f"ЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n{user_request}\n\nФОРМАЛЬНЫЕ ТРЕБОВАНИЯ:\n{requirement_lines}\n\n{scope_lines}\n\nОТВЕТ X1:\n{answer}"),
+            ChatMessage(
+                role="system",
+                content=(
+                    "Ты внутренний evidence-aware критик X1. Не переписывай ответ. Проверяй не красоту, а корректность решения задачи. "
+                    "Используй только приложенный EVIDENCE как внешнее подтверждение; discovery snippets/search rank сами по себе не являются доказанными фактами. "
+                    "Ищи: факты без опоры, противоречия evidence, устаревшие утверждения, логические скачки от данных к выводу, пропущенные требования, Scope Lock и существенные проблемы ясности. "
+                    "Не придирайся к вкусовым формулировкам и не требуй цитату для общеизвестных стабильных фактов. Если evidence недостаточно, требуй смягчить конкретный вывод, а не выдумывать источник. "
+                    "Верни только JSON по схеме: " + schema + ". Если существенных проблем нет, issues должен быть пустым массивом."
+                ),
+            ),
+            ChatMessage(
+                role="user",
+                content=(
+                    f"ЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n{user_request}\n\nФОРМАЛЬНЫЕ ТРЕБОВАНИЯ:\n{requirement_lines}\n\n{scope_lines}\n\n"
+                    f"EVIDENCE, ДОСТУПНЫЙ ОСНОВНОМУ ОТВЕТУ:\n{evidence_block}\n\nОТВЕТ X1:\n{answer}"
+                ),
+            ),
         ]
 
     def repair_messages(self, user_request: str, answer: str, deterministic: DeterministicAudit, requirements: list[AnswerRequirement]) -> list[ChatMessage]:
         failures = [item for item in deterministic.checks if item["status"] == "failed"]
-        failure_lines = "\n".join(f"- {item['label']}: {item.get('detail', '')}" for item in failures)
+        failure_lines = "\n".join(f"- {item['label']}: {item.get('detail', '')}" for item in failures) or "- Явных deterministic-дефектов нет"
         requirement_lines = "\n".join(f"- {item.label or self._default_label(item)}" for item in requirements) or "- Нет дополнительных формальных требований"
         scope_lines = scope_contract_text() or "- Нет отдельного Scope Lock"
+        evidence = current_evidence_context().strip()
+        evidence_block = evidence if evidence else "EVIDENCE НЕ ПРИЛОЖЕН. Нельзя добавлять новые внешние факты."
         return [
-            ChatMessage(role="system", content="Ты редактор X1. Исправь только перечисленные дефекты ответа. Строго соблюдай Scope Lock. Не добавляй новые факты без необходимости, не меняй уже правильные части и не обсуждай проверку. Верни только исправленный финальный ответ."),
-            ChatMessage(role="user", content=f"ИСХОДНЫЙ ЗАПРОС:\n{user_request}\n\nТРЕБОВАНИЯ:\n{requirement_lines}\n\n{scope_lines}\n\nНАЙДЕННЫЕ ДЕФЕКТЫ:\n{failure_lines}\n\nТЕКУЩИЙ ОТВЕТ:\n{answer}"),
+            ChatMessage(
+                role="system",
+                content=(
+                    "Ты финальный редактор X1. Исправь только перечисленные существенные дефекты, сохрани полезные правильные части и верни готовый ответ без обсуждения внутренней проверки. "
+                    "Строго соблюдай Scope Lock. Для unsupported/stale/contradictory claims либо привяжи утверждение к реально приложенному evidence, либо удали/смягчи его. "
+                    "Не придумывай новые факты, ссылки, числа или проверки. Улучшай ясность точечно; не раздувай текст и не превращай ответ в отчёт о собственной проверке."
+                ),
+            ),
+            ChatMessage(
+                role="user",
+                content=(
+                    f"ИСХОДНЫЙ ЗАПРОС:\n{user_request}\n\nТРЕБОВАНИЯ:\n{requirement_lines}\n\n{scope_lines}\n\n"
+                    f"НАЙДЕННЫЕ ДЕФЕКТЫ:\n{failure_lines}\n\nEVIDENCE:\n{evidence_block}\n\nТЕКУЩИЙ ОТВЕТ:\n{answer}"
+                ),
+            ),
         ]
 
     def parse_critic(self, raw: str) -> dict[str, Any]:
@@ -135,9 +174,14 @@ class AnswerQualityEngine:
             severity = str(issue.get("severity", "minor")).lower()
             if severity not in {"critical", "major", "minor"}:
                 severity = "minor"
+            issue_type = str(issue.get("type", "other")).strip().lower()
+            if issue_type not in _CRITIC_TYPES:
+                issue_type = "other"
             message = str(issue.get("message", "")).strip()[:1000]
+            claim = str(issue.get("claim", "")).strip()[:500]
+            evidence = str(issue.get("evidence", "")).strip()[:1000]
             if message:
-                clean.append({"severity": severity, "message": message})
+                clean.append({"severity": severity, "type": issue_type, "claim": claim, "message": message, "evidence": evidence})
         return {"ok": True, "issues": clean, "summary": str(data.get("summary", ""))[:2000]}
 
     def final_status(self, deterministic: DeterministicAudit, critic: dict[str, Any] | None) -> str:
