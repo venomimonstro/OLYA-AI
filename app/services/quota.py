@@ -9,6 +9,10 @@ from app.core.config import Settings
 from app.models import UsageEvent, User, UserQuota
 
 
+_TEMP_FREE_DAILY_REQUEST_LIMIT = 30
+_TEMP_FREE_MONTHLY_REQUEST_LIMIT = 930
+
+
 class QuotaExceededError(RuntimeError):
     pass
 
@@ -86,6 +90,19 @@ def compute_seconds_used(db: Session, user_id: str, now: datetime | None = None)
     return int(total_ms) // 1000
 
 
+def _request_count_since(db: Session, user_id: str, since: datetime) -> int:
+    return int(
+        db.scalar(
+            select(func.count(UsageEvent.id)).where(
+                UsageEvent.user_id == user_id,
+                UsageEvent.created_at >= since,
+                UsageEvent.success.is_(True),
+            )
+        )
+        or 0
+    )
+
+
 def _request_units_since(db: Session, user_id: str, settings: Settings, since: datetime) -> int:
     from app.services.measured_plans import request_unit_weights
     weights = request_unit_weights(settings)
@@ -105,11 +122,19 @@ def _request_units_since(db: Session, user_id: str, settings: Settings, since: d
 def request_unit_usage(db: Session, user: User, settings: Settings, *, now: datetime | None = None) -> dict:
     from app.services.measured_plans import plan_policy, request_unit_weights
     quota = get_or_create_quota(db, user, settings)
-    policy = plan_policy(db, settings, quota.plan) or {}
-    monthly_limit = max(0, int(policy.get("monthly_request_units") or 0))
-    daily_limit = max(0, int(policy.get("daily_request_units") or 0))
-    monthly_used = _request_units_since(db, user.id, settings, month_start(now))
-    daily_used = _request_units_since(db, user.id, settings, day_start(now))
+    if quota.plan == "free":
+        monthly_limit = _TEMP_FREE_MONTHLY_REQUEST_LIMIT
+        daily_limit = _TEMP_FREE_DAILY_REQUEST_LIMIT
+        monthly_used = _request_count_since(db, user.id, month_start(now))
+        daily_used = _request_count_since(db, user.id, day_start(now))
+        weights = {"fast": 1, "work": 1, "deep": 1}
+    else:
+        policy = plan_policy(db, settings, quota.plan) or {}
+        monthly_limit = max(0, int(policy.get("monthly_request_units") or 0))
+        daily_limit = max(0, int(policy.get("daily_request_units") or 0))
+        monthly_used = _request_units_since(db, user.id, settings, month_start(now))
+        daily_used = _request_units_since(db, user.id, settings, day_start(now))
+        weights = request_unit_weights(settings)
     return {
         "plan": quota.plan,
         "monthly_request_units_limit": monthly_limit,
@@ -118,7 +143,7 @@ def request_unit_usage(db: Session, user: User, settings: Settings, *, now: date
         "daily_request_units_limit": daily_limit,
         "daily_request_units_used": daily_used,
         "daily_request_units_remaining": max(0, daily_limit - daily_used),
-        "request_unit_weights": request_unit_weights(settings),
+        "request_unit_weights": weights,
     }
 
 
@@ -131,6 +156,15 @@ def _inferred_channel(reserve_seconds: int) -> str:
 
 
 def _ensure_request_units_available(db: Session, user: User, settings: Settings, plan: str, mode: str) -> None:
+    if plan == "free":
+        monthly_used = _request_count_since(db, user.id, month_start())
+        if monthly_used + 1 > _TEMP_FREE_MONTHLY_REQUEST_LIMIT:
+            raise QuotaExceededError("Monthly request limit exhausted for this plan")
+        daily_used = _request_count_since(db, user.id, day_start())
+        if daily_used + 1 > _TEMP_FREE_DAILY_REQUEST_LIMIT:
+            raise QuotaExceededError("Free plan daily request limit reached; try again after 00:00 UTC")
+        return
+
     from app.services.measured_plans import plan_policy, request_unit_weights
     policy = plan_policy(db, settings, plan) or {}
     weights = request_unit_weights(settings)
@@ -154,8 +188,8 @@ def ensure_compute_available(db: Session, user: User, settings: Settings, *, res
     if used + reserve_seconds > quota.monthly_compute_seconds_limit:
         raise QuotaExceededError("Monthly local compute budget exhausted")
 
-    # Request units represent answer complexity, not the transport channel. API
-    # calls therefore cost the same Fast/Work/Deep units as UI calls.
+    # Free currently uses literal successful-request counting (30/day) while
+    # paid plans retain Fast/Work/Deep weighted request units.
     request_mode = _inferred_channel(reserve_seconds)
     _ensure_request_units_available(db, user, settings, quota.plan, request_mode)
 
