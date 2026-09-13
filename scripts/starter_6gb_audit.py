@@ -81,8 +81,19 @@ def audit() -> dict:
             errors.append({"code": "starter_request_unit_fairness_missing", "token": token})
     if "starter_4k = deep_limit <= 4096" not in router or "max_output_tokens=1024 if starter_4k" not in router:
         errors.append({"code": "starter_output_budget_missing"})
-    if "return 1" not in verification or "repair_critic=False" not in verification:
-        errors.append({"code": "starter_verification_must_be_single_extra_pass"})
+
+    # The quality pipeline is intentionally bounded on starter_6gb: one primary
+    # generation plus, only for risky answers, an evidence-aware critic and at
+    # most one targeted repair. The old audit incorrectly required the former
+    # single-extra-pass implementation and rejected the current bounded design.
+    for token in (
+        'return 2 if self.repair_critic else 1',
+        'critic_has_repairable_issue',
+        'item.get("severity") in {"critical", "major"}',
+        'repair_critic=repair_critic',
+    ):
+        if token not in verification:
+            errors.append({"code": "starter_verification_bounded_repair_contract_missing", "token": token})
 
     for token in (
         "X1_SERVER_OPTIMIZATION_PROFILE','starter_6gb'",
@@ -105,7 +116,7 @@ def audit() -> dict:
             errors.append({"code": "starter_runtime_audit_contract_missing", "token": token})
 
     return {
-        "format": "x1-starter-6gb-audit-v2",
+        "format": "x1-starter-6gb-audit-v3",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "target": {"cpu_cores": 4, "ram_gib": 6, "disk_gib": 80},
@@ -113,6 +124,8 @@ def audit() -> dict:
         "one_active_inference": True,
         "bounded_queue": True,
         "request_unit_billing": True,
+        "bounded_quality_verification": True,
+        "max_quality_extra_inference_passes": 2,
         "heavy_workers_disabled_by_starter_installer": True,
         "generic_full_install_min_ram_gib": int(host.get("minimum_detected_ram_gib") or 0),
     }
