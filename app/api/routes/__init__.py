@@ -7,9 +7,11 @@ policy apply consistently to normal chat, streaming chat and verification calls.
 
 from app.runtime_quality_patch import install_runtime_quality_patch
 from app.identity_patch import install_identity_patch
+from app.admin_surface_patch import install_admin_surface_patch
 
 install_runtime_quality_patch()
 install_identity_patch()
+install_admin_surface_patch()
 
 # Public attribution is presentation-only. It is installed here before main.py
 # imports the public UI router, so the landing page footer is decorated once
@@ -32,10 +34,3 @@ if not getattr(_original_public_page, "_x1_creator_credit", False):
 
     _public_page_with_creator._x1_creator_credit = True  # type: ignore[attr-defined]
     _public_ui._page = _public_page_with_creator
-
-# Legacy admin consoles were built in different sprints and each carried its own
-# navigation/token UI. Patch them once, before main.py registers their routers,
-# so /admin pages share one stable shell and reuse the authenticated session.
-from app.admin_shell_patch import install_admin_shell_patch
-
-install_admin_shell_patch()
