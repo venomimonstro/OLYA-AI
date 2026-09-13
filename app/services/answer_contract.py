@@ -6,9 +6,13 @@ from dataclasses import dataclass
 from app.schemas.chat import ChatMessage
 
 
-_WRITING = re.compile(
-    r"\b(?:напиши|перепиши|отредактируй|сделай текст|статья|письмо|сообщение|пост|описание|"
-    r"копирайт|продающ|сопроводительн|rewrite|write|edit|copywriting|email|article)\b",
+_WRITING_ACTION = re.compile(
+    r"\b(?:напиши|перепиши|отредактируй|сделай\s+текст|подготовь\s+(?:текст|письмо|статью|пост)|"
+    r"rewrite|write|edit|draft)\b",
+    re.IGNORECASE,
+)
+_WRITING_NOUN = re.compile(
+    r"\b(?:статья|письмо|сообщение|пост|описание|копирайт|продающ|сопроводительн|copywriting|email|article)\b",
     re.IGNORECASE,
 )
 _AUDIT = re.compile(r"\b(?:аудит|проверь|проверка|диагност|ревью|audit|review|inspect)\b", re.IGNORECASE)
@@ -30,16 +34,20 @@ def classify_answer_kind(user_text: str) -> str:
     text = " ".join(str(user_text or "").split())
     if not text:
         return "direct"
-    if _WRITING.search(text):
-        return "writing"
+    # Explicit task verbs have priority over incidental content-type nouns.
+    # "Проведи аудит статьи" is an audit; "напиши сравнительную статью" is writing.
     if _AUDIT.search(text):
         return "audit"
+    if _WRITING_ACTION.search(text):
+        return "writing"
     if _RECOMMENDATION.search(text):
         return "recommendation"
     if _RESEARCH.search(text):
         return "research"
     if _STRATEGY.search(text):
         return "analysis"
+    if _WRITING_NOUN.search(text):
+        return "writing"
     return "direct"
 
 
