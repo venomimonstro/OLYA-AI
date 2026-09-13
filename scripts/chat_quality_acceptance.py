@@ -84,17 +84,34 @@ def _evaluate(text: str, case: dict) -> list[dict]:
     return checks
 
 
-async def run(base_url: str, token: str, timeout: float) -> dict:
+async def run(base_url: str, tokens: list[str], timeout: float) -> dict:
     _validate_transport(base_url)
-    if not token.strip():
+    quality_token = os.environ.get("X1_QUALITY_TOKEN", "").strip()
+    pool = [quality_token] if quality_token else [value.strip() for value in tokens if value.strip()]
+    if not pool:
         raise RuntimeError("Authenticated quality acceptance token is required")
-    headers = {"Authorization": "Bearer " + token.strip(), "X-X1-Deadline-Ms": str(int(timeout * 1000))}
+    if not quality_token and len(pool) < len(CASES):
+        raise RuntimeError("Quality acceptance needs at least one token per case when X1_QUALITY_TOKEN is not provided")
+
     results: list[dict] = []
+    identities: dict[str, str] = {}
     async with httpx.AsyncClient(trust_env=False, timeout=timeout + 10) as client:
-        identity = await client.get(base_url.rstrip("/") + "/v1/auth/me", headers=headers)
-        if identity.status_code != 200:
-            raise RuntimeError(f"Quality acceptance identity failed with HTTP {identity.status_code}")
         for index, case in enumerate(CASES, start=1):
+            token = pool[0] if quality_token else pool[index - 1]
+            headers = {"Authorization": "Bearer " + token, "X-X1-Deadline-Ms": str(int(timeout * 1000))}
+            if token not in identities:
+                identity = await client.get(base_url.rstrip("/") + "/v1/auth/me", headers=headers)
+                if identity.status_code != 200:
+                    raise RuntimeError(f"Quality acceptance identity failed with HTTP {identity.status_code}")
+                try:
+                    identity_payload = identity.json()
+                except ValueError as exc:
+                    raise RuntimeError("Quality acceptance identity returned invalid JSON") from exc
+                user_id = str(identity_payload.get("id") or "").strip()
+                if not user_id:
+                    raise RuntimeError("Quality acceptance identity returned no user id")
+                identities[token] = user_id
+
             started = time.perf_counter()
             payload = {
                 "messages": [{"role": "user", "content": case["prompt"]}],
@@ -120,22 +137,20 @@ async def run(base_url: str, token: str, timeout: float) -> dict:
                 checks.append({"check": "critic_used", "passed": bool(usage.get("critic_used"))})
             passed = all(bool(row.get("passed")) for row in checks)
             results.append({
-                "id": case["id"],
-                "passed": passed,
-                "status": 200,
-                "latency_ms": latency_ms,
+                "id": case["id"], "passed": passed, "status": 200, "latency_ms": latency_ms,
                 "checks": checks,
                 "quality_status": (data.get("quality") or {}).get("status") if isinstance(data.get("quality"), dict) else None,
-                "critic_used": bool(usage.get("critic_used")),
-                "repair_applied": bool(usage.get("repair_applied")),
-                "mode": usage.get("mode"),
-                "text_preview": text[:600],
+                "critic_used": bool(usage.get("critic_used")), "repair_applied": bool(usage.get("repair_applied")),
+                "mode": usage.get("mode"), "user_id": identities[token], "text_preview": text[:600],
             })
+
     critical_failed = [row["id"] for row in results if not row.get("passed")]
     return {
         "format": "x1-chat-quality-acceptance-v1",
         "target": base_url.rstrip("/"),
         "cases": len(results),
+        "accounts_used": len(set(identities.values())),
+        "distributed_across_load_accounts": not bool(quality_token),
         "passed_cases": sum(1 for row in results if row.get("passed")),
         "critical_failed": critical_failed,
         "passed": not critical_failed and len(results) == len(CASES),
@@ -150,9 +165,8 @@ def main() -> int:
     parser.add_argument("--report", default=str(DEFAULT_REPORT))
     args = parser.parse_args()
     tokens = [value.strip() for value in os.environ.get("X1_LOAD_TOKENS", "").split(",") if value.strip()]
-    token = os.environ.get("X1_QUALITY_TOKEN", "").strip() or (tokens[0] if tokens else "")
     try:
-        result = asyncio.run(run(args.base_url, token, max(30.0, args.timeout)))
+        result = asyncio.run(run(args.base_url, tokens, max(30.0, args.timeout)))
     except RuntimeError as exc:
         result = {"format": "x1-chat-quality-acceptance-v1", "target": args.base_url.rstrip("/"), "passed": False, "error": str(exc)}
     report = Path(args.report)
