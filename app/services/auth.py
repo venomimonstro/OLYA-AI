@@ -93,13 +93,17 @@ def create_session(db: Session, user: User) -> tuple[str, AuthSession]:
 
 
 def _expensive_public_request(request: Request) -> bool:
-    """Identify public operations that can consume scarce CPU/RAM/disk/network."""
+    """Identify optional/beta operations that may be rollout-gated.
+
+    Core authenticated chat is intentionally excluded: a user who can register and
+    sign in must be able to use the primary product immediately. Quotas, overload
+    controls and the per-user circuit breaker still protect inference resources.
+    """
     path = request.url.path.rstrip("/")
-    if path.startswith("/v1/chat/runs/"):
+    if path.startswith("/v1/chat"):
         return False
     if path.startswith(
         (
-            "/v1/chat",
             "/v1/images",
             "/v1/documents",
             "/v1/research",
@@ -122,11 +126,37 @@ def _expensive_public_request(request: Request) -> bool:
 
 def _enforce_public_exposure(request: Request, db: Session, user: User) -> None:
     settings = getattr(request.app.state, "settings", get_settings())
+
+    # Abuse protection applies to every authenticated AI request, including core chat.
+    path = request.url.path.rstrip("/")
+    ai_request = path.startswith(
+        (
+            "/v1/chat",
+            "/v1/images",
+            "/v1/documents",
+            "/v1/research",
+            "/v1/project-sandboxes",
+            "/v1/development",
+            "/v1/engineering",
+            "/v1/execution",
+            "/v1/code",
+            "/v1/project-runtimes",
+            "/v1/git",
+        )
+    )
+    if ai_request and not bool(getattr(user, "is_admin", False)):
+        from app.services.progressive_launch import user_has_open_breaker
+        if user_has_open_breaker(db, user.id):
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "user_circuit_breaker_open",
+                    "message": "AI access is temporarily paused for this account because an abuse/resource safety guardrail was triggered.",
+                },
+            )
+
     if not _expensive_public_request(request) or bool(getattr(user, "is_admin", False)):
         return
-    from app.services.progressive_launch import user_has_open_breaker
-    if user_has_open_breaker(db, user.id):
-        raise HTTPException(status_code=429, detail={"code": "user_circuit_breaker_open", "message": "AI access is temporarily paused for this account because an abuse/resource safety guardrail was triggered."})
     if not bool(getattr(settings, "public_launch_enforce_exposure", False)):
         return
     from app.models import BetaParticipant
@@ -135,7 +165,14 @@ def _enforce_public_exposure(request: Request, db: Session, user: User) -> None:
     rollout = active_rollout(db)
     if beta or rollout_allows_user(rollout, user.id):
         return
-    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail={"code": "public_rollout_not_exposed", "message": "AI access for this account has not been enabled by the current rollout stage yet.", "exposure_percent": rollout.exposure_percent if rollout else 0})
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "code": "public_rollout_not_exposed",
+            "message": "This optional capability has not been enabled for this account by the current rollout stage yet.",
+            "exposure_percent": rollout.exposure_percent if rollout else 0,
+        },
+    )
 
 
 def _enforce_resource_lane(request: Request, db: Session, user: User) -> None:
