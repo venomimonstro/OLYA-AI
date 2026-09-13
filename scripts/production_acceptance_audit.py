@@ -21,10 +21,10 @@ def audit() -> dict:
 
     for token in (
         '"x1-production-acceptance-v2"', '"accepted_for_launch": not failed', "X1_PRODUCTION_ADMIN_TOKEN",
-        "x1-release-candidate-v4", "x1-real-load-acceptance-v2", "x1-release-gate-v4", "canonical_target_url",
-        "expected_target=target_url", '"same_target": same_target', "candidate_source_provenance", "runtime_source_provenance",
-        "public_build_provenance", "expected_source_fingerprint", "same_as_candidate", "git_worktree_clean",
-        "working_tree_not_clean", "production_transport", "HTTPS required except loopback acceptance", "billing_runtime_config",
+        "x1-release-candidate-v4", "x1-real-load-acceptance-v2", "x1-chat-quality-acceptance-v1", "x1-release-gate-v4", "canonical_target_url",
+        'evidence("chat_quality", "backups/chat-quality-acceptance-latest.json"', "expected_target=target_url", '"same_target": same_target',
+        "candidate_source_provenance", "runtime_source_provenance", "public_build_provenance", "expected_source_fingerprint", "same_as_candidate",
+        "git_worktree_clean", "working_tree_not_clean", "production_transport", "HTTPS required except loopback acceptance", "billing_runtime_config",
         "payment_ingest_secret", "checkout_url(s,'production-acceptance-probe')", "postgresql_ready", "qwen_llama_health",
         "searxng_health", "sandbox_worker_health", "document_worker_health", "/v1/admin/reliability/release-readiness?refresh=true",
         "/v1/admin/reliability/business-contract", "/v1/admin/capabilities?live=true",
@@ -58,6 +58,7 @@ def audit() -> dict:
     for token in (
         '"x1-chat-quality-acceptance-v1"', '"web_mode": "off"', '"critic_expected": True',
         "X1_LOAD_TOKENS", "distributed_across_load_accounts", "Public quality acceptance requires HTTPS",
+        "git_head", "source_fingerprint", "target_build_fingerprint", "Quality acceptance target build differs from checked-out candidate source",
     ):
         if token not in quality:
             errors.append({"code": "chat_quality_acceptance_contract_missing", "token": token})
@@ -81,7 +82,7 @@ def audit() -> dict:
         errors.append({"code": "roadmap_must_not_claim_unrun_production_acceptance"})
 
     return {
-        "format": "x1-production-acceptance-audit-v5",
+        "format": "x1-production-acceptance-audit-v6",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "requires_external_production_run": True,
@@ -91,6 +92,7 @@ def audit() -> dict:
         "requires_external_https_or_loopback": True,
         "requires_live_billing_configuration": True,
         "requires_live_user_quality": True,
+        "requires_build_bound_quality_evidence": True,
         "one_command_release_workflow": True,
     }
 
