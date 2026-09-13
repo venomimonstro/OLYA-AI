@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.chat_management_enhancer import install_chat_management_ui
 from app.db import get_db
 from app.models import Conversation, ConversationMemory, Message, User
 from app.schemas.conversations import ConversationCreate, ConversationResponse, ConversationUpdate, MessageResponse
@@ -12,6 +13,7 @@ from app.services.access import require_project_role
 from app.services.auth import get_current_user
 
 router = APIRouter(prefix="/v1/conversations", tags=["conversations"])
+install_chat_management_ui()
 
 
 class ConversationMemoryResponse(BaseModel):
@@ -95,7 +97,6 @@ def list_conversations(
         require_project_role(db, user, project_id, "viewer")
         stmt = select(Conversation).where(Conversation.project_id == project_id)
     elif all_projects:
-        # Personal global history includes the user's chats regardless of folder/project.
         stmt = select(Conversation).where(Conversation.owner_id == user.id)
     else:
         stmt = select(Conversation).where(Conversation.owner_id == user.id, Conversation.project_id.is_(None))
@@ -175,7 +176,6 @@ def list_conversation_memory(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[ConversationMemoryResponse]:
-    """Expose remembered facts so memory is never opaque."""
     _private(response)
     conversation = _conversation(db, user, conversation_id)
     stmt = select(ConversationMemory).where(ConversationMemory.conversation_id == conversation.id)
