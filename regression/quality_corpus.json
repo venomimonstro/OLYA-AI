@@ -1,0 +1,137 @@
+{
+  "format": "x1-quality-regression-corpus-v1",
+  "version": 1,
+  "cases": [
+    {
+      "id": "quality-writing-client-message",
+      "category": "writing",
+      "critical": true,
+      "reasoning": false,
+      "max_tokens": 220,
+      "messages": [
+        {"role": "system", "content": "Напиши готовый текст без мета-комментариев. Естественный русский, конкретика, без канцелярита и нейросетевых клише."},
+        {"role": "user", "content": "Напиши клиенту короткое сообщение: встречу нужно перенести с четверга на пятницу из-за изменения графика. Извинись и предложи согласовать удобное время."}
+      ],
+      "checks": [
+        {"type": "contains_all", "values": ["пятниц", "врем"]},
+        {"type": "not_contains", "values": ["В современном мире", "Важно отметить", "Конечно!", "Вот вариант"]},
+        {"type": "cyrillic_ratio", "minimum": 0.70}
+      ],
+      "max_output_chars": 900
+    },
+    {
+      "id": "quality-writing-preserve-facts",
+      "category": "writing",
+      "critical": true,
+      "reasoning": false,
+      "max_tokens": 260,
+      "messages": [
+        {"role": "system", "content": "Отредактируй текст естественно. Сохрани все факты, не добавляй новые цифры, достижения или гарантии. Верни только готовый текст."},
+        {"role": "user", "content": "Исходные факты: сервис запущен в 2026 году, тариф стоит 300 рублей в месяц, данные хранятся на сервере проекта. Напиши короткий абзац для сайта."}
+      ],
+      "checks": [
+        {"type": "contains_all", "values": ["2026", "300", "сервер"]},
+        {"type": "not_contains", "values": ["миллион", "гарантирован", "100%", "лидер рынка", "№1"]},
+        {"type": "cyrillic_ratio", "minimum": 0.65}
+      ],
+      "max_output_chars": 1000
+    },
+    {
+      "id": "quality-rag-conflict",
+      "category": "rag",
+      "critical": true,
+      "reasoning": false,
+      "max_tokens": 240,
+      "messages": [
+        {"role": "system", "content": "Используй только EVIDENCE. Если источники конфликтуют, не выбирай число наугад: явно укажи конфликт и что можно заключить."},
+        {"role": "user", "content": "EVIDENCE: Источник A сообщает, что цена услуги 900 рублей. Источник B сообщает, что цена услуги 1200 рублей. Вопрос: сколько стоит услуга?"}
+      ],
+      "checks": [
+        {"type": "contains_all", "values": ["900", "1200"]},
+        {"type": "regex", "pattern": "(?i)(расхожд|конфликт|разн|уточн|нельзя.*однознач)"}
+      ],
+      "max_output_chars": 800
+    },
+    {
+      "id": "quality-rag-no-invented-metric",
+      "category": "rag",
+      "critical": true,
+      "reasoning": false,
+      "max_tokens": 180,
+      "messages": [
+        {"role": "system", "content": "Используй только EVIDENCE и не выдумывай отсутствующие метрики."},
+        {"role": "user", "content": "EVIDENCE: У компании есть 12 офисов и бесплатная консультация. Вопрос: какая у компании конверсия сайта в процентах?"}
+      ],
+      "checks": [
+        {"type": "regex", "pattern": "(?i)(нет данных|не указан|неизвест|нельзя определить|отсутств)"},
+        {"type": "not_contains", "values": ["10%", "15%", "20%", "25%", "30%"]}
+      ],
+      "max_output_chars": 500
+    },
+    {
+      "id": "quality-recommendation-no-fake-winner",
+      "category": "factual",
+      "critical": true,
+      "reasoning": true,
+      "max_tokens": 320,
+      "messages": [
+        {"role": "system", "content": "Ты сравниваешь варианты только по данным ниже. Не объявляй абсолютного победителя, если данные смешанные или неполные."},
+        {"role": "user", "content": "Клиника А: рейтинг 4.9 на одном сайте, 45 отзывов, цена неизвестна. Клиника Б: рейтинг 4.7 на двух независимых сайтах, суммарно 900 отзывов, есть официальный прайс. Какая клиника лучшая?"}
+      ],
+      "checks": [
+        {"type": "contains_all", "values": ["А", "Б"]},
+        {"type": "regex", "pattern": "(?i)(нельзя.*однознач|данных.*недостат|зависит|по.*данным|предпочтительн)"}
+      ],
+      "max_output_chars": 1300
+    },
+    {
+      "id": "quality-analysis-decision",
+      "category": "factual",
+      "critical": false,
+      "reasoning": true,
+      "max_tokens": 300,
+      "messages": [
+        {"role": "system", "content": "Дай решение задачи: сначала вывод, затем коротко причины и следующий шаг. Не перечисляй все возможные мысли."},
+        {"role": "user", "content": "Есть сервер на 4 CPU и 6 ГБ RAM. Вариант А запускает два тяжёлых ответа параллельно и иногда уходит в swap. Вариант Б запускает один ответ и ставит остальные в очередь. Главная цель — стабильность. Что выбрать?"}
+      ],
+      "checks": [
+        {"type": "contains_all", "values": ["Б", "очеред"]},
+        {"type": "not_contains", "values": ["невозможно сказать", "нужно больше информации"]}
+      ],
+      "max_output_chars": 1100
+    },
+    {
+      "id": "quality-russian-no-ai-preamble",
+      "category": "russian_language",
+      "critical": false,
+      "reasoning": false,
+      "max_tokens": 220,
+      "messages": [
+        {"role": "system", "content": "Ответь естественно по-русски и сразу по существу. Без ритуального вступления и заключения."},
+        {"role": "user", "content": "Объясни простыми словами, зачем интернет-магазину резервная копия базы данных. Три-четыре предложения."}
+      ],
+      "checks": [
+        {"type": "contains_all", "values": ["данн"]},
+        {"type": "not_contains", "values": ["В современном мире", "Важно отметить", "Подводя итог", "Конечно!"]},
+        {"type": "cyrillic_ratio", "minimum": 0.72}
+      ],
+      "max_output_chars": 900
+    },
+    {
+      "id": "quality-scope-final-only",
+      "category": "scope",
+      "critical": true,
+      "reasoning": false,
+      "max_tokens": 180,
+      "messages": [
+        {"role": "system", "content": "Верни только готовое сообщение без заголовка, пояснений и вариантов."},
+        {"role": "user", "content": "Напиши: я получил документы, всё в порядке, спасибо. Сделай фразу чуть дружелюбнее."}
+      ],
+      "checks": [
+        {"type": "contains_all", "values": ["документ", "спасибо"]},
+        {"type": "not_contains", "values": ["Вариант", "Конечно", "Вот", "Пояснение"]}
+      ],
+      "max_output_chars": 350
+    }
+  ]
+}
