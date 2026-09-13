@@ -43,12 +43,16 @@ def test_large_rewrite_does_not_become_deep_only_because_input_is_long():
     assert route.reasoning is False
 
 
-def test_legacy_explicit_fast_is_upgraded_to_work_and_context_ceiling_is_respected():
-    fast = choose_route("Проведи аудит безопасности", "fast", 16384, 8192)
-    assert fast.mode == "work"
-    assert fast.reasoning is True
-    assert fast.max_context_tokens == 8192
-    assert "fast_upgraded_to_work" in fast.reason
+def test_legacy_explicit_fast_is_treated_as_auto_and_can_escalate_to_deep():
+    legacy_fast = choose_route("Проведи аудит безопасности", "fast", 16384, 8192)
+    assert legacy_fast.mode == "deep"
+    assert legacy_fast.reasoning is True
+    assert legacy_fast.max_context_tokens == 8192
+    assert "fast_upgraded_to_auto" in legacy_fast.reason
+
+    simple_legacy_fast = choose_route("Кратко объясни HTTP", "fast", 16384, 8192)
+    assert simple_legacy_fast.mode == "work"
+    assert simple_legacy_fast.reasoning is False
 
     deep = choose_route("кратко", "deep", 16384, 8192)
     assert deep.mode == "deep"
