@@ -81,9 +81,8 @@ html{scrollbar-gutter:stable}body{padding-left:238px!important;min-width:0!impor
 def _session_script(document: str) -> str:
     return (
         f'<script{_nonce_attr(document)}>(function(){{'
-        "var a=sessionStorage.getItem('x1AdminToken')||sessionStorage.getItem('x1_access_token')||'';"
-        "if(!a){location.replace('/login?next='+encodeURIComponent(location.pathname+location.search));return;}"
-        "if(!sessionStorage.getItem('x1AdminToken'))sessionStorage.setItem('x1AdminToken',a);"
+        "var a=sessionStorage.getItem('x1AdminToken')||'';"
+        "if(!a){location.replace('/admin/login?next='+encodeURIComponent(location.pathname+location.search));return;}"
         "})();</script>"
     )
 
@@ -102,6 +101,8 @@ def _decorate(document: str) -> str:
 def _is_admin_html_route(path: str, methods: Sequence[str] | set[str] | None, include_in_schema: bool) -> bool:
     normalized = str(path or "").rstrip("/") or "/"
     method_set = {str(item).upper() for item in (methods or ())}
+    if normalized == "/admin/login":
+        return False
     return (
         not include_in_schema
         and (not method_set or "GET" in method_set)
