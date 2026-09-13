@@ -7,7 +7,12 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.services.fastapi_route_compat import install_system_observability_compat
 from app.services.system_observability import CRITICAL, collect_system_health
+
+# FastAPI 0.137+ keeps include_router() branches lazy in app.routes. Install the
+# prefix-aware compatibility probe before any readiness/reliability checks run.
+install_system_observability_compat()
 
 router = APIRouter(tags=["health"])
 _BUILD_PROVENANCE = Path("/app/BUILD_PROVENANCE.json")
