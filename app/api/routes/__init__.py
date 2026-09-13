@@ -7,7 +7,9 @@ policy apply consistently to normal chat, streaming chat and verification calls.
 
 from app.runtime_quality_patch import install_runtime_quality_patch
 from app.identity_patch import install_identity_patch
+from app.admin_surface_patch import install_admin_surface_patch
 
+install_admin_surface_patch()
 install_runtime_quality_patch()
 install_identity_patch()
 
