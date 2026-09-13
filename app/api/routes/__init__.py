@@ -6,8 +6,10 @@ policy apply consistently to normal chat, streaming chat and verification calls.
 """
 
 from app.runtime_quality_patch import install_runtime_quality_patch
+from app.identity_patch import install_identity_patch
 
 install_runtime_quality_patch()
+install_identity_patch()
 
 # Public attribution is presentation-only. It is installed here before main.py
 # imports the public UI router, so the landing page footer is decorated once
