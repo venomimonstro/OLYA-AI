@@ -37,11 +37,12 @@ class VerificationPlan:
     def extra_inference_budget(self) -> int:
         if self.mode == "off":
             return 0
-        # The starter CPU profile allows one bounded quality pass. Deterministic
-        # checks remain free; expensive semantic verification never fans out into
-        # critic + repair + critic again on a 4-core node.
-        if self.mode == "strict" or self.repair_deterministic or self.run_critic:
+        if self.repair_deterministic:
             return 1
+        if self.run_critic:
+            # A second pass is only reserved for high-risk answers where the
+            # evidence-aware critic is allowed to trigger a targeted repair.
+            return 2 if self.repair_critic else 1
         if "explicit_requirements" in self.reasons or "scope_lock" in self.reasons:
             return 1
         return 0
@@ -124,19 +125,28 @@ def plan_verification(
             reasons=tuple(dict.fromkeys(reasons + ["strict_requested"])),
             run_critic=not repair,
             repair_deterministic=repair,
-            repair_critic=False,
+            repair_critic=not repair,
             critic_max_tokens=480,
         )
 
     repair_deterministic = bool(failed)
     run_critic = not repair_deterministic and score >= 3
+    repair_critic = bool(
+        run_critic
+        and (
+            score >= 4
+            or freshness_required
+            or verified_source_count > 0
+            or "semantic_high_risk" in reasons
+        )
+    )
     return VerificationPlan(
         mode="auto",
         risk_score=score,
         reasons=tuple(dict.fromkeys(reasons)),
         run_critic=run_critic,
         repair_deterministic=repair_deterministic,
-        repair_critic=False,
+        repair_critic=repair_critic,
         critic_max_tokens=420,
     )
 
@@ -157,12 +167,20 @@ def audit_with_critic_issues(audit: DeterministicAudit, critic: dict | None) -> 
     for index, issue in enumerate(critic.get("issues", [])[:10], start=1):
         if not isinstance(issue, dict) or issue.get("severity") not in {"critical", "major"}:
             continue
+        issue_type = str(issue.get("type") or "other")
+        claim = str(issue.get("claim") or "").strip()
+        evidence = str(issue.get("evidence") or "").strip()
+        detail = str(issue.get("message", "")).strip()
+        if claim:
+            detail += f" | claim: {claim[:300]}"
+        if evidence:
+            detail += f" | evidence: {evidence[:500]}"
         checks.append(
             {
-                "key": f"critic_issue_{index}",
-                "label": "Семантическая проверка нашла дефект",
+                "key": f"critic_{issue_type}_{index}",
+                "label": "Evidence-aware проверка нашла существенный дефект",
                 "status": "failed",
-                "detail": str(issue.get("message", ""))[:1000],
+                "detail": detail[:1200],
             }
         )
     return DeterministicAudit(checks=checks, warnings=list(audit.warnings))
