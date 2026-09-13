@@ -6,11 +6,17 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
+
+try:
+    from scripts.build_provenance import source_fingerprint
+except ModuleNotFoundError:
+    from build_provenance import source_fingerprint
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPORT = ROOT / "backups" / "chat-quality-acceptance-latest.json"
@@ -52,12 +58,34 @@ CASES = (
 )
 
 
-def _validate_transport(base_url: str) -> None:
+def _current_git_head() -> str:
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5, shell=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    value = result.stdout.strip().lower()
+    return value if result.returncode == 0 and len(value) == 40 and all(char in "0123456789abcdef" for char in value) else ""
+
+
+def _canonical_target(base_url: str) -> str:
     parsed = urlsplit(base_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise RuntimeError("Invalid quality acceptance target URL")
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+    display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    default_port = 443 if scheme == "https" else 80
+    netloc = display_host if parsed.port in {None, default_port} else f"{display_host}:{parsed.port}"
+    path = (parsed.path or "").rstrip("/")
+    return f"{scheme}://{netloc}{path}"
+
+
+def _validate_transport(base_url: str) -> str:
+    target = _canonical_target(base_url)
+    parsed = urlsplit(target)
     if parsed.scheme != "https" and parsed.hostname.lower() not in {"127.0.0.1", "localhost", "::1"}:
         raise RuntimeError("Public quality acceptance requires HTTPS before sending Bearer token")
+    return target
 
 
 def _write_report(path: Path, payload: dict) -> None:
@@ -85,7 +113,13 @@ def _evaluate(text: str, case: dict) -> list[dict]:
 
 
 async def run(base_url: str, tokens: list[str], timeout: float) -> dict:
-    _validate_transport(base_url)
+    target = _validate_transport(base_url)
+    head = _current_git_head()
+    provenance = source_fingerprint(ROOT)
+    fingerprint = str(provenance.get("source_fingerprint") or "").lower()
+    if not head or len(fingerprint) != 64:
+        raise RuntimeError("Quality acceptance requires current git HEAD and valid source fingerprint")
+
     quality_token = os.environ.get("X1_QUALITY_TOKEN", "").strip()
     pool = [quality_token] if quality_token else [value.strip() for value in tokens if value.strip()]
     if not pool:
@@ -96,11 +130,22 @@ async def run(base_url: str, tokens: list[str], timeout: float) -> dict:
     results: list[dict] = []
     identities: dict[str, str] = {}
     async with httpx.AsyncClient(trust_env=False, timeout=timeout + 10) as client:
+        version = await client.get(target + "/version")
+        if version.status_code != 200:
+            raise RuntimeError(f"Quality acceptance build provenance failed with HTTP {version.status_code}")
+        try:
+            runtime = version.json()
+        except ValueError as exc:
+            raise RuntimeError("Quality acceptance build provenance returned invalid JSON") from exc
+        runtime_fingerprint = str(runtime.get("source_fingerprint") or "").lower()
+        if runtime_fingerprint != fingerprint:
+            raise RuntimeError("Quality acceptance target build differs from checked-out candidate source")
+
         for index, case in enumerate(CASES, start=1):
             token = pool[0] if quality_token else pool[index - 1]
             headers = {"Authorization": "Bearer " + token, "X-X1-Deadline-Ms": str(int(timeout * 1000))}
             if token not in identities:
-                identity = await client.get(base_url.rstrip("/") + "/v1/auth/me", headers=headers)
+                identity = await client.get(target + "/v1/auth/me", headers=headers)
                 if identity.status_code != 200:
                     raise RuntimeError(f"Quality acceptance identity failed with HTTP {identity.status_code}")
                 try:
@@ -120,7 +165,7 @@ async def run(base_url: str, tokens: list[str], timeout: float) -> dict:
                 "web_mode": "off",
                 "client_request_id": f"quality_accept_{int(time.time())}_{index:02d}",
             }
-            response = await client.post(base_url.rstrip("/") + "/v1/chat", headers=headers, json=payload)
+            response = await client.post(target + "/v1/chat", headers=headers, json=payload)
             latency_ms = int((time.perf_counter() - started) * 1000)
             if response.status_code != 200:
                 results.append({"id": case["id"], "passed": False, "status": response.status_code, "latency_ms": latency_ms, "error": response.text[:500]})
@@ -147,7 +192,10 @@ async def run(base_url: str, tokens: list[str], timeout: float) -> dict:
     critical_failed = [row["id"] for row in results if not row.get("passed")]
     return {
         "format": "x1-chat-quality-acceptance-v1",
-        "target": base_url.rstrip("/"),
+        "git_head": head,
+        "source_fingerprint": fingerprint,
+        "target_build_fingerprint": runtime_fingerprint,
+        "target": target,
         "cases": len(results),
         "accounts_used": len(set(identities.values())),
         "distributed_across_load_accounts": not bool(quality_token),
@@ -168,7 +216,15 @@ def main() -> int:
     try:
         result = asyncio.run(run(args.base_url, tokens, max(30.0, args.timeout)))
     except RuntimeError as exc:
-        result = {"format": "x1-chat-quality-acceptance-v1", "target": args.base_url.rstrip("/"), "passed": False, "error": str(exc)}
+        candidate = source_fingerprint(ROOT)
+        result = {
+            "format": "x1-chat-quality-acceptance-v1",
+            "git_head": _current_git_head(),
+            "source_fingerprint": candidate.get("source_fingerprint"),
+            "target": args.base_url.rstrip("/"),
+            "passed": False,
+            "error": str(exc),
+        }
     report = Path(args.report)
     if not report.is_absolute():
         report = ROOT / report
