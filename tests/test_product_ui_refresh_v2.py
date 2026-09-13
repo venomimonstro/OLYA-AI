@@ -34,7 +34,11 @@ def test_legacy_fast_request_is_server_upgraded_instead_of_serving_low_quality_l
     route = choose_route("Ответь коротко, но по существу", "fast", 8192, 8192)
     assert route.mode == "work"
     assert route.max_output_tokens >= 1000
-    assert "fast_upgraded_to_work" in route.reason
+    assert "fast_upgraded_to_auto" in route.reason
+
+    complex_route = choose_route("Проведи аудит безопасности проекта", "fast", 8192, 8192)
+    assert complex_route.mode == "deep"
+    assert complex_route.reasoning is True
 
 
 def test_admin_login_matches_light_auth_language_but_remains_separate(client):
