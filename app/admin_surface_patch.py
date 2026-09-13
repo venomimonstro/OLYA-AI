@@ -36,11 +36,21 @@ _ADMIN_MARKERS = (
 
 
 def _active_key(document: str) -> str:
-    lowered = document.casefold()
-    if "owner" in lowered and "/admin/owner" in lowered:
-        return "owner"
-    for key in ("integrations", "support", "users", "capabilities", "analytics", "beta", "launch", "media"):
-        if f"/admin/{key}" in lowered and (f"· {key}" in lowered or f">{key}<" in lowered or key in lowered[:1200]):
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", document, flags=re.I | re.S)
+    title = re.sub(r"\s+", " ", title_match.group(1)).casefold() if title_match else ""
+    title_rules = (
+        ("owner", "owner"),
+        ("integrat", "integrations"),
+        ("support", "support"),
+        ("users", "users"),
+        ("capabil", "capabilities"),
+        ("analytic", "analytics"),
+        ("beta", "beta"),
+        ("launch", "launch"),
+        ("media", "media"),
+    )
+    for marker, key in title_rules:
+        if marker in title:
             return key
     return "control"
 
