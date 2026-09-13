@@ -34,11 +34,24 @@ _CRITIC_TYPES = {
     "style_quality",
     "other",
 }
+_QUALITY_OMISSION = "\n[…quality context clipped…]\n"
 
 
 def needs_fresh_grounding(text: str) -> bool:
     normalized = " ".join(text.casefold().split())
     return any(marker in normalized for marker in _FRESHNESS_MARKERS)
+
+
+def _quality_clip(value: str, limit: int) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    if limit <= len(_QUALITY_OMISSION) + 40:
+        return text[:limit]
+    remaining = limit - len(_QUALITY_OMISSION)
+    head = max(20, int(remaining * 0.58))
+    tail = max(0, remaining - head)
+    return text[:head] + _QUALITY_OMISSION + (text[-tail:] if tail else "")
 
 
 @dataclass(frozen=True)
@@ -108,7 +121,11 @@ class AnswerQualityEngine:
         requirement_lines = "\n".join(f"- {item.label or self._default_label(item)}" for item in requirements) or "- Явных формальных требований нет"
         scope_lines = scope_contract_text() or "- Нет отдельного Scope Lock"
         evidence = current_evidence_context().strip()
-        evidence_block = evidence if evidence else "EVIDENCE НЕ ПРИЛОЖЕН. Не считай знания модели или уверенный тон доказательством факта."
+        evidence_block = _quality_clip(evidence, 3_400) if evidence else "EVIDENCE НЕ ПРИЛОЖЕН. Не считай знания модели или уверенный тон доказательством факта."
+        request_block = _quality_clip(user_request, 1_400)
+        answer_block = _quality_clip(answer, 3_200)
+        requirement_lines = _quality_clip(requirement_lines, 800)
+        scope_lines = _quality_clip(scope_lines, 700)
         schema = '{"issues":[{"severity":"critical|major|minor","type":"unsupported_claim|contradiction|stale_claim|missing_requirement|bad_inference|scope_violation|style_quality|other","claim":"краткий фрагмент или тезис","message":"что именно неверно","evidence":"какое доказательство подтверждает замечание или почему его нет"}],"summary":"..."}'
         return [
             ChatMessage(
@@ -124,8 +141,8 @@ class AnswerQualityEngine:
             ChatMessage(
                 role="user",
                 content=(
-                    f"ЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n{user_request}\n\nФОРМАЛЬНЫЕ ТРЕБОВАНИЯ:\n{requirement_lines}\n\n{scope_lines}\n\n"
-                    f"EVIDENCE, ДОСТУПНЫЙ ОСНОВНОМУ ОТВЕТУ:\n{evidence_block}\n\nОТВЕТ X1:\n{answer}"
+                    f"ЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n{request_block}\n\nФОРМАЛЬНЫЕ ТРЕБОВАНИЯ:\n{requirement_lines}\n\n{scope_lines}\n\n"
+                    f"EVIDENCE, ДОСТУПНЫЙ ОСНОВНОМУ ОТВЕТУ:\n{evidence_block}\n\nОТВЕТ X1:\n{answer_block}"
                 ),
             ),
         ]
@@ -136,7 +153,12 @@ class AnswerQualityEngine:
         requirement_lines = "\n".join(f"- {item.label or self._default_label(item)}" for item in requirements) or "- Нет дополнительных формальных требований"
         scope_lines = scope_contract_text() or "- Нет отдельного Scope Lock"
         evidence = current_evidence_context().strip()
-        evidence_block = evidence if evidence else "EVIDENCE НЕ ПРИЛОЖЕН. Нельзя добавлять новые внешние факты."
+        evidence_block = _quality_clip(evidence, 2_800) if evidence else "EVIDENCE НЕ ПРИЛОЖЕН. Нельзя добавлять новые внешние факты."
+        request_block = _quality_clip(user_request, 1_000)
+        answer_block = _quality_clip(answer, 3_400)
+        failure_lines = _quality_clip(failure_lines, 1_200)
+        requirement_lines = _quality_clip(requirement_lines, 600)
+        scope_lines = _quality_clip(scope_lines, 600)
         return [
             ChatMessage(
                 role="system",
@@ -149,8 +171,8 @@ class AnswerQualityEngine:
             ChatMessage(
                 role="user",
                 content=(
-                    f"ИСХОДНЫЙ ЗАПРОС:\n{user_request}\n\nТРЕБОВАНИЯ:\n{requirement_lines}\n\n{scope_lines}\n\n"
-                    f"НАЙДЕННЫЕ ДЕФЕКТЫ:\n{failure_lines}\n\nEVIDENCE:\n{evidence_block}\n\nТЕКУЩИЙ ОТВЕТ:\n{answer}"
+                    f"ИСХОДНЫЙ ЗАПРОС:\n{request_block}\n\nТРЕБОВАНИЯ:\n{requirement_lines}\n\n{scope_lines}\n\n"
+                    f"НАЙДЕННЫЕ ДЕФЕКТЫ:\n{failure_lines}\n\nEVIDENCE:\n{evidence_block}\n\nТЕКУЩИЙ ОТВЕТ:\n{answer_block}"
                 ),
             ),
         ]
