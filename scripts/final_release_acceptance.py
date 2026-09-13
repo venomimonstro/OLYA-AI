@@ -38,13 +38,14 @@ def _validate_target_transport(base_url: str) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run X1 target load, RC gate and final production acceptance in the required order")
+    parser = argparse.ArgumentParser(description="Run X1 target load, user-quality, RC and final production acceptance in the required order")
     parser.add_argument("--base-url", default=os.environ.get("X1_PRODUCTION_BASE_URL", ""), help="deployed target URL; public targets must use HTTPS")
     parser.add_argument("--require-images", action="store_true", help="require image worker and image generation/editing at final acceptance")
     parser.add_argument("--load-rounds", type=int, default=2)
     parser.add_argument("--load-timeout", type=float, default=120.0)
     parser.add_argument("--load-p95-limit-ms", type=int, default=120_000)
     parser.add_argument("--load-max-error-rate", type=float, default=0.05)
+    parser.add_argument("--quality-timeout", type=float, default=180.0)
     parser.add_argument("--rc-timeout", type=int, default=7200)
     args = parser.parse_args()
 
@@ -69,22 +70,27 @@ def main() -> int:
         [
             sys.executable,
             "scripts/load_acceptance.py",
-            "--base-url",
-            base_url,
-            "--rounds",
-            str(max(1, min(args.load_rounds, 20))),
-            "--timeout",
-            str(max(5.0, args.load_timeout)),
-            "--p95-limit-ms",
-            str(max(1000, args.load_p95_limit_ms)),
-            "--max-error-rate",
-            str(max(0.0, min(args.load_max_error_rate, 0.5))),
+            "--base-url", base_url,
+            "--rounds", str(max(1, min(args.load_rounds, 20))),
+            "--timeout", str(max(5.0, args.load_timeout)),
+            "--p95-limit-ms", str(max(1000, args.load_p95_limit_ms)),
+            "--max-error-rate", str(max(0.0, min(args.load_max_error_rate, 0.5))),
         ],
         env,
     )
     steps.append(load)
     if load["status"] != "passed":
         print(json.dumps({"format": "x1-final-release-acceptance-v1", "status": "failed", "failed_step": load["name"], "steps": steps}, ensure_ascii=False, indent=2))
+        return 2
+
+    quality = _run(
+        "chat_quality_acceptance",
+        [sys.executable, "scripts/chat_quality_acceptance.py", "--base-url", base_url, "--timeout", str(max(30.0, args.quality_timeout))],
+        env,
+    )
+    steps.append(quality)
+    if quality["status"] != "passed":
+        print(json.dumps({"format": "x1-final-release-acceptance-v1", "status": "failed", "failed_step": quality["name"], "steps": steps}, ensure_ascii=False, indent=2))
         return 2
 
     rc = _run(
@@ -113,6 +119,7 @@ def main() -> int:
         "steps": steps,
         "reports": {
             "load": "backups/load-acceptance-latest.json",
+            "chat_quality": "backups/chat-quality-acceptance-latest.json",
             "release_candidate": "backups/rc-release-candidate-latest.json",
             "production": "backups/production-acceptance-latest.json",
         },
