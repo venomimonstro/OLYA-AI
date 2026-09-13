@@ -93,6 +93,9 @@ def audit() -> dict:
         errors.append({"code": "metrika_goal_catalog_mismatch", "missing": sorted(METRIKA_GOALS - goal_ids), "extra": sorted(goal_ids - METRIKA_GOALS)})
 
     _require(errors, "app/main.py", ('"app.api.routes.launch_bundle"', "max_queued_per_principal=settings.inference_max_queued_per_principal"), "launch_bundle_not_runtime_registered")
+    health_source = _text("app/api/routes/health.py")
+    if "launch_bundle" in health_source or "router.include_router(" in health_source:
+        errors.append({"code": "health_router_must_not_nest_launch_bundle"})
     _require(errors, "alembic/versions/f88b2e7a6c31_add_yandex_oauth.py", ('down_revision = "f87a1d9c4e20"', '"external_auth_identities"', '"oauth_login_states"', '"yandex_oauth_client_secret_ciphertext"'), "yandex_oauth_migration_contract_missing")
 
     _require(
@@ -224,7 +227,7 @@ def audit() -> dict:
         errors.append({"code": "final_launch_audit_not_release_gated"})
 
     return {
-        "format": "x1-final-launch-hardening-audit-v3",
+        "format": "x1-final-launch-hardening-audit-v4",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "static_launch_contract": {
@@ -239,6 +242,7 @@ def audit() -> dict:
             "yookassa_server_verification": True,
             "one_command_starter": True,
             "starter_optional_workers": True,
+            "startup_router_nesting_safe": True,
             "abuse_guards": True,
             "starter_answer_quality_envelope": True,
             "launch_bundle_registered": True,
