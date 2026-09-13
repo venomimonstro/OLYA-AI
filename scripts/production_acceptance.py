@@ -232,6 +232,7 @@ def main() -> int:
     # Candidate/evidence must be generated from exactly this immutable source revision and target.
     checks.append(evidence("release_candidate", "backups/rc-release-candidate-latest.json", expected_format="x1-release-candidate-v4", head=head, source_fingerprint=candidate_fingerprint))
     checks.append(evidence("target_load", "backups/load-acceptance-latest.json", expected_format="x1-real-load-acceptance-v2", head=head, pass_field="passed", source_fingerprint=candidate_fingerprint, expected_target=target_url))
+    checks.append(evidence("chat_quality", "backups/chat-quality-acceptance-latest.json", expected_format="x1-chat-quality-acceptance-v1", head=head, pass_field="passed", source_fingerprint=candidate_fingerprint, expected_target=target_url))
     checks.append(evidence("release_gate", "backups/release-gate-latest.json", expected_format="x1-release-gate-v4", head=head))
     checks.append(generic_evidence("restore_drill", "backups/restore-drill-latest.json"))
     checks.append(generic_evidence("runtime_chaos", "backups/rc-chaos-runtime-latest.json"))
