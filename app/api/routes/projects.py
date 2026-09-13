@@ -74,6 +74,17 @@ def update_project(payload: ProjectUpdate, project_id: str, user: User = Depends
     return _response(db, user, project)
 
 
+@router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_project(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> None:
+    project, role = require_project_role(db, user, project_id, "manager")
+    if role != "owner":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only project owner can delete the project")
+    # Conversation.project_id uses ON DELETE SET NULL, so personal chat history is
+    # preserved and simply moves back to the ungrouped chat list.
+    db.delete(project)
+    db.commit()
+
+
 @router.get("/{project_id}/members", response_model=list[MemberResponse])
 def list_members(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[MemberResponse]:
     project, _ = require_project_role(db, user, project_id, "viewer")
