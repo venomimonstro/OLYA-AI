@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from app.utility_chat import utility_reply
 
 
@@ -7,7 +5,7 @@ def test_moscow_time_is_local_utility():
     reply = utility_reply("Какое сейчас время в Москве?")
     assert reply is not None
     assert reply.kind == "local_time"
-    assert reply.text.startswith("Сейчас в Москва ")
+    assert reply.text.startswith("Сейчас в Москве ")
     assert ":" in reply.text
 
 
