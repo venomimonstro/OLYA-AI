@@ -4,6 +4,7 @@ import re
 from time import perf_counter
 
 from app.schemas.chat import ChatMessage
+from app.utility_chat import current_utility_reply, mark_utility_request, utility_reply
 
 _BASE_SYSTEM_TEXT = (
     "Ты X1, рабочий AI-ассистент. Отвечай на языке последнего сообщения пользователя. "
@@ -14,20 +15,15 @@ _BASE_SYSTEM_TEXT = (
     "На простое приветствие отвечай кратко. На содержательную задачу отвечай по существу, без служебных комментариев."
 )
 
-_GREETING_RU = re.compile(
-    r"^\s*(?:привет|здравствуй|здравствуйте|доброе\s+утро|добрый\s+день|добрый\s+вечер|хай)\s*[!?.…]*\s*$",
-    re.IGNORECASE,
-)
-_GREETING_EN = re.compile(r"^\s*(?:hi|hello|hey)\s*[!?.…]*\s*$", re.IGNORECASE)
 _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
 _CJK_RE = re.compile(
     "["
-    "\u3040-\u30ff"  # Hiragana/Katakana
-    "\u3400-\u4dbf"  # CJK extension A
-    "\u4e00-\u9fff"  # CJK unified
-    "\uf900-\ufaff"  # CJK compatibility
-    "\uac00-\ud7af"  # Hangul syllables
+    "\u3040-\u30ff"
+    "\u3400-\u4dbf"
+    "\u4e00-\u9fff"
+    "\uf900-\ufaff"
+    "\uac00-\ud7af"
     "]"
 )
 _CJK_REQUEST_MARKERS = (
@@ -43,11 +39,8 @@ def base_system_message() -> ChatMessage:
 
 
 def instant_reply(user_text: str) -> str | None:
-    if _GREETING_RU.fullmatch(user_text or ""):
-        return "Привет! Чем могу помочь?"
-    if _GREETING_EN.fullmatch(user_text or ""):
-        return "Hello! How can I help?"
-    return None
+    reply = utility_reply(user_text)
+    return reply.text if reply is not None else None
 
 
 def _latest_user_text(messages: list[ChatMessage]) -> str:
@@ -83,7 +76,6 @@ def clean_visible_output(user_text: str, text: str) -> str:
             value,
             flags=re.IGNORECASE | re.DOTALL,
         )
-        # Fail closed on an unterminated hidden-reasoning block.
         value = re.sub(rf"<{tag}\b[^>]*>.*$", "", value, flags=re.IGNORECASE | re.DOTALL)
         value = re.sub(rf"</?{tag}\b[^>]*>", "", value, flags=re.IGNORECASE)
     value = _clean_visible_chars(value, forbid_cjk=_forbid_cjk(user_text))
@@ -170,7 +162,6 @@ class VisibleStreamFilter:
             return ""
         tail = self._carry
         self._carry = ""
-        # A dangling prefix of a hidden tag is service text, not user content.
         if tail.startswith("<"):
             return ""
         return _clean_visible_chars(tail, forbid_cjk=self.forbid_cjk)
@@ -184,29 +175,83 @@ def _simple_auto_fast(text: str, requested_mode: str, base_decision) -> bool:
 
 
 def install_runtime_quality_patch() -> None:
-    """Install small runtime guards before chat routes bind inference functions."""
+    """Install runtime guards before chat routes bind inference/quota/planner functions."""
+    from sqlalchemy import func, select
+
     from app.inference import router as inference_router
     from app.inference.client import LlamaClient, LlamaGeneration
+    from app.models import UsageEvent
+    from app.services import quota as quota_service
+    from app.services import task_solver as task_solver_service
+    from app.services.measured_plans import request_unit_weights
     from app.services.project_context import ProjectContextBuilder
 
     if getattr(LlamaClient.generate, "_x1_quality_guard", False):
         return
 
+    original_plan_task = task_solver_service.plan_task
+
+    def guarded_plan_task(question: str, *, max_queries: int = 4, force_web: bool = False):
+        shortcut = mark_utility_request(question)
+        if shortcut is not None:
+            return task_solver_service.TaskSolvePlan(
+                kind="utility",
+                requires_web=False,
+                force_freshness=False,
+                freshness_category="utility",
+                public_steps=("Отвечаю без запуска модели",),
+                reason=f"quota_free_{shortcut.kind}",
+            )
+        return original_plan_task(question, max_queries=max_queries, force_web=force_web)
+
+    task_solver_service.plan_task = guarded_plan_task
+
+    original_units_since = quota_service._request_units_since
+
+    def measured_units_since(db, user_id: str, settings, since):
+        weights = request_unit_weights(settings)
+        fallback = weights.get("work", 2)
+        rows = db.execute(
+            select(UsageEvent.mode, func.count(UsageEvent.id))
+            .where(
+                UsageEvent.user_id == user_id,
+                UsageEvent.created_at >= since,
+                UsageEvent.success.is_(True),
+                UsageEvent.inference_ms >= 250,
+            )
+            .group_by(UsageEvent.mode)
+        ).all()
+        return sum(int(count or 0) * int(weights.get(str(mode), fallback)) for mode, count in rows)
+
+    measured_units_since._x1_utility_filter = True  # type: ignore[attr-defined]
+    quota_service._request_units_since = measured_units_since
+
+    original_ensure_compute = quota_service.ensure_compute_available
+
+    def guarded_ensure_compute(db, user, settings, *, reserve_seconds: int = 0, channel: str | None = None):
+        if current_utility_reply() is not None:
+            return quota_service.get_or_create_quota(db, user, settings)
+        return original_ensure_compute(db, user, settings, reserve_seconds=reserve_seconds, channel=channel)
+
+    guarded_ensure_compute._x1_utility_quota = True  # type: ignore[attr-defined]
+    quota_service.ensure_compute_available = guarded_ensure_compute
+
     original_choose_route = inference_router.choose_route
 
     def guarded_choose_route(text: str, requested_mode: str, normal_context: int, deep_context: int):
+        shortcut = mark_utility_request(text)
         decision = original_choose_route(text, requested_mode, normal_context, deep_context)
-        if not _simple_auto_fast(text, requested_mode, decision):
-            return decision
-        starter_4k = int(deep_context) <= 4096
-        return inference_router.RouteDecision(
-            mode="fast",
-            max_context_tokens=min(max(1024, int(normal_context)), max(1024, int(deep_context)), 4096),
-            max_output_tokens=384 if starter_4k else 600,
-            reasoning=False,
-            complexity_score=decision.complexity_score,
-            reason="simple_short_auto_fast",
-        )
+        if shortcut is not None or _simple_auto_fast(text, requested_mode, decision):
+            starter_4k = int(deep_context) <= 4096
+            return inference_router.RouteDecision(
+                mode="fast",
+                max_context_tokens=min(max(1024, int(normal_context)), max(1024, int(deep_context)), 4096),
+                max_output_tokens=128 if shortcut is not None else (384 if starter_4k else 600),
+                reasoning=False,
+                complexity_score=0 if shortcut is not None else decision.complexity_score,
+                reason=f"utility_{shortcut.kind}" if shortcut is not None else "simple_short_auto_fast",
+            )
+        return decision
 
     inference_router.choose_route = guarded_choose_route
 
