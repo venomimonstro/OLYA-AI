@@ -22,16 +22,16 @@ _GREETING_EN = re.compile(r"^\s*(?:hi|hello|hey)\s*[!?.…]*\s*$", re.I)
 _TIME_MARKERS = ("который час", "сколько времени", "какое время", "текущее время", "время сейчас", "сейчас время")
 _DATE_MARKERS = ("какая сегодня дата", "какое сегодня число", "текущая дата", "дата сегодня")
 _CITY_TIMEZONES = {
-    "москве": ("Москва", "Europe/Moscow"), "москва": ("Москва", "Europe/Moscow"), "москвы": ("Москва", "Europe/Moscow"),
-    "санкт-петербурге": ("Санкт-Петербург", "Europe/Moscow"), "петербурге": ("Санкт-Петербург", "Europe/Moscow"), "спб": ("Санкт-Петербург", "Europe/Moscow"),
-    "калининграде": ("Калининград", "Europe/Kaliningrad"), "калининград": ("Калининград", "Europe/Kaliningrad"),
-    "самаре": ("Самара", "Europe/Samara"), "самара": ("Самара", "Europe/Samara"),
-    "екатеринбурге": ("Екатеринбург", "Asia/Yekaterinburg"), "екатеринбург": ("Екатеринбург", "Asia/Yekaterinburg"),
-    "омске": ("Омск", "Asia/Omsk"), "омск": ("Омск", "Asia/Omsk"),
-    "новосибирске": ("Новосибирск", "Asia/Novosibirsk"), "новосибирск": ("Новосибирск", "Asia/Novosibirsk"),
-    "красноярске": ("Красноярск", "Asia/Krasnoyarsk"), "красноярск": ("Красноярск", "Asia/Krasnoyarsk"),
-    "иркутске": ("Иркутск", "Asia/Irkutsk"), "иркутск": ("Иркутск", "Asia/Irkutsk"),
-    "владивостоке": ("Владивосток", "Asia/Vladivostok"), "владивосток": ("Владивосток", "Asia/Vladivostok"),
+    "москве": ("Москве", "Europe/Moscow"), "москва": ("Москве", "Europe/Moscow"), "москвы": ("Москве", "Europe/Moscow"),
+    "санкт-петербурге": ("Санкт-Петербурге", "Europe/Moscow"), "петербурге": ("Санкт-Петербурге", "Europe/Moscow"), "спб": ("Санкт-Петербурге", "Europe/Moscow"),
+    "калининграде": ("Калининграде", "Europe/Kaliningrad"), "калининград": ("Калининграде", "Europe/Kaliningrad"),
+    "самаре": ("Самаре", "Europe/Samara"), "самара": ("Самаре", "Europe/Samara"),
+    "екатеринбурге": ("Екатеринбурге", "Asia/Yekaterinburg"), "екатеринбург": ("Екатеринбурге", "Asia/Yekaterinburg"),
+    "омске": ("Омске", "Asia/Omsk"), "омск": ("Омске", "Asia/Omsk"),
+    "новосибирске": ("Новосибирске", "Asia/Novosibirsk"), "новосибирск": ("Новосибирске", "Asia/Novosibirsk"),
+    "красноярске": ("Красноярске", "Asia/Krasnoyarsk"), "красноярск": ("Красноярске", "Asia/Krasnoyarsk"),
+    "иркутске": ("Иркутске", "Asia/Irkutsk"), "иркутск": ("Иркутске", "Asia/Irkutsk"),
+    "владивостоке": ("Владивостоке", "Asia/Vladivostok"), "владивосток": ("Владивостоке", "Asia/Vladivostok"),
 }
 _MONTHS_RU = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря")
 
@@ -62,14 +62,14 @@ def utility_reply(user_text: str) -> UtilityReply | None:
     asks_time = any(marker in normalized for marker in _TIME_MARKERS)
     asks_date = any(marker in normalized for marker in _DATE_MARKERS)
     if location and (asks_time or asks_date):
-        city_name, timezone_name = location
+        city_form, timezone_name = location
         now = datetime.now(ZoneInfo(timezone_name))
         if asks_time and asks_date:
-            value = f"Сейчас в {city_name} {now:%H:%M}, {now.day} {_MONTHS_RU[now.month - 1]} {now.year} года."
+            value = f"Сейчас в {city_form} {now:%H:%M}, {now.day} {_MONTHS_RU[now.month - 1]} {now.year} года."
         elif asks_date:
-            value = f"Сегодня в {city_name} {now.day} {_MONTHS_RU[now.month - 1]} {now.year} года."
+            value = f"Сегодня в {city_form} {now.day} {_MONTHS_RU[now.month - 1]} {now.year} года."
         else:
-            value = f"Сейчас в {city_name} {now:%H:%M}."
+            value = f"Сейчас в {city_form} {now:%H:%M}."
         return UtilityReply(value, "local_time")
     return None
 
