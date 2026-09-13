@@ -314,14 +314,11 @@ async def database_operational_error_handler(request: Request, exc: OperationalE
 def _include_router_eager(router) -> None:
     if router.on_startup or router.on_shutdown:
         raise RuntimeError("X1 routers must use the application lifespan")
-    concrete = list(router.routes)
-    if any(not hasattr(route, "path") for route in concrete):
-        raise RuntimeError("Nested lazy routers must be registered explicitly")
-    for route in concrete:
-        if hasattr(route, "dependency_overrides_provider"):
-            route.dependency_overrides_provider = app
-            route.app = request_response(route.get_route_handler())
-    app.router.routes.extend(concrete)
+    try:
+        app.include_router(router)
+    except Exception as exc:
+        prefix = str(getattr(router, "prefix", "") or "<root>")
+        raise RuntimeError(f"Failed to register router {prefix}: {type(exc).__name__}: {exc}") from exc
 
 
 def _include_product_router(module: str) -> None:
