@@ -88,7 +88,7 @@ def audit() -> dict:
         "max_output_tokens=1200 if starter_4k",
         "(900 if work_reasoning else 760) if starter_4k",
         'if requested_mode == "fast"',
-        'mode: Mode = "work"',
+        'mode: Mode = "deep" if high_risk or score >= 6 else "work"',
     ):
         if token not in router:
             errors.append({"code": "starter_output_budget_missing", "token": token})
