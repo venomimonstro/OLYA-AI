@@ -183,6 +183,8 @@ def main() -> int:
     parser.add_argument("--base-url", default=os.environ.get("X1_PRODUCTION_BASE_URL", "http://127.0.0.1:8000"))
     parser.add_argument("--admin-token-env", default="X1_PRODUCTION_ADMIN_TOKEN", help="environment variable containing an admin Bearer token; token is never written to reports")
     parser.add_argument("--require-images", action="store_true", help="also require image-worker and image generation/editing capabilities")
+    parser.add_argument("--require-sandbox", action="store_true", help="require sandbox-worker and sandbox.execute; disabled by default on starter_6gb")
+    parser.add_argument("--require-documents", action="store_true", help="require document-worker and documents capability; disabled by default on starter_6gb")
     parser.add_argument("--report", default="backups/production-acceptance-latest.json")
     args = parser.parse_args()
 
@@ -241,11 +243,16 @@ def main() -> int:
     if running["status"] == "passed":
         services = {line.strip() for line in running.get("stdout", "").splitlines() if line.strip()}
         required = {"db", "searxng", "app", "sandbox-worker", "document-worker", "llama"}
+        if not args.require_sandbox:
+            required.discard("sandbox-worker")
+        if not args.require_documents:
+            required.discard("document-worker")
         if args.require_images:
             required.add("image-worker")
         missing = sorted(required - services)
         running["services"] = sorted(services)
         running["required_services"] = sorted(required)
+        running["optional_disabled_for_acceptance"] = sorted({"sandbox-worker", "document-worker"} - required)
         running["missing_services"] = missing
         if missing:
             running["status"] = "failed"
@@ -267,8 +274,10 @@ def main() -> int:
     checks.append(command("postgresql_ready", ["docker", "compose", "exec", "-T", "db", "pg_isready", "-U", "x1", "-d", "x1"], timeout=30))
     checks.append(internal_http_probe("qwen_llama_health", "http://llama:8080/health"))
     checks.append(internal_http_probe("searxng_health", "http://searxng:8080/search?q=x1-production-acceptance&format=json"))
-    checks.append(internal_http_probe("sandbox_worker_health", "http://sandbox-worker:8090/health"))
-    checks.append(internal_http_probe("document_worker_health", "http://document-worker:8091/health"))
+    if args.require_sandbox:
+        checks.append(internal_http_probe("sandbox_worker_health", "http://sandbox-worker:8090/health"))
+    if args.require_documents:
+        checks.append(internal_http_probe("document_worker_health", "http://document-worker:8091/health"))
 
     billing_code = (
         "from app.core.config import get_settings; "
@@ -317,12 +326,17 @@ def main() -> int:
 
         caps_check, caps = http_json("live_capability_registry", target_url + "/v1/admin/capabilities?live=true", token=token, timeout=60)
         required_caps = {"chat", "files", "documents", "research.search", "sandbox.execute", "development", "api", "billing"}
+        if not args.require_documents:
+            required_caps.discard("documents")
+        if not args.require_sandbox:
+            required_caps.discard("sandbox.execute")
         if args.require_images:
             required_caps |= {"images.generate", "images.edit"}
         if caps_check["status"] == "passed":
             by_id = {row.get("id"): row for row in (caps or {}).get("capabilities") or []}
             unavailable = sorted(cap for cap in required_caps if not bool((by_id.get(cap) or {}).get("available")))
             caps_check["required_capabilities"] = sorted(required_caps)
+            caps_check["optional_disabled_for_acceptance"] = sorted({"documents", "sandbox.execute"} - required_caps)
             caps_check["unavailable_required"] = unavailable
             if unavailable:
                 caps_check["status"] = "failed"
@@ -337,6 +351,8 @@ def main() -> int:
         "source_fingerprint": candidate_fingerprint,
         "target": target_url,
         "require_images": bool(args.require_images),
+        "require_sandbox": bool(args.require_sandbox),
+        "require_documents": bool(args.require_documents),
         "checked_at": utcnow(),
         "failed_checks": failed,
         "checks": checks,
