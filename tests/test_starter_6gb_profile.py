@@ -17,13 +17,15 @@ def test_starter_contract_audit_passes() -> None:
     assert result["status"] == "passed", result["errors"]
 
 
-def test_starter_router_bounds_output_and_context() -> None:
-    fast = choose_route("Кратко объясни HTTP", "fast", 4096, 4096)
+def test_starter_router_bounds_output_and_context_without_low_quality_fast_lane() -> None:
+    legacy_fast = choose_route("Кратко объясни HTTP", "fast", 4096, 4096)
     work = choose_route("Проанализируй архитектуру API", "work", 4096, 4096)
     deep = choose_route("Проведи аудит безопасности", "deep", 4096, 4096)
-    assert fast.max_context_tokens <= 4096 and fast.max_output_tokens <= 448
-    assert work.max_context_tokens <= 4096 and work.max_output_tokens <= 768
-    assert deep.max_context_tokens <= 4096 and deep.max_output_tokens <= 1024
+
+    assert legacy_fast.mode == "work"
+    assert legacy_fast.max_context_tokens <= 4096 and legacy_fast.max_output_tokens <= 900
+    assert work.max_context_tokens <= 4096 and work.max_output_tokens <= 900
+    assert deep.max_context_tokens <= 4096 and deep.max_output_tokens <= 1200
 
 
 @pytest.mark.asyncio
