@@ -14,6 +14,8 @@ def _clean_audit() -> DeterministicAudit:
 def test_task_specific_answer_contracts_are_compact_and_actionable():
     assert classify_answer_kind("Напиши продающий текст для лендинга") == "writing"
     assert classify_answer_kind("Проведи SEO аудит сайта") == "audit"
+    assert classify_answer_kind("Проведи аудит статьи и найди слабые места") == "audit"
+    assert classify_answer_kind("Напиши сравнительную статью о двух подходах") == "writing"
     assert classify_answer_kind("Найди лучшую стоматологию в Москве") == "recommendation"
     writing = build_answer_contract("Напиши письмо клиенту").instruction
     audit = build_answer_contract("Проведи аудит сайта").instruction
