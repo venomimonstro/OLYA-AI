@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import AuthSession, User, UserEmailState
 from app.schemas.auth import AuthResponse, LoginRequest, MeResponse, PasswordResetConfirm, PasswordResetRequest, RegisterRequest, VerifyEmailRequest
+from app.services.admin_browser_session import clear_admin_browser_session, set_admin_browser_session
 from app.services.auth import create_session, get_current_user, hash_password, normalize_email, verify_password
 from app.services.auth_rate_limit import enforce_auth_rate_limit
 from app.services.owner_integrations import (
@@ -32,7 +33,7 @@ def _verification_required(db: Session) -> bool:
 
 
 @router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
-def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)) -> AuthResponse:
+def register(payload: RegisterRequest, request: Request, response: Response, db: Session = Depends(get_db)) -> AuthResponse:
     email = normalize_email(payload.email)
     enforce_auth_rate_limit(request, email=email, action="register", environment=request.app.state.settings.env)
     if db.scalar(select(User.id).where(User.email == email)) is not None:
@@ -63,15 +64,16 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
                 status_code=503,
                 detail={"code": "verification_delivery_failed", "message": "Account created, but the verification email could not be sent. Try resend shortly."},
             ) from exc
-        # Do not create a usable application session before email verification.
+        clear_admin_browser_session(response)
         return AuthResponse(access_token=None, user_id=user.id, verification_required=True, is_admin=False)
 
     token, _ = create_session(db, user)
+    set_admin_browser_session(response, request, token=token, is_admin=bool(user.is_admin))
     return AuthResponse(access_token=token, user_id=user.id, verification_required=False, is_admin=bool(user.is_admin))
 
 
 @router.post("/login", response_model=AuthResponse)
-def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)) -> AuthResponse:
+def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)) -> AuthResponse:
     email = normalize_email(payload.email)
     enforce_auth_rate_limit(request, email=email, action="login", environment=request.app.state.settings.env)
     user = db.scalar(select(User).where(User.email == email))
@@ -85,6 +87,7 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
             detail={"code": "email_verification_required", "message": "Confirm your email address before signing in."},
         )
     token, _ = create_session(db, user)
+    set_admin_browser_session(response, request, token=token, is_admin=bool(user.is_admin))
     return AuthResponse(access_token=token, user_id=user.id, verification_required=False, is_admin=bool(user.is_admin))
 
 
@@ -167,17 +170,18 @@ def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)) ->
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-def logout(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> None:
+def logout(response: Response, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> None:
     session_id = getattr(request.state, "auth_session_id", None)
     if session_id:
         session = db.get(AuthSession, session_id)
         if session and session.user_id == user.id and session.revoked_at is None:
             session.revoked_at = datetime.now(timezone.utc)
             db.commit()
+    clear_admin_browser_session(response)
 
 
 @router.post("/logout-all", status_code=status.HTTP_204_NO_CONTENT)
-def logout_all(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> None:
+def logout_all(response: Response, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> None:
     now = datetime.now(timezone.utc)
     db.execute(
         update(AuthSession)
@@ -185,3 +189,4 @@ def logout_all(user: User = Depends(get_current_user), db: Session = Depends(get
         .values(revoked_at=now)
     )
     db.commit()
+    clear_admin_browser_session(response)
