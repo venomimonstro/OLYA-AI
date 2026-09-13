@@ -79,13 +79,23 @@ def audit() -> dict:
     for token in ("UsageEvent.success.is_(True)", "request_mode = _inferred_channel(reserve_seconds)"):
         if token not in quota:
             errors.append({"code": "starter_request_unit_fairness_missing", "token": token})
-    if "starter_4k = deep_limit <= 4096" not in router or "max_output_tokens=1024 if starter_4k" not in router:
-        errors.append({"code": "starter_output_budget_missing"})
+
+    # Starter remains strictly bounded to the same 4096-token context and one
+    # active inference. Fast is retired as a quality lane, but Work/Deep output
+    # ceilings remain small enough for the 6 GB CPU/RAM deployment profile.
+    for token in (
+        "starter_4k = deep_limit <= 4096",
+        "max_output_tokens=1200 if starter_4k",
+        "(900 if work_reasoning else 760) if starter_4k",
+        'if requested_mode == "fast"',
+        'mode: Mode = "work"',
+    ):
+        if token not in router:
+            errors.append({"code": "starter_output_budget_missing", "token": token})
 
     # The quality pipeline is intentionally bounded on starter_6gb: one primary
     # generation plus, only for risky answers, an evidence-aware critic and at
-    # most one targeted repair. The old audit incorrectly required the former
-    # single-extra-pass implementation and rejected the current bounded design.
+    # most one targeted repair.
     for token in (
         'return 2 if self.repair_critic else 1',
         'critic_has_repairable_issue',
@@ -116,7 +126,7 @@ def audit() -> dict:
             errors.append({"code": "starter_runtime_audit_contract_missing", "token": token})
 
     return {
-        "format": "x1-starter-6gb-audit-v3",
+        "format": "x1-starter-6gb-audit-v4",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "target": {"cpu_cores": 4, "ram_gib": 6, "disk_gib": 80},
