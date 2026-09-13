@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from math import ceil
 import os
+import shutil
+from pathlib import Path
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -18,7 +20,6 @@ def percentile(values: list[int], p: float) -> int:
     return ordered[idx]
 
 
-
 def host_metrics() -> dict:
     out: dict = {}
     try:
@@ -29,6 +30,8 @@ def host_metrics() -> dict:
                 mem[key] = int(value.strip().split()[0])
         out["memory_total_mb"] = round(mem.get("MemTotal", 0) / 1024, 2)
         out["memory_available_mb"] = round(mem.get("MemAvailable", 0) / 1024, 2)
+        out["swap_total_mb"] = round(mem.get("SwapTotal", 0) / 1024, 2)
+        out["swap_free_mb"] = round(mem.get("SwapFree", 0) / 1024, 2)
     except (OSError, ValueError):
         pass
     try:
@@ -43,7 +46,20 @@ def host_metrics() -> dict:
         out.update({"load_1m": round(one, 3), "load_5m": round(five, 3), "load_15m": round(fifteen, 3)})
     except OSError:
         pass
+    try:
+        candidates = (Path("/app/data"), Path("./data"), Path("."))
+        disk_path = next((path for path in candidates if path.exists()), Path("."))
+        usage = shutil.disk_usage(disk_path)
+        total_gb = usage.total / 1024 / 1024 / 1024
+        free_gb = usage.free / 1024 / 1024 / 1024
+        out["disk_total_gb"] = round(total_gb, 2)
+        out["disk_free_gb"] = round(free_gb, 2)
+        out["disk_used_percent"] = round((usage.used / max(1, usage.total)) * 100.0, 2)
+        out["disk_safe"] = bool(free_gb >= 10.0 and (usage.free / max(1, usage.total)) >= 0.15)
+    except OSError:
+        pass
     return out
+
 
 def build_snapshot(db: Session, window_minutes: int = 60) -> PerformanceSnapshot:
     since = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
