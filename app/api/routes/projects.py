@@ -1,12 +1,12 @@
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import Project, ProjectFile, ProjectMember, User
+from app.models import Conversation, Project, ProjectFile, ProjectMember, User
 from app.schemas.projects import MemberResponse, MemberUpsert, ProjectCreate, ProjectResponse, ProjectUpdate
 from app.schemas.project_workspace import ProjectWorkspaceResponse
 from app.services.access import list_accessible_projects, project_role, require_project_role
@@ -82,14 +82,13 @@ def delete_project(project_id: str, user: User = Depends(get_current_user), db: 
     if role != "owner":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only project owner can delete the project")
 
-    # Capture paths before the DB cascade. Conversations are preserved because their
-    # project_id FK uses SET NULL; project files/chunks/memory are project-owned data.
     paths = [Path(value) for value in db.scalars(select(ProjectFile.storage_path).where(ProjectFile.project_id == project.id)).all() if value]
+    # Do this explicitly instead of relying only on FK SET NULL so behavior is the
+    # same in PostgreSQL and lightweight SQLite regression tests.
+    db.execute(update(Conversation).where(Conversation.project_id == project.id).values(project_id=None))
     db.delete(project)
     db.commit()
 
-    # Physical blobs are outside PostgreSQL and must be removed explicitly. Failure
-    # to unlink one stale path must not turn a successful DB deletion into a 500.
     for path in paths:
         try:
             if path.is_file():
