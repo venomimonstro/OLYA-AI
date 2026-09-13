@@ -23,7 +23,6 @@ def _first_by_created(db: Session, model, *criteria):
 
 
 def _lock_user(db: Session, user_id: str) -> None:
-    # Serializes onboarding creation/reconciliation with itself on PostgreSQL.
     db.execute(select(User.id).where(User.id == user_id).with_for_update())
 
 
@@ -62,12 +61,7 @@ def _event_once(
 
 
 def reconcile_onboarding(db: Session, user: User) -> UserOnboarding:
-    """Rebuild first-value milestones from authoritative persisted product facts.
-
-    This function is intentionally idempotent. If a process crashes after the
-    product action but before onboarding is observed, the next status request
-    reconstructs the missing milestone from durable rows.
-    """
+    """Rebuild first-value milestones from authoritative persisted product facts."""
     _lock_user(db, user.id)
     row = _state(db, user)
     changed = False
@@ -106,13 +100,7 @@ def reconcile_onboarding(db: Session, user: User) -> UserOnboarding:
         project = _first_by_created(db, Project, Project.owner_id == user.id)
         if project is not None:
             row.first_project_at = project.created_at
-            _event_once(
-                db,
-                user.id,
-                "first_project_created",
-                occurred_at=project.created_at,
-                project_id=project.id,
-            )
+            _event_once(db, user.id, "first_project_created", occurred_at=project.created_at, project_id=project.id)
             changed = True
 
     if row.first_file_at is None:
@@ -175,7 +163,8 @@ def reopen_onboarding(db: Session, user: User) -> UserOnboarding:
 
 
 def onboarding_payload(row: UserOnboarding) -> dict:
-    visible = bool(row.show_again or (row.completed_at is None and row.dismissed_at is None))
+    # Onboarding remains available from the account screen, but it never hijacks
+    # successful authentication. Login/register always land in the chat workspace.
     milestones = {
         "chat_started": row.first_chat_at,
         "successful_answer": row.first_successful_answer_at,
@@ -191,7 +180,7 @@ def onboarding_payload(row: UserOnboarding) -> dict:
     else:
         recommended = None
     return {
-        "visible": visible,
+        "visible": False,
         "completed": row.completed_at is not None,
         "dismissed": row.dismissed_at is not None and not row.show_again,
         "show_again": bool(row.show_again),
