@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     data_root: str = "./data"
-    server_optimization_profile: str = "optimal"
+    server_optimization_profile: str = "gigachat31_12gb"
     database_url: str = "sqlite+pysqlite:///./data/x1.db"
     database_pool_size: int = 8
     database_max_overflow: int = 4
@@ -24,15 +24,15 @@ class Settings(BaseSettings):
     database_idle_transaction_timeout_ms: int = 60000
 
     llama_base_url: str = "http://127.0.0.1:8080"
-    llama_model_name: str = "Qwen3-4B-Q4_K_M"
+    llama_model_name: str = "GigaChat3.1-10B-A1.8B-Q4_K_M"
     max_context_tokens: int = 4096
     deep_context_tokens: int = 4096
     max_concurrent_generations: int = 1
-    max_queue_size: int = 16
-    inference_max_queued_per_principal: int = 1
+    max_queue_size: int = 24
+    inference_max_queued_per_principal: int = 4
     inference_queue_timeout_seconds: float = 90.0
-    default_max_output_tokens: int = 768
-    request_timeout_seconds: int = 150
+    default_max_output_tokens: int = 1024
+    request_timeout_seconds: int = 180
     verification_max_extra_inferences: int = 1
 
     # Pre-DB overload lanes protect the small node before requests allocate DB
