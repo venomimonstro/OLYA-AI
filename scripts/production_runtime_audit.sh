@@ -21,20 +21,29 @@ else
   [ "$app_state" = "running" ] || mark_fail "app is not running"
 fi
 
-say "Checking app /health inside container"
-if ! docker compose exec -T app python - <<'PY'
+say "Waiting for app /health inside container"
+internal_ready=0
+for _ in $(seq 1 30); do
+  if docker compose exec -T app python - <<'PY' >/tmp/olya-app-health.$$ 2>/dev/null
 import json, urllib.request
-with urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4) as r:
+with urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2) as r:
     body=json.loads(r.read().decode())
     assert r.status == 200 and body.get('status') == 'ok', body
 print(json.dumps(body, ensure_ascii=False))
 PY
-then
-  mark_fail "internal app /health failed"
-fi
+  then
+    cat /tmp/olya-app-health.$$
+    internal_ready=1
+    break
+  fi
+  sleep 1
+done
+rm -f /tmp/olya-app-health.$$
+[ "$internal_ready" -eq 1 ] || mark_fail "internal app /health did not become ready within 30s"
 
-say "Checking app /ready inside container"
-if ! docker compose exec -T app python - <<'PY'
+if [ "$internal_ready" -eq 1 ]; then
+  say "Checking app /ready inside container"
+  if ! docker compose exec -T app python - <<'PY'
 import json, urllib.request, urllib.error
 try:
     with urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=8) as r:
@@ -45,8 +54,9 @@ except urllib.error.HTTPError as e:
     print(e.read().decode(errors='replace'))
     raise SystemExit(2)
 PY
-then
-  mark_fail "internal app /ready failed"
+  then
+    mark_fail "internal app /ready failed"
+  fi
 fi
 
 say "Checking published host port"
