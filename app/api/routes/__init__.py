@@ -8,6 +8,7 @@ policy apply consistently to normal chat, streaming chat and verification calls.
 from app.runtime_quality_patch import install_runtime_quality_patch
 from app.qwen4b_runtime_patch import install_qwen4b_runtime_patch
 from app.work_quality_floor_patch import install_work_quality_floor_patch
+from app.response_policy_patch import install_response_policy_patch
 from app.identity_patch import install_identity_patch
 from app.admin_surface_patch import install_admin_surface_patch
 from app.tester_access_patch import install_tester_access_patch
@@ -15,6 +16,7 @@ from app.tester_access_patch import install_tester_access_patch
 install_runtime_quality_patch()
 install_qwen4b_runtime_patch()
 install_work_quality_floor_patch()
+install_response_policy_patch()
 install_identity_patch()
 install_admin_surface_patch()
 install_tester_access_patch()
