@@ -38,7 +38,7 @@ free_gb=$(df -Pk "$ROOT" | awk 'NR==2 {print int($4/1024/1024)}')
 (( free_gb >= 6 )) || fail "At least 6 GB free disk is required after the model is already present; found ${free_gb} GB"
 
 bash -n scripts/migrate_gigachat31_12gb.sh
-python3 -m py_compile scripts/gigachat31_runtime_audit.py scripts/download_model.py
+python3 -m py_compile scripts/gigachat31_runtime_audit.py scripts/download_model.py scripts/warm_local_llm.py
 docker compose config --quiet
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -121,6 +121,15 @@ for _ in $(seq 1 90); do
 done
 [ "$ready" -eq 1 ] || { docker compose logs --tail=160 llama >&2 || true; fail "GigaChat llama.cpp did not become healthy"; }
 
+info "Waiting for application warm-up and health"
+app_ready=0
+for _ in $(seq 1 90); do
+  status=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$(docker compose ps -q app)" 2>/dev/null || true)
+  if [ "$status" = "healthy" ]; then app_ready=1; break; fi
+  sleep 2
+done
+[ "$app_ready" -eq 1 ] || { docker compose logs --tail=220 app >&2 || true; fail "Application did not become healthy after LLM warm-up"; }
+
 info "Verifying model artifact inside host storage"
 python3 scripts/download_model.py --profile primary --verify-only
 
@@ -131,5 +140,5 @@ info "Running core answer-pipeline sanity checks"
 docker compose exec -T app python -m scripts.answer_pipeline_audit
 
 trap - ERR INT TERM
-info "GigaChat 3.1 migration completed successfully (RAM=${ram_gib}GiB, cpu=${cores}, threads=${threads}, context=4096, llama_limit=8g, cpu_moe=on)"
+info "GigaChat 3.1 migration completed successfully (RAM=${ram_gib}GiB, cpu=${cores}, threads=${threads}, context=4096, llama_limit=8g, cpu_moe=on, warmup=on)"
 info "Rollback env retained at: $backup"
