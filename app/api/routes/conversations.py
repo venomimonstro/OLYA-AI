@@ -15,6 +15,9 @@ from app.services.auth import get_current_user
 router = APIRouter(prefix="/v1/conversations", tags=["conversations"])
 install_chat_management_ui()
 
+_PIN_KIND = "ui"
+_PIN_KEY = "pinned"
+
 
 class ConversationMemoryResponse(BaseModel):
     id: str
@@ -65,6 +68,59 @@ def _conversation(db: Session, user: User, conversation_id: str, *, write: bool 
     return conversation
 
 
+def _pin_map(db: Session, ids: list[str]) -> dict[str, bool]:
+    if not ids:
+        return {}
+    rows = db.execute(
+        select(ConversationMemory.conversation_id, ConversationMemory.value).where(
+            ConversationMemory.conversation_id.in_(ids),
+            ConversationMemory.kind == _PIN_KIND,
+            ConversationMemory.memory_key == _PIN_KEY,
+        )
+    ).all()
+    return {str(cid): str(value).strip().lower() in {"1", "true", "yes", "on"} for cid, value in rows}
+
+
+def _response(conversation: Conversation, pinned: bool = False) -> ConversationResponse:
+    return ConversationResponse(
+        id=conversation.id,
+        project_id=conversation.project_id,
+        title=conversation.title,
+        pinned=bool(pinned),
+        created_at=conversation.created_at,
+        updated_at=conversation.updated_at,
+    )
+
+
+def _set_pinned(db: Session, conversation: Conversation, pinned: bool) -> None:
+    row = db.scalar(
+        select(ConversationMemory).where(
+            ConversationMemory.conversation_id == conversation.id,
+            ConversationMemory.kind == _PIN_KIND,
+            ConversationMemory.memory_key == _PIN_KEY,
+        )
+    )
+    if pinned:
+        if row is None:
+            db.add(
+                ConversationMemory(
+                    conversation_id=conversation.id,
+                    project_id=conversation.project_id,
+                    kind=_PIN_KIND,
+                    memory_key=_PIN_KEY,
+                    value="1",
+                    keywords=["pinned"],
+                    source_role="system",
+                    confidence=1.0,
+                )
+            )
+        else:
+            row.value = "1"
+            row.project_id = conversation.project_id
+    elif row is not None:
+        db.delete(row)
+
+
 @router.post("", response_model=ConversationResponse, status_code=status.HTTP_201_CREATED)
 def create_conversation(
     payload: ConversationCreate,
@@ -79,7 +135,7 @@ def create_conversation(
     db.add(conversation)
     db.commit()
     db.refresh(conversation)
-    return ConversationResponse.model_validate(conversation, from_attributes=True)
+    return _response(conversation, False)
 
 
 @router.get("", response_model=list[ConversationResponse])
@@ -102,8 +158,10 @@ def list_conversations(
         stmt = select(Conversation).where(Conversation.owner_id == user.id, Conversation.project_id.is_(None))
     if before is not None:
         stmt = stmt.where(Conversation.updated_at < before)
-    stmt = stmt.order_by(Conversation.updated_at.desc()).limit(limit)
-    return [ConversationResponse.model_validate(item, from_attributes=True) for item in db.scalars(stmt).all()]
+    rows = list(db.scalars(stmt.order_by(Conversation.updated_at.desc()).limit(limit)).all())
+    pins = _pin_map(db, [row.id for row in rows])
+    rows.sort(key=lambda row: (not pins.get(row.id, False), -row.updated_at.timestamp()))
+    return [_response(item, pins.get(item.id, False)) for item in rows]
 
 
 @router.patch("/{conversation_id}", response_model=ConversationResponse)
@@ -130,9 +188,12 @@ def update_conversation(
             if target_project_id:
                 require_project_role(db, user, target_project_id, "member")
             conversation.project_id = target_project_id
+    if "pinned" in changes and changes["pinned"] is not None:
+        _set_pinned(db, conversation, bool(changes["pinned"]))
     db.commit()
     db.refresh(conversation)
-    return ConversationResponse.model_validate(conversation, from_attributes=True)
+    pinned = bool(_pin_map(db, [conversation.id]).get(conversation.id, False))
+    return _response(conversation, pinned)
 
 
 @router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -178,7 +239,10 @@ def list_conversation_memory(
 ) -> list[ConversationMemoryResponse]:
     _private(response)
     conversation = _conversation(db, user, conversation_id)
-    stmt = select(ConversationMemory).where(ConversationMemory.conversation_id == conversation.id)
+    stmt = select(ConversationMemory).where(
+        ConversationMemory.conversation_id == conversation.id,
+        ConversationMemory.kind != _PIN_KIND,
+    )
     if not include_summary:
         stmt = stmt.where(ConversationMemory.kind != "summary")
     rows = db.scalars(stmt.order_by(ConversationMemory.updated_at.desc()).limit(250)).all()
@@ -194,7 +258,7 @@ def delete_conversation_memory(
 ) -> None:
     conversation = _conversation(db, user, conversation_id, write=True)
     item = db.get(ConversationMemory, memory_id)
-    if item is None or item.conversation_id != conversation.id:
+    if item is None or item.conversation_id != conversation.id or item.kind == _PIN_KIND:
         raise HTTPException(status_code=404, detail="Conversation memory not found")
     db.delete(item)
     db.commit()
@@ -207,5 +271,10 @@ def clear_conversation_memory(
     db: Session = Depends(get_db),
 ) -> None:
     conversation = _conversation(db, user, conversation_id, write=True)
-    db.execute(delete(ConversationMemory).where(ConversationMemory.conversation_id == conversation.id))
+    db.execute(
+        delete(ConversationMemory).where(
+            ConversationMemory.conversation_id == conversation.id,
+            ConversationMemory.kind != _PIN_KIND,
+        )
+    )
     db.commit()
