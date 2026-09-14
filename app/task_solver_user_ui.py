@@ -9,6 +9,7 @@ from app.user_ui import workspace as _workspace
 from app.workspace_client_v4 import enhance_workspace_v4
 from app.workspace_reliability_v5 import enhance_workspace_reliability_v5
 from app.quality_levels_ui import enhance_quality_levels
+from app.workspace_premium_v6 import enhance_workspace_premium_v6
 
 router = APIRouter(tags=["user-workspace"])
 
@@ -63,6 +64,7 @@ def workspace(db: Session = Depends(get_db)) -> HTMLResponse:
     document = enhance_workspace_v4(document)
     document = enhance_workspace_reliability_v5(document)
     document = enhance_quality_levels(document)
+    document = enhance_workspace_premium_v6(document)
 
     response = HTMLResponse(document, status_code=base.status_code)
     for key, value in base.headers.items():
