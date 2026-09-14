@@ -12,13 +12,13 @@ def _is_gigachat31() -> bool:
 
 
 def install_gigachat31_runtime_patch() -> None:
-    """Use a native GigaChat 3.1 payload instead of Qwen thinking controls.
+    """Use the native GigaChat 3.1 OpenAI-compatible generation contract.
 
-    GigaChat 3.1 Lightning ships its own Jinja chat template in GGUF and is
-    served through llama.cpp's OpenAI-compatible endpoint. Qwen-specific
-    ``enable_thinking``/``reasoning_format`` fields are intentionally omitted.
-    The product's Simple/Medium/High modes still control output budget and the
-    reasoning flag, but private chain-of-thought is never requested or exposed.
+    GigaChat 3.1 ships its own Jinja chat template in GGUF. Qwen-specific
+    thinking controls must not be sent to it. The official GigaChat 3.1 model
+    card demonstrates chat inference with temperature=0; OLYA therefore uses
+    deterministic decoding for answer stability. Product Simple/Medium/High
+    still control context/output budgets upstream, not sampling randomness.
     """
     if not _is_gigachat31():
         return
@@ -28,23 +28,21 @@ def install_gigachat31_runtime_patch() -> None:
         return
 
     def sampling(reasoning: bool) -> dict:
-        # Conservative sampling prioritises factual stability. High/Medium still
-        # receive a larger response budget upstream; a small temperature lift on
-        # reasoning tasks avoids making longer synthesis unnaturally rigid.
+        _ = reasoning
         return {
-            "temperature": 0.45 if reasoning else 0.30,
-            "top_p": 0.90,
-            "top_k": 40,
-            "min_p": 0.02,
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "top_k": 0,
+            "min_p": 0.0,
             "presence_penalty": 0.0,
-            "repeat_penalty": 1.05,
+            "repeat_penalty": 1.0,
         }
 
     def payload(self, messages, *, max_tokens: int, reasoning: bool) -> dict:
         return {
             "model": "local",
             "messages": [message.model_dump() for message in messages],
-            "max_tokens": max(64, int(max_tokens)),
+            "max_tokens": max(32, int(max_tokens)),
             "stream": True,
             **sampling(bool(reasoning)),
         }
