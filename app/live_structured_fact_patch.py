@@ -6,8 +6,9 @@ def install_live_structured_fact_patch() -> None:
 
     smart_chat imports ``is_currency_rate_question``/``resolve_structured_fact``
     from app.services.structured_facts. Installing this patch before route modules
-    bind those names lets the same proven fast lane cover crypto, weather and
-    local time without duplicating the chat orchestrator.
+    bind those names lets the same proven fast lane cover fiat FX, the Bank of
+    Russia key rate, crypto quotes, weather and local time without duplicating
+    the chat orchestrator.
     """
     from app.services import structured_facts as legacy
     from app.services import live_structured_facts as live
@@ -20,6 +21,7 @@ def install_live_structured_fact_patch() -> None:
     def is_live_candidate(question: str) -> bool:
         return bool(
             current_detector(question)
+            or live.is_key_rate_question(question)
             or live.is_crypto_price_question(question)
             or live.is_weather_question(question)
             or live.is_local_time_question(question)
