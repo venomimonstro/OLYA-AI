@@ -13,6 +13,7 @@ from app.chat_reliability_patch import install_chat_reliability_patch
 from app.response_policy_patch import install_response_policy_patch
 from app.fresh_search_policy_patch import install_fresh_search_policy_patch
 from app.current_fact_evidence_guard import install_current_fact_evidence_guard
+from app.testing_unlimited_usage_patch import install_testing_unlimited_usage_patch
 from app.identity_patch import install_identity_patch
 from app.admin_surface_patch import install_admin_surface_patch
 from app.tester_access_patch import install_tester_access_patch
@@ -25,6 +26,7 @@ install_chat_reliability_patch()
 install_response_policy_patch()
 install_fresh_search_policy_patch()
 install_current_fact_evidence_guard()
+install_testing_unlimited_usage_patch()
 install_identity_patch()
 install_admin_surface_patch()
 install_tester_access_patch()
