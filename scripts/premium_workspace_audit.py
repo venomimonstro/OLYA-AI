@@ -5,7 +5,6 @@ import asyncio
 import json
 from pathlib import Path
 
-# Production bootstrap installs the structured ResourceGovernor bypass.
 import app.api.routes  # noqa: F401
 from app.services.interactive_evidence import InteractiveEvidence, reset_interactive_evidence, set_interactive_evidence
 from app.services.resource_governor import ResourceGovernor
@@ -16,8 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 async def _concurrency_checks(errors: list[str]) -> dict:
-    # A second normal model-backed chat should wait, not be rejected. The model
-    # still remains single-concurrency on the starter node.
     user_governor = UserResourceGovernor(max_waiting_per_user=3)
     first_ready = asyncio.Event(); release_first = asyncio.Event(); second_ready = asyncio.Event()
 
@@ -40,8 +37,6 @@ async def _concurrency_checks(errors: list[str]) -> dict:
     await asyncio.wait_for(second_ready.wait(), timeout=1.0)
     await asyncio.gather(first_task, second_task)
 
-    # A structured fact already resolved from external data never calls llama.cpp,
-    # therefore it must bypass an occupied ResourceGovernor rather than waiting.
     global_governor = ResourceGovernor(max_concurrent=1, max_queue=0, wait_timeout_seconds=1.0)
     model_ready = asyncio.Event(); release_model = asyncio.Event()
 
@@ -79,6 +74,7 @@ def audit() -> dict:
     errors: list[str] = []
     source = (ROOT / "app" / "workspace_premium_v6.py").read_text("utf-8")
     installer = (ROOT / "app" / "task_solver_user_ui.py").read_text("utf-8")
+    draft_patch = (ROOT / "app" / "workspace_parallel_draft_patch.py").read_text("utf-8")
 
     fixture = '''<!doctype html><html><head><style nonce="testnonce"></style></head><body>
 <div id="view-chat"></div><textarea id="prompt"></textarea><button id="send"></button>
@@ -109,10 +105,15 @@ def audit() -> dict:
 
     if "enhance_workspace_premium_v6(document)" not in installer:
         errors.append("premium_workspace_not_installed")
+    if "enhance_parallel_draft_safety(document)" not in installer:
+        errors.append("parallel_draft_safety_not_installed")
     quality_pos = installer.find("enhance_quality_levels(document)")
     premium_pos = installer.find("enhance_workspace_premium_v6(document)")
-    if quality_pos < 0 or premium_pos <= quality_pos:
-        errors.append("premium_layer_must_be_last")
+    draft_pos = installer.find("enhance_parallel_draft_safety(document)")
+    if quality_pos < 0 or premium_pos <= quality_pos or draft_pos <= premium_pos:
+        errors.append("workspace_enhancer_order_invalid")
+    if "if(nextText.trim()&&typeof saveDraft==='function')saveDraft()" not in draft_patch:
+        errors.append("next_prompt_draft_not_resaved_after_answer")
 
     premium_submit_start = source.find("async function premiumSubmit")
     premium_submit_end = source.find("async function stopPremiumRun", premium_submit_start)
@@ -130,7 +131,7 @@ def audit() -> dict:
 
     concurrency = asyncio.run(_concurrency_checks(errors))
     return {
-        "format": "olya-premium-workspace-audit-v2",
+        "format": "olya-premium-workspace-audit-v3",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "premium_ui": True,
@@ -138,6 +139,7 @@ def audit() -> dict:
         "parallel_chat_jobs": "const runs=new Map()" in rendered,
         "composer_stays_editable": "setBusy(" not in premium_submit if premium_submit else False,
         "composer_auto_grow": "resizeComposer" in rendered,
+        "next_prompt_draft_safe": "saveDraft()" in draft_patch,
         "background_run_recovery": "olya_parallel_runs_v1" in rendered,
         "server_concurrency": concurrency,
         "model_decode_concurrency": "unchanged_safe_limit",
