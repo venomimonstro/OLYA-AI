@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from app.services.atomic_fact_latency_patch import is_stable_atomic_fact
+from app.atomic_fact_latency_patch import is_stable_atomic_fact
 
 _HIGH_RISK = re.compile(
     r"\b(?:аудит\s+безопасност|уязвим|security\s+audit|production\s+incident|"
@@ -20,9 +20,6 @@ def _hard_failure(deterministic) -> bool:
     for item in getattr(deterministic, "checks", ()):
         if item.get("status") != "failed":
             continue
-        # These are genuine output-contract failures worth repairing. Evidence
-        # warnings alone must never trigger another full local-model pass for a
-        # normal chat question.
         key = str(item.get("key") or "")
         if key == "non_empty" or key == "no_placeholders" or key.startswith("requirement_") or key.startswith("scope_"):
             return True
@@ -39,13 +36,11 @@ def _simple_interactive(text: str, requirements) -> bool:
 
 
 def install_interactive_verification_policy_patch() -> None:
-    """Avoid critic/repair cascades for normal interactive chat.
+    """Keep ordinary interactive chat to one LLM pass at most.
 
-    On a CPU-only node a critic plus repair can triple latency and can even
-    reintroduce hallucinations after the evidence pipeline produced a correct
-    answer. Normal/atomic questions therefore use one primary inference at most;
-    server-side evidence and deterministic checks own factual correctness.
-    Complex explicitly high-risk work retains the original conditional verifier.
+    Server-side evidence/deterministic gates own factual correctness for normal
+    and atomic questions. Expensive critic/repair inference is reserved for
+    genuinely high-risk work or explicit strict verification.
     """
     from app.services import conditional_verification as cv
 
@@ -69,9 +64,7 @@ def install_interactive_verification_policy_patch() -> None:
             answer=answer,
             deterministic=deterministic,
         )
-        if verification == "strict":
-            return plan
-        if _hard_failure(deterministic):
+        if verification == "strict" or _hard_failure(deterministic):
             return plan
 
         atomic = is_stable_atomic_fact(user_text)
