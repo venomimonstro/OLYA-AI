@@ -38,7 +38,14 @@ free_gb=$(df -Pk "$ROOT" | awk 'NR==2 {print int($4/1024/1024)}')
 (( free_gb >= 6 )) || fail "At least 6 GB free disk is required after the model is already present; found ${free_gb} GB"
 
 bash -n scripts/migrate_gigachat31_12gb.sh
-python3 -m py_compile scripts/gigachat31_runtime_audit.py scripts/download_model.py scripts/warm_local_llm.py
+python3 -m py_compile \
+  scripts/gigachat31_runtime_audit.py \
+  scripts/answer_pipeline_audit.py \
+  scripts/download_model.py \
+  scripts/warm_local_llm.py \
+  app/high_risk_verification_patch.py \
+  app/market_freshness_patch.py \
+  app/services/freshness.py
 docker compose config --quiet
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
