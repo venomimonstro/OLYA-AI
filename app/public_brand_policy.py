@@ -6,7 +6,10 @@ from fastapi.responses import HTMLResponse
 
 # Backend model/vendor names are implementation details. OLYA is the product;
 # user-facing HTML must not expose the underlying inference vendor/model family.
-_VENDOR_RE = re.compile(r"\bQwen(?:[\w.\- ]*)?\b", re.IGNORECASE)
+_VENDOR_RE = re.compile(
+    r"\bQwen(?:\d+(?:\.\d+)?(?:-[A-Za-z0-9_.-]+)*)?\b",
+    re.IGNORECASE,
+)
 
 
 def sanitize_public_branding(document: str) -> str:
