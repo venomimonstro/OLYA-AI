@@ -2,13 +2,12 @@ from __future__ import annotations
 
 
 def install_source_metadata_patch() -> None:
-    """Keep primary answer citations aligned with evidence actually fetched.
+    """Expose only evidence that actually grounded the answer.
 
-    Fast web grounding may retain search-only candidates internally for discovery
-    diagnostics. They must not be presented to the user as sources that grounded
-    the final answer unless the page itself was successfully fetched and became a
-    ResearchSource snapshot. Full/deep solver sources predate the `verified`
-    marker and are already fetched snapshots, so they are preserved unchanged.
+    Fetched snapshots remain the strongest evidence. For trivial current-role
+    lookups, an explicitly confirmed live search row from the canonical official
+    domain may also ground the deterministic answer when that site blocks HTML
+    fetching. Ordinary search-only candidates stay hidden.
     """
     from app.services.task_solver import TaskExecution
 
@@ -19,10 +18,14 @@ def install_source_metadata_patch() -> None:
     def public_metadata(self) -> dict:
         payload = current(self)
         rows = list(payload.get("sources") or [])
-        if any(isinstance(row, dict) and "verified" in row for row in rows):
-            verified = [row for row in rows if isinstance(row, dict) and row.get("verified") is True]
-            payload["sources"] = verified
-            payload["verified_sources"] = len(verified)
+        if any(isinstance(row, dict) and ("verified" in row or "search_confirmed" in row) for row in rows):
+            grounded = [
+                row for row in rows
+                if isinstance(row, dict) and (row.get("verified") is True or row.get("search_confirmed") is True)
+            ]
+            payload["sources"] = grounded
+            payload["verified_sources"] = sum(1 for row in grounded if row.get("verified") is True)
+            payload["search_confirmed_sources"] = sum(1 for row in grounded if row.get("search_confirmed") is True)
             payload["search_candidates"] = len(rows)
         return payload
 
