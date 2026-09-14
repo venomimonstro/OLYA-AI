@@ -32,7 +32,6 @@ class SearxngDiscovery:
         by_url: dict[str, SearchHit] = {}
         providers: dict[str, list[str]] = {}
         order: list[str] = []
-        # Round-robin keeps one prolific engine from dominating the first page.
         max_len = max((len(rows) for rows in per_engine.values()), default=0)
         engines = [name for name in SearxngDiscovery.general_engines if name in per_engine]
         for index in range(max_len):
@@ -81,8 +80,10 @@ class SearxngDiscovery:
         _ = country
         count = min(max(int(count), 1), 20)
         loop = asyncio.get_running_loop()
-        global_budget = min(self.timeout_seconds, 5.5)
-        per_engine_timeout = min(self.timeout_seconds, 4.5)
+        # Interactive current facts should not wait on the tail of blocked
+        # engines. Two useful engines are enough; slower engines are cancelled.
+        global_budget = min(self.timeout_seconds, 3.5)
+        per_engine_timeout = min(self.timeout_seconds, 3.0)
         deadline = loop.time() + global_budget
         results: dict[str, list[SearchHit]] = {}
 
@@ -137,7 +138,7 @@ class SearxngDiscovery:
                         break
                     done, pending = await asyncio.wait(
                         pending,
-                        timeout=min(0.65, remaining),
+                        timeout=min(0.45, remaining),
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in done:
@@ -148,9 +149,9 @@ class SearxngDiscovery:
                         if hits:
                             results[engine] = hits
                     merged = self._merge_hits(results, limit=count)
-                    # Two independent engines and a useful result set are enough
-                    # for interactive chat. Do not wait for CAPTCHA-bound engines.
-                    if len(results) >= 2 and len(merged) >= min(count, 6):
+                    # Two independent engines with a usable first page are the
+                    # normal interactive success condition.
+                    if len(results) >= 2 and len(merged) >= min(count, 5):
                         break
                     if len(results) >= 3 and merged:
                         break
