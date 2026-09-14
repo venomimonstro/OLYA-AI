@@ -9,7 +9,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def audit() -> dict:
     source = (ROOT / "app" / "workspace_client_v3.py").read_text("utf-8")
-    spec = (ROOT / "docs" / "CLIENT_WORKSPACE_UX_V3.md").read_text("utf-8")
     errors: list[dict] = []
 
     required_source = {
@@ -41,23 +40,16 @@ def audit() -> dict:
         if token not in source:
             errors.append({"code": code, "missing": token})
 
-    required_spec = (
-        "единственный прокручиваемый контейнер сообщений",
-        "Простая / Средняя / Сложная",
-        "перестаёт тянуть его вниз",
-        "кнопка `↑` превращается в `■`",
-        "Mobile keyboard",
-    )
-    for token in required_spec:
-        if token not in spec:
-            errors.append({"code": "spec_contract_missing", "missing": token})
-
+    # This audit intentionally depends only on files shipped in the production
+    # image. Human-readable UX documentation is useful during development, but
+    # a missing /app/docs directory must never make an operator health check fail.
     return {
         "format": "olya-client-workspace-ux-v3",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "simulated_personas": 6,
-        "contracts": len(required_source) + len(required_spec),
+        "contracts": len(required_source),
+        "production_safe": True,
     }
 
 
