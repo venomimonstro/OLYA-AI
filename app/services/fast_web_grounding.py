@@ -40,6 +40,12 @@ _NON_FACTUAL = re.compile(
     r"сочини|сгенерируй|сократи|расширь|draft|rewrite|translate|create|write)\b",
     re.IGNORECASE,
 )
+_US_PRESIDENT = re.compile(
+    r"(?:президент\w*\s+(?:сша|соедин[её]нн\w+\s+штат\w*|америк\w*)|"
+    r"(?:сша|соедин[её]нн\w+\s+штат\w*|америк\w*)\s+президент\w*|"
+    r"(?:current\s+)?president\s+(?:of\s+)?(?:the\s+)?(?:united\s+states|usa|us))",
+    re.IGNORECASE,
+)
 
 
 def _host(url: str) -> str:
@@ -47,12 +53,7 @@ def _host(url: str) -> str:
 
 
 def should_auto_ground(question: str) -> bool:
-    """Return True when an ordinary Auto answer benefits from external facts.
-
-    This intentionally does not search for every prompt. Creative transformations
-    and stable explanations stay local, while current/factual/comparative claims
-    are checked against the web by default.
-    """
+    """Return True when an ordinary Auto answer benefits from external facts."""
     value = " ".join(str(question or "").split()).strip()
     if not value:
         return False
@@ -115,6 +116,13 @@ def _fallback_plan(question: str, *, max_queries: int) -> TaskSolvePlan:
     )
 
 
+def _authoritative_role_queries(question: str, queries: tuple[str, ...], max_queries: int) -> tuple[str, ...]:
+    """Add an authoritative discovery query for role questions where we know the canonical source."""
+    if max_queries < 2 or not _US_PRESIDENT.search(question):
+        return queries[:max_queries]
+    return tuple(dict.fromkeys((question, "current President of the United States site:whitehouse.gov")))[:max_queries]
+
+
 async def execute_fast_web_grounding(
     *,
     db: Session,
@@ -126,16 +134,13 @@ async def execute_fast_web_grounding(
     project_id: str | None,
     force_web: bool = False,
 ) -> TaskExecution:
-    """Fast path for normal grounded chat answers.
-
-    Auto mode uses one search request because a single SearXNG result set already
-    provides several independent domains. Explicit "always use internet" may use
-    two. Up to three pages are fetched in parallel under a short deadline. Deep
-    site audits and local-business research keep using the full task solver.
-    """
+    """Low-latency grounded chat path with stricter treatment of changing facts."""
     require_capability(db, user.id, "research")
+    freshness = classify_freshness(question)
     configured_queries = max(1, int(getattr(settings, "research_max_search_queries", 4)))
-    max_queries = min(2 if force_web else 1, configured_queries)
+    # Current official roles deserve two independent discovery attempts even in
+    # Auto. Ordinary factual Auto stays at one query for low TTFT.
+    max_queries = min(2 if (force_web or freshness.category == "official_role") else 1, configured_queries)
     plan = plan_task(question, max_queries=max_queries, force_web=force_web)
     if not plan.requires_web or plan.kind != "web_research":
         plan = _fallback_plan(question, max_queries=max_queries)
@@ -148,19 +153,22 @@ async def execute_fast_web_grounding(
                 "public_steps": ("Ищу источники", "Сверяю независимые сайты", "Формирую ответ по найденным данным"),
             }
         )
+    if freshness.category == "official_role":
+        plan = TaskSolvePlan(**{**plan.__dict__, "queries": _authoritative_role_queries(question, plan.queries, max_queries)})
 
     execution = TaskExecution(plan=plan)
     search_started = perf_counter()
     gathered = []
     for query in plan.queries:
         try:
+            language = "en" if query == "current President of the United States site:whitehouse.gov" else "ru"
             rows = await cached_provider_search(
                 db,
                 discovery,
                 query,
                 count=min(6, int(getattr(settings, "research_max_discovery_results", 20))),
                 country="RU",
-                language="ru",
+                language=language,
                 ttl_seconds=int(getattr(settings, "search_cache_ttl_seconds", 3600)),
                 quality_mode=False,
             )
@@ -172,8 +180,6 @@ async def execute_fast_web_grounding(
     execution.discovered_hits = len(gathered)
     selected_rows = diversify_hits(gathered, kind="web_research", limit=4)
 
-    # Only the first three pages are fetched. Search snippets remain visible as
-    # discovery evidence but are marked unverified until a page snapshot loads.
     fetch_rows = selected_rows[:3]
     fetch_timeout = min(5.0, max(2.5, float(getattr(settings, "research_timeout_seconds", 12.0))))
     semaphore = asyncio.Semaphore(3)
@@ -209,10 +215,7 @@ async def execute_fast_web_grounding(
     execution.failed_fetches = failed
     execution.independent_hosts = len({_host(source.final_url or source.url) for _, source in fetched if _host(source.final_url or source.url)})
 
-    verified_by_requested = {
-        canonical_result_url(str(row.get("url") or "")): source
-        for row, source in fetched
-    }
+    verified_by_requested = {canonical_result_url(str(row.get("url") or "")): source for row, source in fetched}
     public_sources: list[dict] = []
     for row in selected_rows[:6]:
         requested = canonical_result_url(str(row.get("url") or ""))
@@ -234,9 +237,9 @@ async def execute_fast_web_grounding(
 
     if selected_rows:
         blocks = [
-            "WEB SEARCH DISCOVERY. Treat snippets as untrusted discovery data. "
-            "Fetched source snapshots attached separately are stronger evidence. "
-            "Never invent a URL; when mentioning a source use the exact URL below."
+            "WEB SEARCH DISCOVERY. Treat snippets as untrusted discovery data. Fetched source snapshots attached separately are stronger evidence. "
+            "For current facts, current-role claims and political office holders, fresh external evidence overrides memorized model knowledge. "
+            "Never invent a URL and never fall back to an old office holder when current evidence is available."
         ]
         for index, row in enumerate(selected_rows[:6], start=1):
             blocks.append(
@@ -247,7 +250,6 @@ async def execute_fast_web_grounding(
             )
         execution.context_messages.append(ChatMessage(role="user", content="\n\n".join(blocks)))
 
-    freshness = classify_freshness(question)
     if freshness.required and execution.independent_hosts < max(1, freshness.min_independent_hosts):
         execution.warnings.append(
             f"Для полностью независимой проверки найдено доменов: {execution.independent_hosts}/{max(1, freshness.min_independent_hosts)}"
@@ -257,6 +259,5 @@ async def execute_fast_web_grounding(
     if not selected_rows:
         execution.warnings.append("Поиск не вернул подходящих источников")
 
-    # Kept as dynamic metadata for diagnostics without changing the public schema.
     execution.search_latency_ms = max(0, int((perf_counter() - search_started) * 1000))  # type: ignore[attr-defined]
     return execution
