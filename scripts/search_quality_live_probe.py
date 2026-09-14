@@ -18,18 +18,21 @@ CASES = (
         "language": "en",
         "required_host": "whitehouse.gov",
         "expected_terms": ("president", "administration", "white house"),
+        "min_domains": 1,
     },
     {
         "query": "кто написал мастер и маргарита Булгаков",
         "language": "ru",
         "required_host": "",
         "expected_terms": ("булгаков", "мастер", "маргарита"),
+        "min_domains": 2,
     },
     {
         "query": "latest Python version site:python.org",
         "language": "en",
         "required_host": "python.org",
         "expected_terms": ("python", "download", "release"),
+        "min_domains": 1,
     },
 )
 
@@ -78,16 +81,24 @@ async def one(discovery: SearxngDiscovery, case: dict) -> dict:
     required_host = str(case["required_host"])
     host_pass = any(_host_ok(str(row.get("domain") or ""), required_host) for row in selected) if required_host else True
     lexical_pass = any(row.get("term_hits") for row in selected)
-    # site: queries must actually return that site. General entity queries need
-    # lexical evidence rather than merely any HTTP result.
-    ok = bool(selected) and host_pass and lexical_pass
+    domains = {str(row.get("domain") or "") for row in selected if row.get("domain")}
+    min_domains = max(1, int(case.get("min_domains") or 1))
+    diversity_pass = len(domains) >= min_domains
+    ok = bool(selected) and host_pass and lexical_pass and diversity_pass
     return {
         "query": query,
         "ok": ok,
         "elapsed_ms": int((perf_counter() - started) * 1000),
         "raw_results": len(hits),
         "selected": selected,
-        "checks": {"required_host": required_host, "host_pass": host_pass, "lexical_pass": lexical_pass},
+        "checks": {
+            "required_host": required_host,
+            "host_pass": host_pass,
+            "lexical_pass": lexical_pass,
+            "independent_domains": len(domains),
+            "min_domains": min_domains,
+            "diversity_pass": diversity_pass,
+        },
     }
 
 
@@ -97,7 +108,7 @@ async def main_async() -> int:
     rows = await asyncio.gather(*(one(discovery, case) for case in CASES))
     errors = [row["query"] for row in rows if not row.get("ok")]
     result = {
-        "format": "olya-search-quality-live-probe-v2",
+        "format": "olya-search-quality-live-probe-v3",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "cases": rows,
