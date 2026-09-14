@@ -25,6 +25,10 @@ _VERIFIED_BLOCK = re.compile(
     r"\[VERIFIED SOURCE\s+\d+\](.*?)(?=\n\n\[VERIFIED SOURCE\s+\d+\]|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
+_SEARCH_BLOCK = re.compile(
+    r"\[SEARCH\s+\d+\](.*?)(?=\n\n\[SEARCH\s+\d+\]|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 _ROLE_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     "president": (
@@ -66,6 +70,28 @@ def _verified_blocks(messages: list[ChatMessage]) -> list[str]:
     return [block for block in blocks if block]
 
 
+def _confirmed_search_blocks(messages: list[ChatMessage]) -> list[str]:
+    """Accept only explicitly confirmed official-domain search rows.
+
+    This path exists so a live Google/Yandex/Bing/etc result from an official
+    administration page can answer a trivial current-role lookup even when that
+    page blocks our HTML fetcher. Arbitrary search snippets are never promoted.
+    """
+    blocks: list[str] = []
+    for message in messages:
+        text = str(message.content or "")
+        if "WEB SEARCH DISCOVERY" not in text or "search_confirmed=1" not in text:
+            continue
+        for match in _SEARCH_BLOCK.finditer(text):
+            block = match.group(1).strip()
+            if "search_confirmed=1" not in block:
+                continue
+            if not re.search(r"URL:\s*https://(?:www\.)?whitehouse\.gov/administration(?:/|\b)", block, re.IGNORECASE):
+                continue
+            blocks.append(block)
+    return blocks
+
+
 def _role_kind(question: str) -> str | None:
     q = question.casefold()
     if "президент" in q or "president" in q:
@@ -79,8 +105,6 @@ def _role_kind(question: str) -> str | None:
 
 def _clean_candidate(value: str) -> str:
     value = re.sub(r"\s+", " ", value).strip(" \t\n\r.,;:—-()[]")
-    # Prevent common page-heading words from being swallowed by a permissive
-    # proper-name expression.
     parts = value.split()
     stop = {"Official", "Administration", "Biography", "News", "White", "House"}
     while parts and parts[-1] in stop:
@@ -106,8 +130,6 @@ def _whitehouse_us_president(blocks: list[str]) -> str | None:
         candidates = _candidate_from_block(block, "president")
         if candidates:
             return candidates[0]
-        # Current administration pages commonly put the name on its own line
-        # immediately before an ordinal President-of-the-United-States heading.
         match = re.search(
             r"\n([A-Z][A-Za-z'’.-]+(?:[ \t]+(?:[A-Z][A-Za-z'’.-]+|[A-Z]\.)){1,4})\s*\n"
             r"\s*\d{1,2}(?:st|nd|rd|th).*?President of the United States",
@@ -137,21 +159,23 @@ def _consensus_holder(blocks: list[str], role: str) -> str | None:
 
 def resolve_current_office_holder(question: str, messages: list[ChatMessage]) -> str | None:
     freshness = classify_freshness(question)
-    if not freshness.required or freshness.category != "official_role":
+    if not freshness.required:
         return None
-    blocks = _verified_blocks(messages)
-    if not blocks:
-        return None
-
     role = _role_kind(question)
     if role is None:
+        return None
+
+    verified = _verified_blocks(messages)
+    confirmed_search = _confirmed_search_blocks(messages)
+    blocks = [*verified, *confirmed_search]
+    if not blocks:
         return None
 
     holder: str | None = None
     if role == "president" and _US_PRESIDENT.search(question):
         holder = _whitehouse_us_president(blocks)
     if holder is None:
-        holder = _consensus_holder(blocks, role)
+        holder = _consensus_holder(verified, role)
     if holder is None:
         return None
 
@@ -160,8 +184,8 @@ def resolve_current_office_holder(question: str, messages: list[ChatMessage]) ->
         if russian:
             display = "Дональд Трамп" if re.sub(r"[^a-z]", "", holder.casefold()) in {"donaldjtrump", "donaldtrump"} else holder
             original = f" ({holder})" if display != holder else ""
-            return f"Сейчас президент США — {display}{original}. Данные подтверждены актуальной страницей администрации Белого дома."
-        return f"The current President of the United States is {holder}. This is confirmed by the current White House administration page."
+            return f"Сейчас президент США — {display}{original}. Это подтверждено актуальным официальным результатом Белого дома."
+        return f"The current President of the United States is {holder}. This is confirmed by the current official White House result."
 
     if russian:
         return f"По свежим проверенным источникам, сейчас эту должность занимает {holder}."
