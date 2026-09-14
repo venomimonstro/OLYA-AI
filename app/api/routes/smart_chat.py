@@ -16,6 +16,7 @@ from app.models import User
 from app.schemas.chat import ChatRequest, ChatResponse, ChatRunStatus
 from app.services.auth import get_current_user
 from app.services.chat_runtime import ActiveChatJob, ChatRunConflict, ChatRunSnapshot, chat_execution_manager
+from app.services.fast_web_grounding import execute_fast_web_grounding, should_auto_ground
 from app.services.task_solver import execute_task_solver, plan_task, reset_task_solver_context, set_task_solver_context
 from app.task_solver_user_ui import router as _task_solver_user_ui_router
 
@@ -70,44 +71,98 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
         question = _planning_question(managed_payload, max_queries)
         force_web = managed_payload.web_mode == "always"
         plan = plan_task(question, max_queries=max_queries, force_web=force_web) if question else None
+
+        # Auto web mode now checks ordinary factual/comparative questions too,
+        # while creative rewrites and stable explanations stay local and fast.
+        auto_fact_grounding = bool(
+            question
+            and managed_payload.web_mode == "auto"
+            and should_auto_ground(question)
+        )
         should_solve = bool(
             managed_payload.web_mode != "off"
             and plan
-            and plan.requires_web
-            and (not managed_payload.research_source_ids or plan.kind in _SPECIALIZED_TASKS or force_web)
+            and (plan.requires_web or auto_fact_grounding)
+            and (
+                not managed_payload.research_source_ids
+                or plan.kind in _SPECIALIZED_TASKS
+                or force_web
+                or auto_fact_grounding
+            )
         )
         if should_solve:
-            job._publish_nowait("status", {"state": "researching", "message": "Собираю и сверяю источники…", "task_kind": plan.kind})
-            execution = await execute_task_solver(
-                db=job_db,
-                user=job_user,
-                settings=request.app.state.settings,
-                discovery=request.app.state.discovery,
-                fetcher=request.app.state.research,
-                question=question,
-                project_id=None,
-                force_web=force_web,
+            job._publish_nowait(
+                "status",
+                {
+                    "state": "researching",
+                    "message": "Ищу и сверяю источники…",
+                    "task_kind": plan.kind if plan else "web_research",
+                },
             )
+            # Deep collection remains for audits/local recommendations. Ordinary
+            # grounded answers use the low-latency path so Qwen can start much
+            # earlier instead of waiting on 4 searches + 5 page downloads.
+            if plan.kind in _SPECIALIZED_TASKS:
+                execution = await execute_task_solver(
+                    db=job_db,
+                    user=job_user,
+                    settings=request.app.state.settings,
+                    discovery=request.app.state.discovery,
+                    fetcher=request.app.state.research,
+                    question=question,
+                    project_id=managed_payload.project_id,
+                    force_web=force_web,
+                )
+            else:
+                execution = await execute_fast_web_grounding(
+                    db=job_db,
+                    user=job_user,
+                    settings=request.app.state.settings,
+                    discovery=request.app.state.discovery,
+                    fetcher=request.app.state.research,
+                    question=question,
+                    project_id=managed_payload.project_id,
+                    force_web=force_web or auto_fact_grounding,
+                )
+
             merged_sources = list(dict.fromkeys([*managed_payload.research_source_ids, *execution.source_ids]))[:10]
             if merged_sources != managed_payload.research_source_ids:
                 managed_payload = managed_payload.model_copy(update={"research_source_ids": merged_sources})
             context_token = set_task_solver_context(execution.context_messages)
-            job._publish_nowait("status", {
-                "state": "synthesizing",
-                "message": "Источники собраны. Формирую вывод…",
-                "task_kind": execution.plan.kind,
-                "fetched_sources": execution.fetched_sources,
-                "independent_hosts": execution.independent_hosts,
-            })
+            job._publish_nowait(
+                "status",
+                {
+                    "state": "synthesizing",
+                    "message": (
+                        f"Сверено источников: {execution.fetched_sources}. Формирую ответ…"
+                        if execution.fetched_sources
+                        else "Поиск завершён. Формирую ответ…"
+                    ),
+                    "task_kind": execution.plan.kind,
+                    "fetched_sources": execution.fetched_sources,
+                    "independent_hosts": execution.independent_hosts,
+                },
+            )
         try:
-            result = await legacy_chat._chat_impl(managed_payload, request, job_user, job_db, on_token=job.token, on_replace=job.replace)
+            result = await legacy_chat._chat_impl(
+                managed_payload,
+                request,
+                job_user,
+                job_db,
+                on_token=job.token,
+                on_replace=job.replace,
+            )
         finally:
             if context_token is not None:
                 reset_task_solver_context(context_token)
         result.run_id = job.run_id
         result.client_request_id = job.client_request_id
         if execution is not None:
-            result.task_execution = execution.public_metadata()
+            metadata = execution.public_metadata()
+            search_latency = getattr(execution, "search_latency_ms", None)
+            if isinstance(search_latency, int):
+                metadata["search_latency_ms"] = max(0, search_latency)
+            result.task_execution = metadata
         return result
 
 
@@ -130,8 +185,10 @@ def _snapshot_response(snapshot: ChatRunSnapshot) -> ChatResponse:
 @router.post("/chat", response_model=ChatResponse)
 async def chat(payload: ChatRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ChatResponse:
     _ = db
+
     async def runner(job: ActiveChatJob) -> ChatResponse:
         return await _smart_managed_runner(payload, request, user.id, job)
+
     try:
         execution = await chat_execution_manager.start_or_attach(user_id=user.id, payload=payload, runner=runner)
     except ChatRunConflict as exc:
@@ -171,6 +228,7 @@ async def cancel_chat_run(client_request_id: str, user: User = Depends(get_curre
 @router.post("/chat/stream")
 async def chat_stream(payload: ChatRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     _ = db
+
     async def runner(job: ActiveChatJob) -> ChatResponse:
         return await _smart_managed_runner(payload, request, user.id, job)
 
@@ -184,40 +242,86 @@ async def chat_stream(payload: ChatRequest, request: Request, user: User = Depen
             except ChatRunConflict as exc:
                 yield _sse("error", {"status_code": 409, "detail": str(exc), "retryable": False})
                 return
-            yield _sse("status", {"state": snapshot.status, "run_id": snapshot.run_id, "client_request_id": snapshot.client_request_id,
-                                  "conversation_id": snapshot.conversation_id, "resumed": bool(snapshot.partial_text),
-                                  "queue_waiting": int(getattr(request.app.state.governor, "waiting", 0))})
+            yield _sse(
+                "status",
+                {
+                    "state": snapshot.status,
+                    "run_id": snapshot.run_id,
+                    "client_request_id": snapshot.client_request_id,
+                    "conversation_id": snapshot.conversation_id,
+                    "resumed": bool(snapshot.partial_text),
+                    "queue_waiting": int(getattr(request.app.state.governor, "waiting", 0)),
+                },
+            )
             if snapshot.partial_text:
-                yield _sse("replace", {"text": snapshot.partial_text, "run_id": snapshot.run_id, "client_request_id": snapshot.client_request_id, "reason": "reconnect_snapshot"})
+                yield _sse(
+                    "replace",
+                    {
+                        "text": snapshot.partial_text,
+                        "run_id": snapshot.run_id,
+                        "client_request_id": snapshot.client_request_id,
+                        "reason": "reconnect_snapshot",
+                    },
+                )
             if snapshot.status == "succeeded" and snapshot.result:
-                yield _sse("result", snapshot.result); return
+                yield _sse("result", snapshot.result)
+                return
             if snapshot.status in {"failed", "interrupted"}:
-                yield _sse("error", {"status_code": 503, "detail": snapshot.error_detail or "Chat run failed", "retryable": snapshot.retryable}); return
+                yield _sse(
+                    "error",
+                    {
+                        "status_code": 503,
+                        "detail": snapshot.error_detail or "Chat run failed",
+                        "retryable": snapshot.retryable,
+                    },
+                )
+                return
             if snapshot.status == "cancelled":
-                yield _sse("cancelled", {"detail": snapshot.error_detail or "Chat run was cancelled"}); return
+                yield _sse("cancelled", {"detail": snapshot.error_detail or "Chat run was cancelled"})
+                return
             heartbeat_at = perf_counter()
             while True:
                 if await request.is_disconnected():
                     if legacy_disconnect_cancels:
-                        await chat_execution_manager.cancel(user_id=user.id, client_request_id=snapshot.client_request_id)
+                        await chat_execution_manager.cancel(
+                            user_id=user.id,
+                            client_request_id=snapshot.client_request_id,
+                        )
                     return
                 try:
                     event, data = await asyncio.wait_for(queue.get(), timeout=0.25)
                 except TimeoutError:
                     if job is not None and job.task is not None and job.task.done():
-                        terminal = await chat_execution_manager.status(user_id=user.id, client_request_id=snapshot.client_request_id)
+                        terminal = await chat_execution_manager.status(
+                            user_id=user.id,
+                            client_request_id=snapshot.client_request_id,
+                        )
                         if terminal.status == "succeeded" and terminal.result:
                             yield _sse("result", terminal.result)
                         elif terminal.status == "cancelled":
                             yield _sse("cancelled", {"detail": terminal.error_detail})
                         else:
-                            yield _sse("error", {"status_code": 503, "detail": terminal.error_detail or "Chat run failed", "retryable": terminal.retryable})
+                            yield _sse(
+                                "error",
+                                {
+                                    "status_code": 503,
+                                    "detail": terminal.error_detail or "Chat run failed",
+                                    "retryable": terminal.retryable,
+                                },
+                            )
                         return
                     now = perf_counter()
                     if now - heartbeat_at >= 2.0:
                         heartbeat_at = now
-                        yield _sse("heartbeat", {"state": "working", "run_id": snapshot.run_id, "client_request_id": snapshot.client_request_id,
-                                                  "queue_waiting": int(getattr(request.app.state.governor, "waiting", 0))})
+                        yield _sse(
+                            "heartbeat",
+                            {
+                                "state": "working",
+                                "run_id": snapshot.run_id,
+                                "client_request_id": snapshot.client_request_id,
+                                "queue_waiting": int(getattr(request.app.state.governor, "waiting", 0)),
+                            },
+                        )
                     continue
                 yield _sse(event, data)
                 if event in {"result", "error", "cancelled"}:
@@ -230,7 +334,18 @@ async def chat_stream(payload: ChatRequest, request: Request, user: User = Depen
         finally:
             chat_execution_manager.detach(job, queue)
 
-    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-store, private", "X-Robots-Tag": "noindex, nofollow, noarchive, nosnippet", "X-Accel-Buffering": "no"})
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store, private",
+            "X-Robots-Tag": "noindex, nofollow, noarchive, nosnippet",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 legacy_chat.chat = chat
+legacy_chat.chat_stream = chat_stream
+legacy_chat.chat_run_status = chat_run_status
+legacy_chat.cancel_chat_run = cancel_chat_run
