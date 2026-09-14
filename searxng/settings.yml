@@ -11,23 +11,24 @@ search:
     - html
     - json
 
-# Independent general-web engines. Searches are aggregated in parallel; slow or
-# blocked engines must not hold a current-fact answer for many seconds.
+# Production interactive search uses only engines that remain stable from the
+# server IP. Engines that repeatedly trigger CAPTCHA/429/parser failures are
+# disabled instead of being hammered by health checks and every user query.
 engines:
-  - name: google
-    disabled: false
-  - name: yandex
-    disabled: false
   - name: bing
-    disabled: false
-  - name: duckduckgo
-    disabled: false
-  - name: brave
     disabled: false
   - name: startpage
     disabled: false
+  - name: google
+    disabled: true
+  - name: yandex
+    disabled: true
+  - name: duckduckgo
+    disabled: true
+  - name: brave
+    disabled: true
   - name: qwant
-    disabled: false
+    disabled: true
 
 server:
   bind_address: "0.0.0.0"
@@ -40,5 +41,5 @@ ui:
   static_use_hash: true
 
 outgoing:
-  request_timeout: 2.5
-  max_request_timeout: 4.0
+  request_timeout: 2.2
+  max_request_timeout: 3.0
