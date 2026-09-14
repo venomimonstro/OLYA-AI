@@ -48,9 +48,12 @@ def audit() -> dict:
     evidence_guard = (ROOT / "app" / "current_fact_evidence_guard.py").read_text("utf-8")
     search_policy = (ROOT / "app" / "fresh_search_policy_patch.py").read_text("utf-8")
     searx_client = (ROOT / "app" / "services" / "searxng_discovery.py").read_text("utf-8")
-    searx_settings = (ROOT / "searxng" / "settings.yml").read_text("utf-8")
     bootstrap = (ROOT / "app" / "api" / "routes" / "__init__.py").read_text("utf-8")
 
+    # Do not read /app/searxng/settings.yml here. Production app images do not
+    # contain the sidecar's bind-mounted configuration by design. Engine
+    # availability/provenance is verified separately by current_search_live_probe
+    # against the running SearXNG service.
     required = {
         "mandatory_fresh_search": (smart, "mandatory_fresh"),
         "hold_unverified_stream": (smart, "token_sink = None if mandatory_fresh else job.token"),
@@ -66,18 +69,18 @@ def audit() -> dict:
         "fresh_quality_mode": (search_policy, "quality_mode = True"),
         "evidence_guard_installed": (bootstrap, "install_current_fact_evidence_guard()"),
         "fresh_search_policy_installed": (bootstrap, "install_fresh_search_policy_patch()"),
-        "google_engine": (searx_settings, "name: google"),
-        "yandex_engine": (searx_settings, "name: yandex"),
-        "duckduckgo_engine": (searx_settings, "name: duckduckgo"),
         "explicit_engine_query": (searx_client, '"engines": ",".join(self.general_engines)'),
         "engine_provenance": (searx_client, "_provider_name"),
+        "google_engine_client": (searx_client, '"google"'),
+        "yandex_engine_client": (searx_client, '"yandex"'),
+        "duckduckgo_engine_client": (searx_client, '"duckduckgo"'),
     }
     for code, (text, marker) in required.items():
         if marker not in text:
             errors.append({"code": code, "missing": marker})
 
     return {
-        "format": "olya-current-facts-audit-v2",
+        "format": "olya-current-facts-audit-v3",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "president_freshness": {
@@ -88,7 +91,8 @@ def audit() -> dict:
         "deterministic_sample": resolved,
         "office_holder_cache_seconds": 0,
         "other_fresh_cache_seconds": 300,
-        "search_engines": ["google", "yandex", "bing", "duckduckgo", "brave", "startpage", "qwant"],
+        "search_engine_client_policy": ["google", "yandex", "bing", "duckduckgo", "brave", "startpage", "qwant"],
+        "live_engine_verification": "run scripts.current_search_live_probe",
     }
 
 
