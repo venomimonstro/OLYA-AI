@@ -184,13 +184,39 @@ def _ensure_request_units_available(db: Session, user: User, settings: Settings,
 def ensure_compute_available(db: Session, user: User, settings: Settings, *, reserve_seconds: int = 0, channel: str | None = None) -> UserQuota:
     quota = get_or_create_quota(db, user, settings)
     reserve_seconds = max(0, int(reserve_seconds))
+    request_mode = _inferred_channel(reserve_seconds)
+
+    # Launch Free policy is intentionally simple and user-visible: 30 successful
+    # requests/day and 930/month, with every chat power level costing one request.
+    # Do not stack legacy monthly CPU/resource/channel-share budgets on top of it;
+    # those invisible limits caused valid Free requests (especially Deep) to fail
+    # before the published request allowance was consumed. Physical server safety
+    # remains enforced by the global/per-user concurrency and resource governors.
+    if quota.plan == "free":
+        _ensure_request_units_available(db, user, settings, quota.plan, request_mode)
+        scheduler_channel = channel or request_mode
+        try:
+            from app.services.measured_plans import current_channel_override
+            scheduler_channel = channel or current_channel_override() or scheduler_channel
+        except ImportError:
+            pass
+        try:
+            from app.services.resource_governor import set_inference_scheduler_context
+            priority = scheduler_channel if scheduler_channel in {"fast", "work", "deep", "api", "background"} else request_mode
+            set_inference_scheduler_context(
+                priority_class=priority,
+                plan=quota.plan,
+                principal=user.id,
+                channel=scheduler_channel,
+            )
+        except ImportError:
+            pass
+        return quota
+
     used = compute_seconds_used(db, user.id)
     if used + reserve_seconds > quota.monthly_compute_seconds_limit:
         raise QuotaExceededError("Monthly local compute budget exhausted")
 
-    # Free currently uses literal successful-request counting (30/day) while
-    # paid plans retain Fast/Work/Deep weighted request units.
-    request_mode = _inferred_channel(reserve_seconds)
     _ensure_request_units_available(db, user, settings, quota.plan, request_mode)
 
     scheduler_channel = channel or request_mode
