@@ -33,13 +33,16 @@ async def _one(client: LlamaClient, *, name: str, prompt: str, max_tokens: int, 
     text = result.text.strip()
     if expected and expected not in text:
         errors.append(f"expected_value_missing:{expected}")
-    ttft_limit = 15000 if not reasoning else 30000
-    total_limit = 35000 if not reasoning else 60000
+    # Product thresholds, not merely liveness thresholds. If the starter CPU
+    # cannot meet them, the audit must say so instead of calling a minute-long
+    # response healthy.
+    ttft_limit = 8000 if not reasoning else 18000
+    total_limit = 30000 if not reasoning else 50000
     if result.ttft_ms > ttft_limit:
         errors.append(f"ttft_too_slow:{result.ttft_ms}>{ttft_limit}")
     if result.generation_ms > total_limit:
         errors.append(f"generation_too_slow:{result.generation_ms}>{total_limit}")
-    if result.tokens_per_second and result.tokens_per_second < 2.0:
+    if result.tokens_per_second and result.tokens_per_second < 3.0:
         errors.append(f"tokens_per_second_critically_low:{result.tokens_per_second}")
     return {
         "name": name,
@@ -93,6 +96,12 @@ async def probe() -> dict:
         "format": "olya-inference-latency-live-v1",
         "status": "passed" if not errors else "degraded",
         "errors": errors,
+        "product_thresholds_ms": {
+            "simple_ttft": 8000,
+            "reasoning_ttft": 18000,
+            "simple_total": 30000,
+            "reasoning_total": 50000,
+        },
         "cases": cases,
     }
 
