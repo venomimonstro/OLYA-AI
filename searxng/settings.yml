@@ -1,6 +1,8 @@
 use_default_settings:
   engines:
     keep_only:
+      - google
+      - yandex
       - bing
       - startpage
 
@@ -15,10 +17,15 @@ search:
     - html
     - json
 
-# Production interactive search is intentionally restricted to the two engines
-# that remain usable from the server IP. keep_only prevents hidden default
-# engines (Wikidata, Google CSE, etc.) from being queried by generic searches.
+# Google and Yandex are the preferred SERP sources for OLYA. Bing and
+# Startpage remain bounded fallbacks when the server IP is challenged or a
+# primary engine is temporarily unavailable. Application-side circuit breakers
+# prevent CAPTCHA/429 engines from delaying user answers.
 engines:
+  - name: google
+    disabled: false
+  - name: yandex
+    disabled: false
   - name: bing
     disabled: false
   - name: startpage
@@ -35,5 +42,5 @@ ui:
   static_use_hash: true
 
 outgoing:
-  request_timeout: 2.2
-  max_request_timeout: 3.0
+  request_timeout: 1.8
+  max_request_timeout: 2.4
