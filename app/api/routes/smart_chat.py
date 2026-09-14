@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import re
 from time import perf_counter
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -17,25 +16,11 @@ from app.models import User
 from app.schemas.chat import ChatRequest, ChatResponse, ChatRunStatus
 from app.services.auth import get_current_user
 from app.services.chat_runtime import ActiveChatJob, ChatRunConflict, ChatRunSnapshot, chat_execution_manager
-from app.services.fast_web_grounding import execute_fast_web_grounding, should_auto_ground
-from app.services.freshness import classify_freshness
-from app.services.interactive_evidence import (
-    evidence_from_execution,
-    reset_interactive_evidence,
-    set_interactive_evidence,
-)
-from app.services.structured_facts import is_currency_rate_question, resolve_structured_fact
-from app.services.task_solver import execute_task_solver, plan_task, reset_task_solver_context, set_task_solver_context
+from app.services.clean_web import build_clean_web_context
+from app.services.task_solver import reset_task_solver_context, set_task_solver_context
 from app.task_solver_user_ui import router as _task_solver_user_ui_router
 
 router = APIRouter(prefix="/v1", tags=["chat"])
-_SPECIALIZED_TASKS = {"website_audit", "local_recommendation"}
-_CYRILLIC = re.compile(r"[А-Яа-яЁё]")
-_ENGLISH_BOILERPLATE = (
-    re.compile(r"(?:However,\s*)?please note that[^.!?]*(?:[.!?]|$)", re.IGNORECASE),
-    re.compile(r"this information may change over time[^.!?]*(?:[.!?]|$)", re.IGNORECASE),
-    re.compile(r"it is recommended to verify[^.!?]*(?:[.!?]|$)", re.IGNORECASE),
-)
 
 
 def _install_workspace_route() -> None:
@@ -53,203 +38,62 @@ def _latest_user_text(payload: ChatRequest) -> str:
     return next((message.content for message in reversed(payload.messages) if message.role == "user"), "")
 
 
-def _planning_question(payload: ChatRequest, max_queries: int) -> str:
-    latest = _latest_user_text(payload)
-    if not latest:
-        return ""
-    primary = plan_task(latest, max_queries=max_queries)
-    if primary.kind in _SPECIALIZED_TASKS:
-        return latest
-    recent_users = [message.content for message in payload.messages if message.role == "user"][-3:]
-    if len(recent_users) > 1:
-        combined = "\n".join(recent_users)
-        contextual = plan_task(combined, max_queries=max_queries)
-        if contextual.kind in _SPECIALIZED_TASKS:
-            return combined
-    return latest
-
-
-def _russian(text: str) -> bool:
-    return len(_CYRILLIC.findall(text or "")) >= 2
-
-
-def _freshness_unavailable(question: str) -> str:
-    if _russian(question):
-        return "Не удалось быстро получить достаточно надёжных актуальных данных. Устаревшие сведения из памяти модели не используются."
-    return "I could not obtain enough reliable current evidence quickly, so stale model-memory data was not used."
-
-
-def _clean_language_boilerplate(question: str, text: str) -> str:
-    value = str(text or "")
-    if not _russian(question):
-        return value.strip()
-    for pattern in _ENGLISH_BOILERPLATE:
-        value = pattern.sub("", value)
-    value = re.sub(r"\s{2,}", " ", value)
-    value = re.sub(r"\s+([,.;:!?])", r"\1", value)
-    return value.strip()
-
-
 async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id: str, job: ActiveChatJob) -> ChatResponse:
+    """Clean interactive path: optional bounded web context, then exactly one chat generation."""
     with SessionLocal() as job_db:
         job_user = job_db.get(User, user_id)
         if job_user is None:
             raise HTTPException(status_code=401, detail="Account is no longer available")
+
         request.state.x1_chat_run_id = job.run_id
-        managed_payload = payload.model_copy(update={"client_request_id": job.client_request_id})
-        execution = None
-        context_token = None
-        evidence_token = None
-        evidence_state = None
-        max_queries = int(getattr(request.app.state.settings, "research_max_search_queries", 4))
-        question = _planning_question(managed_payload, max_queries)
-        freshness = classify_freshness(question) if question else None
-        mandatory_fresh = bool(freshness and freshness.required)
-        force_web = managed_payload.web_mode == "always"
-        plan = plan_task(question, max_queries=max_queries, force_web=force_web) if question else None
+        question = _latest_user_text(payload)
+        deep = payload.mode == "deep"
+        job._publish_nowait("status", {
+            "state": "researching" if payload.web_mode == "always" else "working",
+            "message": "Проверяю актуальные данные…" if payload.web_mode == "always" else "Готовлю ответ…",
+            "task_kind": "clean_chat",
+        })
 
-        auto_fact_grounding = bool(question and managed_payload.web_mode == "auto" and should_auto_ground(question))
-        should_solve = bool(
-            plan
-            and (
-                mandatory_fresh
-                or (
-                    managed_payload.web_mode != "off"
-                    and (plan.requires_web or auto_fact_grounding)
-                )
-            )
-            and (
-                not managed_payload.research_source_ids
-                or plan.kind in _SPECIALIZED_TASKS
-                or force_web
-                or auto_fact_grounding
-                or mandatory_fresh
-            )
+        web = await build_clean_web_context(
+            discovery=request.app.state.discovery,
+            fetcher=request.app.state.research,
+            question=question,
+            web_mode=payload.web_mode,
+            deep=deep,
         )
+        if web.used:
+            job._publish_nowait("status", {
+                "state": "synthesizing",
+                "message": "Собрал актуальные данные. Формирую ответ…",
+                "task_kind": "web_research",
+                "fetched_sources": web.fetched,
+                "search_results": web.searched,
+            })
 
-        # Atomic market facts use a primary structured source before generic
-        # metasearch. This removes both SERP fragility and unnecessary model
-        # latency for questions such as the current USD/RUB official rate.
-        structured_candidate = bool(
-            question
-            and plan
-            and plan.kind not in _SPECIALIZED_TASKS
-            and is_currency_rate_question(question)
-        )
-        if structured_candidate:
-            job._publish_nowait(
-                "status",
-                {
-                    "state": "researching",
-                    "message": "Получаю актуальные данные из официального источника…",
-                    "task_kind": "structured_fact",
-                },
-            )
-            execution = await resolve_structured_fact(question)
-
-        if execution is None and should_solve:
-            job._publish_nowait(
-                "status",
-                {
-                    "state": "researching",
-                    "message": "Ищу и сверяю актуальные источники…" if mandatory_fresh else "Ищу и сверяю источники…",
-                    "task_kind": plan.kind if plan else "web_research",
-                },
-            )
-            if plan.kind in _SPECIALIZED_TASKS:
-                execution = await execute_task_solver(
-                    db=job_db,
-                    user=job_user,
-                    settings=request.app.state.settings,
-                    discovery=request.app.state.discovery,
-                    fetcher=request.app.state.research,
-                    question=question,
-                    project_id=managed_payload.project_id,
-                    force_web=force_web,
-                )
-            else:
-                execution = await execute_fast_web_grounding(
-                    db=job_db,
-                    user=job_user,
-                    settings=request.app.state.settings,
-                    discovery=request.app.state.discovery,
-                    fetcher=request.app.state.research,
-                    question=question,
-                    project_id=managed_payload.project_id,
-                    force_web=force_web,
-                )
-
-        if execution is not None:
-            merged_sources = list(dict.fromkeys([*managed_payload.research_source_ids, *execution.source_ids]))[:10]
-            if merged_sources != managed_payload.research_source_ids:
-                managed_payload = managed_payload.model_copy(update={"research_source_ids": merged_sources})
-            context_token = set_task_solver_context(execution.context_messages)
-            evidence_state = evidence_from_execution(
-                execution,
-                category=freshness.category if freshness is not None else "stable",
-            )
-            evidence_token = set_interactive_evidence(evidence_state)
-            evidence_count = int(evidence_state.evidence_count)
-            job._publish_nowait(
-                "status",
-                {
-                    "state": "synthesizing",
-                    "message": (
-                        f"Сверено источников: {evidence_count}. Формирую ответ…"
-                        if evidence_count
-                        else "Поиск завершён. Формирую максимально надёжный ответ…"
-                    ),
-                    "task_kind": execution.plan.kind,
-                    "fetched_sources": execution.fetched_sources,
-                    "fresh_evidence_count": evidence_count,
-                    "independent_hosts": evidence_state.independent_hosts,
-                    "authoritative": evidence_state.authoritative,
-                },
-            )
-
-        min_hosts = max(1, int(getattr(freshness, "min_independent_hosts", 1) or 1)) if freshness is not None else 1
-        evidence_ok = bool(evidence_state and evidence_state.satisfies(min_hosts))
-
-        # Once trusted evidence is available, stream the grounded answer instead
-        # of hiding the entire generation. Holding output is only necessary when
-        # a current fact still lacks eligible evidence.
-        hold_output = bool(mandatory_fresh and not evidence_ok)
-        token_sink = None if hold_output else job.token
-        replace_sink = None if hold_output else job.replace
+        context_token = set_task_solver_context(web.context_messages) if web.context_messages else None
+        # Interactive chat is intentionally single-pass. Strict verification is
+        # represented in the system instruction, not by a second critic/repair LLM call.
+        managed_payload = payload.model_copy(update={
+            "client_request_id": job.client_request_id,
+            "verification": "off",
+            "research_source_ids": [],
+        })
         try:
             result = await legacy_chat._chat_impl(
                 managed_payload,
                 request,
                 job_user,
                 job_db,
-                on_token=token_sink,
-                on_replace=replace_sink,
+                on_token=job.token,
+                on_replace=job.replace,
             )
         finally:
             if context_token is not None:
                 reset_task_solver_context(context_token)
-            if evidence_token is not None:
-                reset_interactive_evidence(evidence_token)
-
-        result.text = _clean_language_boilerplate(question, result.text)
-        if mandatory_fresh and not evidence_ok:
-            result.text = _freshness_unavailable(question)
-
-        if hold_output and result.text:
-            await job.token(result.text)
 
         result.run_id = job.run_id
         result.client_request_id = job.client_request_id
-        if execution is not None:
-            metadata = execution.public_metadata()
-            search_latency = getattr(execution, "search_latency_ms", None)
-            if isinstance(search_latency, int):
-                metadata["search_latency_ms"] = max(0, search_latency)
-            metadata["fresh_evidence_count"] = int(evidence_state.evidence_count if evidence_state else 0)
-            metadata["search_confirmed_sources"] = int(getattr(execution, "search_confirmed_sources", 0) or 0)
-            metadata["search_independent_hosts"] = int(getattr(execution, "search_independent_hosts", 0) or 0)
-            metadata["authoritative_evidence"] = bool(evidence_state.authoritative if evidence_state else False)
-            result.task_execution = metadata
+        result.task_execution = web.public_metadata()
         return result
 
 
@@ -329,27 +173,21 @@ async def chat_stream(payload: ChatRequest, request: Request, user: User = Depen
             except ChatRunConflict as exc:
                 yield _sse("error", {"status_code": 409, "detail": str(exc), "retryable": False})
                 return
-            yield _sse(
-                "status",
-                {
-                    "state": snapshot.status,
+            yield _sse("status", {
+                "state": snapshot.status,
+                "run_id": snapshot.run_id,
+                "client_request_id": snapshot.client_request_id,
+                "conversation_id": snapshot.conversation_id,
+                "resumed": bool(snapshot.partial_text),
+                "queue_waiting": int(getattr(request.app.state.governor, "waiting", 0)),
+            })
+            if snapshot.partial_text:
+                yield _sse("replace", {
+                    "text": snapshot.partial_text,
                     "run_id": snapshot.run_id,
                     "client_request_id": snapshot.client_request_id,
-                    "conversation_id": snapshot.conversation_id,
-                    "resumed": bool(snapshot.partial_text),
-                    "queue_waiting": int(getattr(request.app.state.governor, "waiting", 0)),
-                },
-            )
-            if snapshot.partial_text:
-                yield _sse(
-                    "replace",
-                    {
-                        "text": snapshot.partial_text,
-                        "run_id": snapshot.run_id,
-                        "client_request_id": snapshot.client_request_id,
-                        "reason": "reconnect_snapshot",
-                    },
-                )
+                    "reason": "reconnect_snapshot",
+                })
             if snapshot.status == "succeeded" and snapshot.result:
                 yield _sse("result", snapshot.result)
                 return
@@ -359,6 +197,7 @@ async def chat_stream(payload: ChatRequest, request: Request, user: User = Depen
             if snapshot.status == "cancelled":
                 yield _sse("cancelled", {"detail": snapshot.error_detail or "Chat run was cancelled"})
                 return
+
             heartbeat_at = perf_counter()
             while True:
                 if await request.is_disconnected():
@@ -380,15 +219,12 @@ async def chat_stream(payload: ChatRequest, request: Request, user: User = Depen
                     now = perf_counter()
                     if now - heartbeat_at >= 2.0:
                         heartbeat_at = now
-                        yield _sse(
-                            "heartbeat",
-                            {
-                                "state": "working",
-                                "run_id": snapshot.run_id,
-                                "client_request_id": snapshot.client_request_id,
-                                "queue_waiting": int(getattr(request.app.state.governor, "waiting", 0)),
-                            },
-                        )
+                        yield _sse("heartbeat", {
+                            "state": "working",
+                            "run_id": snapshot.run_id,
+                            "client_request_id": snapshot.client_request_id,
+                            "queue_waiting": int(getattr(request.app.state.governor, "waiting", 0)),
+                        })
                     continue
                 yield _sse(event, data)
                 if event in {"result", "error", "cancelled"}:
