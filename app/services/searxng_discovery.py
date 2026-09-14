@@ -80,10 +80,11 @@ class SearxngDiscovery:
         _ = country
         count = min(max(int(count), 1), 20)
         loop = asyncio.get_running_loop()
-        # Interactive current facts should not wait on the tail of blocked
-        # engines. Two useful engines are enough; slower engines are cancelled.
-        global_budget = min(self.timeout_seconds, 3.5)
-        per_engine_timeout = min(self.timeout_seconds, 3.0)
+        # Interactive chat values early independent results more than the slow
+        # tail of CAPTCHA/throttled engines. Deep research can still run several
+        # queries; each query itself should return a useful SERP quickly.
+        global_budget = min(self.timeout_seconds, 2.8)
+        per_engine_timeout = min(self.timeout_seconds, 2.4)
         deadline = loop.time() + global_budget
         results: dict[str, list[SearchHit]] = {}
 
@@ -138,7 +139,7 @@ class SearxngDiscovery:
                         break
                     done, pending = await asyncio.wait(
                         pending,
-                        timeout=min(0.45, remaining),
+                        timeout=min(0.30, remaining),
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in done:
@@ -149,9 +150,10 @@ class SearxngDiscovery:
                         if hits:
                             results[engine] = hits
                     merged = self._merge_hits(results, limit=count)
-                    # Two independent engines with a usable first page are the
-                    # normal interactive success condition.
-                    if len(results) >= 2 and len(merged) >= min(count, 5):
+                    # Two independent engines and four useful results are enough
+                    # for the normal interactive evidence gate. Never wait for a
+                    # third engine merely to decorate an already usable answer.
+                    if len(results) >= 2 and len(merged) >= min(count, 4):
                         break
                     if len(results) >= 3 and merged:
                         break
