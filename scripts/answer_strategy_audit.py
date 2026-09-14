@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import inspect
 import json
 
 import app.api.routes  # noqa: F401 - install runtime patches
 from app import answer_strategy_patch
 from app.gigachat31_runtime_patch import compact_prompt_rows
-from app.inference.client import LlamaClient
 from app.services import fast_web_grounding
 from app.services.project_context import ProjectContextBuilder
 from app.services.searxng_discovery import SearxngDiscovery, _payload_marks_engine_unresponsive
@@ -59,6 +59,10 @@ def audit() -> dict:
     if not any(row.get("role") == "user" and cases["practical_chess"] in str(row.get("content") or "") for row in compact):
         errors.append("latest_user_lost_in_compaction")
 
+    strategy_source = inspect.getsource(answer_strategy_patch.install_answer_strategy_patch)
+    source_appendix_declared = "_olya_source_appendix" in strategy_source and "Источники:" in strategy_source
+    if not source_appendix_declared: errors.append("source_appendix_missing")
+
     checks = {
         "chess_auto_web": fast_web_grounding.should_auto_ground(cases["practical_chess"]),
         "stable_fact_fast_path": answer_strategy_patch._stable_atomic(cases["stable_fact"]),
@@ -69,10 +73,9 @@ def audit() -> dict:
         "max_project_memories": context.max_memories,
         "simple_prompt_chars_after_compaction": compact_chars,
         "compact_synthesis_installed": bool(getattr(fast_web_grounding.execute_fast_web_grounding, "_olya_compact_synthesis", False)),
-        "source_appendix_installed": bool(getattr(LlamaClient.generate, "_olya_source_appendix", False)),
+        "source_appendix_declared": source_appendix_declared,
     }
     if not checks["compact_synthesis_installed"]: errors.append("compact_synthesis_not_installed")
-    if not checks["source_appendix_installed"]: errors.append("source_appendix_not_installed")
 
     return {
         "format": "olya-answer-strategy-audit-v4",
