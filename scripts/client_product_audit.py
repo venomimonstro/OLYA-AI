@@ -14,7 +14,8 @@ def audit() -> dict:
     errors: list[str] = []
     paths = {str(getattr(route, "path", "")) for route in app.main.app.routes}
     required = {
-        "/app", "/admin", "/admin/users", "/admin/chats",
+        "/app", "/memory", "/admin", "/admin/users", "/admin/chats",
+        "/v1/memory", "/v1/memory/{memory_id}",
         "/v1/conversations", "/v1/conversations/{conversation_id}",
         "/v1/admin/chat-observer/conversations",
         "/v1/admin/chat-observer/conversations/{conversation_id}/messages",
@@ -48,17 +49,23 @@ def audit() -> dict:
         if expected not in kinds:
             errors.append(f"memory_not_detected:{expected}")
 
+    import app.services.memory_write_through as memory_write
     import app.workspace_recovery_controls as recovery
     import app.workspace_chat_library_v1 as library
     recovery_source = inspect.getsource(recovery.enhance_recovery_controls)
     library_source = inspect.getsource(library.enhance_chat_library)
+    listener_source = inspect.getsource(memory_write.persist_user_memory_after_message)
     if "Остановить ответ" not in recovery_source or "↻" not in recovery_source or "✎" not in recovery_source:
         errors.append("recovery_controls_missing")
     if "pinned" not in library_source or "Удалить" not in library_source or "Переименовать" not in library_source:
         errors.append("chat_library_controls_missing")
+    if "/memory" not in library_source:
+        errors.append("memory_navigation_missing")
+    if "after_insert" not in inspect.getsource(memory_write) or "extract_user_memories" not in listener_source:
+        errors.append("memory_write_through_missing")
 
     return {
-        "format": "olya-client-product-audit-v1",
+        "format": "olya-client-product-audit-v2",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "checks": {
@@ -72,6 +79,7 @@ def audit() -> dict:
                 "max_output_tokens": ordinary.max_output_tokens,
             },
             "memory_detection": memory,
+            "memory_write_through": "extract_user_memories" in listener_source,
             "required_routes": sorted(required),
         },
     }
