@@ -59,9 +59,11 @@ def audit() -> dict:
         "public_source_verified": (fast, '"verified": source is not None'),
         "light_chat_hover": (ui, "background:#e9e9ec!important"),
         "waiting_animation": (ui, "olya-waiting-mark"),
+        "waiting_from_click": (ui, "olya-request-pending"),
         "source_chips": (ui, "olya-source-chip"),
         "favicons": (ui, "u.origin+'/favicon.ico'"),
         "final_ui_composition": (composed, "enhance_workspace_v4(document)"),
+        "pending_set_before_preflight": (composed, "document.body.classList.add('olya-request-pending')"),
         "forced_stream_scroll_removed": (composed, 'document.replace(forced_scroll, "renderMarkdown(live.bubble,raw)", 2)'),
         "project_access_guard": (bootstrap, "install_task_solver_access_patch()"),
     }
