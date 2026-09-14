@@ -39,20 +39,18 @@ free_gb=$(df -Pk "$ROOT" | awk 'NR==2 {print int($4/1024/1024)}')
 
 bash -n scripts/migrate_gigachat31_12gb.sh
 bash -n scripts/start_app.sh
-bash -n scripts/production_runtime_audit.sh
 python3 -m py_compile \
   scripts/gigachat31_runtime_audit.py \
-  scripts/answer_pipeline_audit.py \
-  scripts/search_quality_audit.py \
-  scripts/search_quality_live_probe.py \
+  scripts/answer_strategy_audit.py \
   scripts/runtime_binding_audit.py \
   scripts/download_model.py \
   scripts/warm_local_llm.py \
-  app/high_risk_verification_patch.py \
-  app/search_quality_patch.py \
-  app/services/searxng_discovery.py \
-  app/services/research_planner.py \
-  app/services/freshness.py
+  app/gigachat31_runtime_patch.py \
+  app/api/routes/smart_chat.py \
+  app/services/clean_web.py \
+  app/services/context.py \
+  app/services/project_context.py \
+  app/services/searxng_discovery.py
 docker compose config --quiet
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -87,7 +85,7 @@ threads=sys.argv[1]; batch_threads=sys.argv[2]
 path=Path('.env')
 lines=path.read_text('utf-8').splitlines()
 updates={
-    'X1_SERVER_OPTIMIZATION_PROFILE':'gigachat31_12gb',
+    'X1_SERVER_OPTIMIZATION_PROFILE':'gigachat31_12gb_clean',
     'X1_LLAMA_MODEL_NAME':'GigaChat3.1-10B-A1.8B-Q4_K_M',
     'X1_LLAMA_MODEL_FILE':'GigaChat3.1-10B-A1.8B-q4_K_M.gguf',
     'X1_LLAMA_BASE_URL':'http://llama:8080',
@@ -101,6 +99,7 @@ updates={
     'X1_MAX_QUEUE_SIZE':'24',
     'X1_REQUEST_TIMEOUT_SECONDS':'180',
     'X1_DEFAULT_MAX_OUTPUT_TOKENS':'1024',
+    'X1_SEARCH_PROVIDERS':'searxng',
 }
 seen=set(); out=[]
 for line in lines:
@@ -122,9 +121,11 @@ resolved_compose=$(mktemp)
 docker compose config > "$resolved_compose"
 grep -Fq '/models/GigaChat3.1-10B-A1.8B-q4_K_M.gguf' "$resolved_compose" || { rm -f "$resolved_compose"; fail "Compose did not resolve the GigaChat model file"; }
 grep -Fq -- '--cpu-moe' "$resolved_compose" || { rm -f "$resolved_compose"; fail "Compose did not enable llama.cpp CPU-MoE"; }
+grep -Fq -- '--jinja' "$resolved_compose" || { rm -f "$resolved_compose"; fail "Compose did not enable GigaChat Jinja chat template"; }
 rm -f "$resolved_compose"
 
-info "Rebuilding application runtime and restarting optimized local inference"
+info "Recreating search and optimized local inference"
+docker compose up -d --force-recreate searxng
 docker compose up -d --build --force-recreate llama app
 
 info "Waiting for GigaChat llama.cpp health"
@@ -148,19 +149,18 @@ PY
 done
 [ "$app_ready" -eq 1 ] || { docker compose logs --tail=220 app >&2 || true; fail "Application HTTP service did not become healthy"; }
 
-info "Verifying model artifact inside host storage"
+info "Verifying model artifact"
 python3 scripts/download_model.py --profile primary --verify-only
+
+info "Running clean chat architecture audit"
+docker compose exec -T app python -m scripts.answer_strategy_audit
 
 info "Running live GigaChat 3.1 integration + performance audit"
 docker compose exec -T app python -m scripts.gigachat31_runtime_audit
-
-info "Running core answer-pipeline sanity checks"
-docker compose exec -T app python -m scripts.answer_pipeline_audit
 
 info "Running production route binding sanity check"
 docker compose exec -T app python -m scripts.runtime_binding_audit
 
 trap - ERR INT TERM
-info "GigaChat 3.1 migration completed successfully (RAM=${ram_gib}GiB, cpu=${cores}, threads=${threads}, context=4096, llama_limit=8g, cpu_moe=on, warmup=background)"
+info "GigaChat 3.1 clean migration completed successfully (RAM=${ram_gib}GiB, cpu=${cores}, threads=${threads}, context=4096, llama_limit=8g)"
 info "Rollback env retained at: $backup"
-info "External search health is intentionally audited separately: bash scripts/production_runtime_audit.sh"
