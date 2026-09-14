@@ -66,11 +66,8 @@ prompt.addEventListener('input',saveDraft);window.addEventListener('pagehide',sa
     startup_new = "await Promise.all([loadConversations(),loadProjects(),refreshBudget(),loadImageStatus()]);if(readPending())await recoverPending();else await restoreActiveConversation();restoreDraft();if(!busy)prompt.focus()"
     document = _replace_once(document, startup_old, startup_new, "workspace restore on reload")
 
-    document = _replace_once(
-        document,
-        "sessionStorage.clear();location.replace('/login')",
-        "clearLocalChatState();sessionStorage.clear();location.replace('/login')",
-        "clear persisted chat state on logout",
-    )
+    old_logout = "$('logout').onclick=async()=>{if(activeRequestId)await stopActive();try{await api('/v1/auth/logout',{method:'POST'},15000)}catch(_e){}sessionStorage.clear();location.replace('/login')};"
+    new_logout = "$('logout').onclick=async()=>{if(activeRequestId)await stopActive();try{await api('/v1/auth/logout',{method:'POST'},15000)}catch(_e){}clearLocalChatState();sessionStorage.clear();location.replace('/login')};"
+    document = _replace_once(document, old_logout, new_logout, "clear persisted chat state on explicit logout")
 
     return document
