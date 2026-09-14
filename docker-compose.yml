@@ -244,7 +244,7 @@ services:
   llama:
     image: ghcr.io/ggml-org/llama.cpp:server-b10380@sha256:683ad4c9569bdbd6b8d7ad008a729cf4f9a3dfaf9712c81a7ecac0c5b9a078fc
     restart: unless-stopped
-    mem_limit: ${X1_LLAMA_MEMORY_LIMIT:-3200m}
+    mem_limit: ${X1_LLAMA_MEMORY_LIMIT:-8g}
     volumes:
       - ./models:/models:ro
     networks:
@@ -252,7 +252,7 @@ services:
       - image-private
     command:
       - -m
-      - /models/${X1_LLAMA_MODEL_FILE:-Qwen3-4B-Q4_K_M.gguf}
+      - /models/${X1_LLAMA_MODEL_FILE:-GigaChat3.1-10B-A1.8B-q4_K_M.gguf}
       - --host
       - 0.0.0.0
       - --port
@@ -276,11 +276,11 @@ services:
       interval: 20s
       timeout: 8s
       retries: 15
-      start_period: 90s
+      start_period: 120s
     deploy:
       resources:
         limits:
-          memory: ${X1_LLAMA_MEMORY_LIMIT:-3200m}
+          memory: ${X1_LLAMA_MEMORY_LIMIT:-8g}
 
 networks:
   image-private:
