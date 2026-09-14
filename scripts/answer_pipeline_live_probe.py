@@ -7,11 +7,21 @@ import os
 from time import perf_counter
 from urllib.parse import urlsplit
 
+from app.schemas.chat import ChatMessage
 from app.services.searxng_discovery import SearxngDiscovery
 from app.services.structured_facts import resolve_structured_fact
+from app.stable_fact_evidence_guard import _consensus as stable_fact_consensus
 
 
-async def _search_probe(client: SearxngDiscovery, query: str, *, language: str, expected_terms: tuple[str, ...] = ()) -> dict:
+async def _search_probe(
+    client: SearxngDiscovery,
+    query: str,
+    *,
+    language: str,
+    expected_terms: tuple[str, ...] = (),
+    expected_domain: str = "",
+    stable_consensus: bool = False,
+) -> dict:
     started = perf_counter()
     errors: list[str] = []
     hits = []
@@ -38,16 +48,38 @@ async def _search_probe(client: SearxngDiscovery, query: str, *, language: str, 
 
     haystack = " ".join(text_parts).casefold()
     expected_visible = not expected_terms or all(term.casefold() in haystack for term in expected_terms)
+    domain_visible = not expected_domain or any(
+        domain == expected_domain or domain.endswith("." + expected_domain)
+        for domain in domains
+    )
     if not hits:
         errors.append("no_results")
     if len(observed) < 2:
         errors.append("fewer_than_two_engines")
     if len(domains) < 2:
         errors.append("fewer_than_two_domains")
-    if elapsed_ms > 4500:
+    if elapsed_ms > 3800:
         errors.append("search_too_slow")
     if not expected_visible:
         errors.append("expected_fact_not_visible_in_serp")
+    if not domain_visible:
+        errors.append(f"expected_domain_missing:{expected_domain}")
+
+    consensus_value = ""
+    if stable_consensus and hits:
+        blocks = ["WEB SEARCH DISCOVERY. Server-fetched search evidence."]
+        for index, hit in enumerate(hits[:7], start=1):
+            blocks.append(
+                f"[SEARCH {index}] provider={hit.provider}\n"
+                f"Title: {hit.title}\nURL: {hit.url}\nSnippet: {hit.snippet}"
+            )
+        resolved = stable_fact_consensus(query, [ChatMessage(role="user", content="\n\n".join(blocks))])
+        if resolved is None:
+            errors.append("stable_fact_consensus_not_extracted")
+        else:
+            consensus_value = str(resolved[1])
+            if expected_terms and not any(term.casefold() in consensus_value.casefold() for term in expected_terms):
+                errors.append("stable_fact_consensus_wrong_entity")
 
     return {
         "query": query,
@@ -56,6 +88,8 @@ async def _search_probe(client: SearxngDiscovery, query: str, *, language: str, 
         "observed_engines": sorted(observed),
         "independent_domains": len(domains),
         "expected_fact_visible": expected_visible,
+        "expected_domain_visible": domain_visible,
+        "consensus_value": consensus_value,
         "errors": errors,
         "examples": examples,
     }
@@ -85,6 +119,7 @@ async def probe() -> dict:
         "кто написал Мастер и Маргарита",
         language="ru",
         expected_terms=("булгаков",),
+        stable_consensus=True,
     )
     if author["errors"]:
         errors.extend(f"author:{item}" for item in author["errors"])
@@ -93,22 +128,13 @@ async def probe() -> dict:
         search,
         "current President of the United States site:whitehouse.gov",
         language="en",
+        expected_domain="whitehouse.gov",
     )
-    official_present = any(
-        (urlsplit(str(row.get("url") or "")).hostname or "").casefold().endswith("whitehouse.gov")
-        for row in current_role["examples"]
-    )
-    if not official_present:
-        current_role["errors"].append("official_whitehouse_not_visible")
-        errors.append("current_role:official_whitehouse_not_visible")
     if current_role["errors"]:
-        for item in current_role["errors"]:
-            key = f"current_role:{item}"
-            if key not in errors:
-                errors.append(key)
+        errors.extend(f"current_role:{item}" for item in current_role["errors"])
 
     return {
-        "format": "olya-answer-pipeline-live-v1",
+        "format": "olya-answer-pipeline-live-v2",
         "status": "passed" if not errors else "degraded",
         "errors": errors,
         "currency": {
