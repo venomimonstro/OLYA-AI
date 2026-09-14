@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.user_ui import workspace as _workspace
 from app.workspace_client_v4 import enhance_workspace_v4
+from app.workspace_reliability_v5 import enhance_workspace_reliability_v5
 
 router = APIRouter(tags=["user-workspace"])
 
@@ -72,6 +73,7 @@ def workspace(db: Session = Depends(get_db)) -> HTMLResponse:
     # light hover states, waiting animation and compact source chips win the CSS
     # cascade instead of being overwritten by old dark-theme rules.
     document = enhance_workspace_v4(document)
+    document = enhance_workspace_reliability_v5(document)
 
     response = HTMLResponse(document, status_code=base.status_code)
     for key, value in base.headers.items():
