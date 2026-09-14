@@ -85,17 +85,11 @@ def audit() -> dict:
     high_thinking = LlamaClient._thinking_budget(high.max_output_tokens) if high.reasoning else 0
     if not (0 < medium_thinking < high_thinking <= 320):
         errors.append(f"private_reasoning_budget_invalid:{medium_thinking}:{high_thinking}")
-    client = LlamaClient("http://127.0.0.1:9")
-    try:
-        high_payload = client._payload([], max_tokens=high.max_output_tokens, reasoning=True)
-        simple_payload = client._payload([], max_tokens=simple.max_output_tokens, reasoning=False)
-    finally:
-        # No network request was made; close is async, so the audit avoids
-        # instantiating a running event loop merely for payload inspection.
-        try:
-            client._client._transport = None  # type: ignore[attr-defined]
-        except Exception:
-            pass
+    # _payload does not depend on a live HTTP client, so construct a bare object
+    # and inspect the exact production request without opening any sockets.
+    client = object.__new__(LlamaClient)
+    high_payload = client._payload([], max_tokens=high.max_output_tokens, reasoning=True)
+    simple_payload = client._payload([], max_tokens=simple.max_output_tokens, reasoning=False)
     if int(high_payload.get("thinking_budget_tokens", -1)) != high_thinking:
         errors.append("high_payload_missing_reasoning_budget")
     if int(simple_payload.get("thinking_budget_tokens", -1)) != 0:
