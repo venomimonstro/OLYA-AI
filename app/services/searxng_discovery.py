@@ -60,8 +60,6 @@ def _relevance_score(query: str, *, title: str, url: str, snippet: str) -> float
     if not required_host:
         if matches == 0:
             return 0.0
-        # Entity-rich queries should not accept a generic homepage that happens
-        # to contain one broad word.
         if len(tokens) >= 3 and matches == 1:
             return 0.0
         base = 0.48
@@ -72,15 +70,17 @@ def _relevance_score(query: str, *, title: str, url: str, snippet: str) -> float
 
 
 class SearxngDiscovery:
-    """Bounded, relevance-filtered metasearch for interactive chat.
+    """Priority metasearch for interactive OLYA answers.
 
-    Only engines that have remained usable from the production server are in the
-    interactive pool. A blocked engine must not create a latency storm or consume
-    the whole answer budget. SearXNG itself remains replaceable behind this class.
+    Google and Yandex are queried first. Bing and Startpage are used only when
+    the primary wave is blocked, empty or too weak. Per-engine circuit breakers
+    keep CAPTCHA/429 failures away from the user-visible latency path.
     """
 
     name = "searxng"
-    general_engines = ("bing", "startpage")
+    primary_engines = ("google", "yandex")
+    fallback_engines = ("bing", "startpage")
+    general_engines = primary_engines + fallback_engines
 
     def __init__(self, base_url: str, *, timeout_seconds: float = 10.0) -> None:
         self.base_url = base_url.rstrip("/")
@@ -120,11 +120,24 @@ class SearxngDiscovery:
                 url=base.url,
                 snippet=base.snippet,
                 rank=len(result) + 1,
-                provider="searxng:" + ",".join(source_engines[:2]) if source_engines else "searxng",
+                provider="searxng:" + ",".join(source_engines[:3]) if source_engines else "searxng",
             ))
             if len(result) >= limit:
                 break
         return result
+
+    def _active(self, engines: tuple[str, ...], now: float) -> list[str]:
+        return [engine for engine in engines if self._suspended_until.get(engine, 0.0) <= now]
+
+    def _record_health(self, engine: str, ok: bool, now: float) -> None:
+        if ok:
+            self._failures[engine] = 0
+            return
+        failures = self._failures.get(engine, 0) + 1
+        self._failures[engine] = failures
+        # Search-engine anti-bot blocks usually persist for a while. Suspend on
+        # the first hard failure so every user does not pay for the same CAPTCHA.
+        self._suspended_until[engine] = now + (180.0 if failures >= 2 else 90.0)
 
     async def search(
         self,
@@ -139,18 +152,10 @@ class SearxngDiscovery:
         _ = country
         count = min(max(int(count), 1), 12)
         loop = asyncio.get_running_loop()
-        now = loop.time()
-        engines = [engine for engine in self.general_engines if self._suspended_until.get(engine, 0.0) <= now]
-        if not engines:
-            # Do not remain permanently dark after a transient outage.
-            engines = [min(self.general_engines, key=lambda e: self._suspended_until.get(e, 0.0))]
-
-        global_budget = min(self.timeout_seconds, 2.6)
-        per_engine_timeout = min(self.timeout_seconds, 2.2)
-        deadline = loop.time() + global_budget
         results: dict[str, list[SearchHit]] = {}
+        required_site = bool(_site_constraint(query))
 
-        async with httpx.AsyncClient(timeout=per_engine_timeout, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=min(self.timeout_seconds, 1.8), trust_env=False) as client:
             async def one(engine: str) -> tuple[str, list[SearchHit], bool]:
                 params: dict[str, object] = {
                     "q": query,
@@ -173,6 +178,9 @@ class SearxngDiscovery:
                 except (httpx.HTTPError, ValueError):
                     return engine, [], False
 
+                if payload.get("unresponsive_engines"):
+                    return engine, [], False
+
                 hits: list[SearchHit] = []
                 for index, row in enumerate(payload.get("results") or [], start=1):
                     if not isinstance(row, dict):
@@ -181,7 +189,7 @@ class SearxngDiscovery:
                     if not url.startswith(("http://", "https://")):
                         continue
                     title = str(row.get("title") or "")[:500]
-                    snippet = str(row.get("content") or row.get("snippet") or "")[:1200]
+                    snippet = str(row.get("content") or row.get("snippet") or "")[:1000]
                     if _relevance_score(query, title=title, url=url, snippet=snippet) <= 0:
                         continue
                     hits.append(SearchHit(
@@ -196,43 +204,34 @@ class SearxngDiscovery:
                         break
                 return engine, hits, True
 
-            pending = {asyncio.create_task(one(engine)) for engine in engines}
-            try:
-                while pending:
-                    remaining = deadline - loop.time()
-                    if remaining <= 0:
-                        break
-                    done, pending = await asyncio.wait(
-                        pending,
-                        timeout=min(0.25, remaining),
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    for task in done:
-                        try:
-                            engine, hits, transport_ok = task.result()
-                        except Exception:
-                            continue
-                        if transport_ok:
-                            self._failures[engine] = 0
-                        else:
-                            failures = self._failures.get(engine, 0) + 1
-                            self._failures[engine] = failures
-                            if failures >= 2:
-                                self._suspended_until[engine] = loop.time() + 120.0
-                        if hits:
-                            results[engine] = hits
-                    merged = self._merge_hits(results, limit=count)
-                    if len(results) >= 2 and len(merged) >= min(count, 4):
-                        break
-                    # A primary-site query needs one correct official hit, not a
-                    # second search engine merely for decoration.
-                    if _site_constraint(query) and merged:
-                        break
-            finally:
+            async def wave(engine_names: tuple[str, ...], budget: float) -> None:
+                now = loop.time()
+                active = self._active(engine_names, now)
+                if not active:
+                    return
+                tasks = [asyncio.create_task(one(engine)) for engine in active]
+                done, pending = await asyncio.wait(tasks, timeout=budget)
+                for task in done:
+                    try:
+                        engine, hits, transport_ok = task.result()
+                    except Exception:
+                        continue
+                    self._record_health(engine, transport_ok, loop.time())
+                    if hits:
+                        results[engine] = hits
                 for task in pending:
                     task.cancel()
                 if pending:
                     await asyncio.gather(*pending, return_exceptions=True)
+
+            # Primary wave: Google + Yandex. Give them the first chance, but do
+            # not let an anti-bot page consume the whole interactive budget.
+            await wave(self.primary_engines, min(1.15, self.timeout_seconds))
+            merged = self._merge_hits(results, limit=count)
+            primary_good = bool(merged) and (required_site or len(merged) >= min(3, count))
+
+            if not primary_good:
+                await wave(self.fallback_engines, min(1.25, self.timeout_seconds))
 
         merged = self._merge_hits(results, limit=count)
         if not merged:
