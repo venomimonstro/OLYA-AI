@@ -11,12 +11,14 @@ class ConversationCreate(BaseModel):
 class ConversationUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     project_id: str | None = None
+    pinned: bool | None = None
 
 
 class ConversationResponse(BaseModel):
     id: str
     project_id: str | None
     title: str
+    pinned: bool = False
     created_at: datetime
     updated_at: datetime
 
