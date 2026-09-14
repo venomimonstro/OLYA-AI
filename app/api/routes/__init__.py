@@ -18,6 +18,7 @@ from app.current_fact_evidence_guard import install_current_fact_evidence_guard
 from app.stable_fact_evidence_guard import install_stable_fact_evidence_guard
 from app.structured_fact_answer_guard import install_structured_fact_answer_guard
 from app.reasoning_privacy_patch import install_reasoning_privacy_patch
+from app.quality_evidence_policy_patch import install_quality_evidence_policy_patch
 from app.testing_unlimited_usage_patch import install_testing_unlimited_usage_patch
 from app.identity_patch import install_identity_patch
 from app.admin_surface_patch import install_admin_surface_patch
@@ -36,6 +37,7 @@ install_current_fact_evidence_guard()
 install_stable_fact_evidence_guard()
 install_structured_fact_answer_guard()
 install_reasoning_privacy_patch()
+install_quality_evidence_policy_patch()
 install_testing_unlimited_usage_patch()
 install_identity_patch()
 install_admin_surface_patch()
