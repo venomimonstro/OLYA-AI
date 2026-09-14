@@ -10,7 +10,6 @@ from app.qwen4b_runtime_patch import install_qwen4b_runtime_patch
 from app.reasoning_budget_patch import install_reasoning_budget_patch
 from app.gigachat31_runtime_patch import install_gigachat31_runtime_patch
 from app.work_quality_floor_patch import install_work_quality_floor_patch
-from app.market_freshness_patch import install_market_freshness_patch
 from app.current_fact_latency_patch import install_current_fact_latency_patch
 from app.chat_reliability_patch import install_chat_reliability_patch
 from app.response_policy_patch import install_response_policy_patch
@@ -37,7 +36,6 @@ install_qwen4b_runtime_patch()
 install_reasoning_budget_patch()
 install_gigachat31_runtime_patch()
 install_work_quality_floor_patch()
-install_market_freshness_patch()
 install_current_fact_latency_patch()
 install_chat_reliability_patch()
 install_response_policy_patch()
