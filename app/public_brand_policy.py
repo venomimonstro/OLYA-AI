@@ -15,7 +15,10 @@ _VENDOR_RE = re.compile(
 def sanitize_public_branding(document: str) -> str:
     if not isinstance(document, str) or "qwen" not in document.casefold():
         return document
-    return _VENDOR_RE.sub("локальная AI-модель", document)
+    # Keep surrounding copy grammatically intact. Replacing the backend name
+    # with the product identity avoids awkward strings such as
+    # "Локальная локальная AI-модель" while still hiding implementation details.
+    return _VENDOR_RE.sub("OLYA AI", document)
 
 
 def install_public_brand_policy() -> None:
