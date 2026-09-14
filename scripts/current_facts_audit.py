@@ -61,7 +61,8 @@ def audit() -> dict:
         "same_language_policy": (policy, "Always answer in the language of the user's latest message"),
         "evidence_over_memory": (policy, "external evidence supplied in the context is authoritative"),
         "deterministic_evidence_guard": (evidence_guard, "resolve_current_office_holder"),
-        "five_minute_fresh_cache": (search_policy, "300"),
+        "office_holder_no_cache": (search_policy, "ttl_seconds = 0"),
+        "five_minute_other_fresh_cache": (search_policy, "300"),
         "fresh_quality_mode": (search_policy, "quality_mode = True"),
         "evidence_guard_installed": (bootstrap, "install_current_fact_evidence_guard()"),
         "fresh_search_policy_installed": (bootstrap, "install_fresh_search_policy_patch()"),
@@ -85,7 +86,8 @@ def audit() -> dict:
             "min_independent_hosts": decision.min_independent_hosts,
         },
         "deterministic_sample": resolved,
-        "fresh_cache_seconds": 300,
+        "office_holder_cache_seconds": 0,
+        "other_fresh_cache_seconds": 300,
         "search_engines": ["google", "yandex", "bing", "duckduckgo", "brave", "startpage", "qwant"],
     }
 
