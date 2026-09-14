@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import app.api.routes  # noqa: F401 - installs runtime patches
 from app import search_quality_patch
 from app.services import discovery
 from app.services import task_solver
 from app.services.discovery import SearchHit
-from app.services.searxng_discovery import _relevance_score
+from app.services.searxng_discovery import SearxngDiscovery, _relevance_score
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def audit() -> dict:
@@ -20,7 +24,7 @@ def audit() -> dict:
         url="https://www.whitehouse.gov/administration/",
         snippet="Official administration information",
         rank=5,
-        provider="searxng:google,bing",
+        provider="searxng:bing,startpage",
     )
     blog = SearchHit(
         query="current president united states",
@@ -28,7 +32,7 @@ def audit() -> dict:
         url="https://example-blog.test/president",
         snippet="Article discussing the current president",
         rank=1,
-        provider="searxng:google",
+        provider="searxng:bing",
     )
     docs = SearchHit(
         query="python documentation",
@@ -36,7 +40,7 @@ def audit() -> dict:
         url="https://docs.python.org/3/",
         snippet="Official Python documentation reference",
         rank=4,
-        provider="searxng:google,bing",
+        provider="searxng:bing,startpage",
     )
 
     official_row = discovery.enrich_hit(official)
@@ -53,7 +57,6 @@ def audit() -> dict:
     if not ranked or "whitehouse.gov" not in str(ranked[0].get("url") or ""):
         errors.append("primary_source_not_first")
 
-    # Regression for the exact garbage rows observed in production.
     relevance = {
         "whitehouse_good": _relevance_score(
             "current President of the United States site:whitehouse.gov",
@@ -113,6 +116,25 @@ def audit() -> dict:
     if live_ttls["stable"] < 3600:
         errors.append("stable_cache_unnecessarily_short")
 
+    engine_pool = list(SearxngDiscovery.general_engines)
+    if engine_pool != ["bing", "startpage"]:
+        errors.append("interactive_engine_pool_not_bounded")
+
+    settings_text = (ROOT / "searxng" / "settings.yml").read_text("utf-8")
+    for blocked in ("google", "yandex", "duckduckgo", "brave", "qwant"):
+        marker = f"- name: {blocked}\n    disabled: true"
+        if marker not in settings_text:
+            errors.append(f"unstable_engine_enabled:{blocked}")
+
+    compose_text = (ROOT / "docker-compose.yml").read_text("utf-8")
+    if "'engines':'bing'" not in compose_text and '"engines":"bing"' not in compose_text:
+        errors.append("searx_healthcheck_not_single_engine")
+
+    grounding_text = (ROOT / "app" / "services" / "fast_web_grounding.py").read_text("utf-8")
+    for marker in ("max_chars: int = 650", "fetched[:2]", "discovery_rows", "evidence_chars"):
+        if marker not in grounding_text:
+            errors.append(f"evidence_budget_marker_missing:{marker}")
+
     policy_path = search_quality_patch.__file__.replace("search_quality_patch.py", "response_policy_patch.py")
     try:
         policy_text = open(policy_path, "r", encoding="utf-8").read()
@@ -127,9 +149,10 @@ def audit() -> dict:
             errors.append(f"policy_marker_missing:{marker[:28]}")
 
     return {
-        "format": "olya-search-quality-audit-v2",
+        "format": "olya-search-quality-audit-v3",
         "status": "passed" if not errors else "failed",
         "errors": errors,
+        "engine_pool": engine_pool,
         "authority": {
             "official": official_row,
             "documentation": docs_row,
@@ -138,6 +161,7 @@ def audit() -> dict:
         },
         "relevance": relevance,
         "cache_ttl_seconds": live_ttls,
+        "evidence_budget": {"verified_sources": 2, "excerpt_chars_each": 650, "extra_search_rows": 2},
     }
 
 
