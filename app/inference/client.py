@@ -80,6 +80,22 @@ class LlamaClient:
         }
 
     @staticmethod
+    def _thinking_budget(max_tokens: int) -> int:
+        """Bound private reasoning so CPU chat reaches visible text quickly.
+
+        llama.cpp accepts per-request ``thinking_budget_tokens``. The completion
+        cap still includes the final answer, so keep the hidden share modest:
+        enough to improve difficult answers without allowing an unbounded think
+        block to consume the whole user-visible latency budget.
+        """
+        value = max(64, int(max_tokens))
+        if value <= 700:
+            return min(112, max(64, value // 5))
+        if value <= 1150:
+            return min(192, max(96, value // 5))
+        return min(320, max(160, value // 4))
+
+    @staticmethod
     def _content_text(value) -> str:
         if isinstance(value, str):
             return value
@@ -136,8 +152,11 @@ class LlamaClient:
             **self._sampling(reasoning),
             "chat_template_kwargs": {"enable_thinking": bool(reasoning)},
             "reasoning_format": "deepseek" if reasoning else "none",
+            "thinking_budget_tokens": self._thinking_budget(max_tokens) if reasoning else 0,
         }
-        if not reasoning:
+        if reasoning:
+            payload["reasoning_effort"] = "medium" if int(max_tokens) >= 1200 else "low"
+        else:
             payload["reasoning_effort"] = "none"
         return payload
 
@@ -193,6 +212,9 @@ class LlamaClient:
                         if chunk_tps:
                             reported_tps = chunk_tps
 
+                        # reasoning_content is intentionally ignored. Only final
+                        # content reaches the UI; private thinking has a bounded
+                        # token budget above and is never exposed to the user.
                         text = self._chunk_text(data)
                         if not text:
                             continue
@@ -303,20 +325,21 @@ class LlamaClient:
         clean_tools = self._validate_tool_schemas(tools)
         if not messages or len(messages) > 80:
             raise ValueError("Invalid tool conversation length")
+        bounded_max = max(64, min(int(max_tokens), 2048))
         payload = {
             "model": "local",
             "messages": messages,
             "tools": clean_tools,
             "tool_choice": "auto",
             "parallel_tool_calls": False,
-            "max_tokens": max(64, min(int(max_tokens), 2048)),
+            "max_tokens": bounded_max,
             "stream": False,
             **self._sampling(reasoning),
             "chat_template_kwargs": {"enable_thinking": bool(reasoning)},
             "reasoning_format": "deepseek" if reasoning else "none",
+            "thinking_budget_tokens": self._thinking_budget(bounded_max) if reasoning else 0,
         }
-        if not reasoning:
-            payload["reasoning_effort"] = "none"
+        payload["reasoning_effort"] = ("low" if reasoning else "none")
         started = perf_counter()
         try:
             budget = clamp_timeout_seconds(self.timeout_seconds, stage="local tool inference")
