@@ -44,7 +44,6 @@ python3 -m py_compile \
   scripts/download_model.py \
   scripts/warm_local_llm.py \
   app/high_risk_verification_patch.py \
-  app/market_freshness_patch.py \
   app/services/freshness.py
 docker compose config --quiet
 
