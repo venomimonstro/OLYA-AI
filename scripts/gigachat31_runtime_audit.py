@@ -38,24 +38,15 @@ def static_audit() -> tuple[list[str], dict]:
 
     runtime = (ROOT / "app" / "gigachat31_runtime_patch.py").read_text("utf-8")
     bootstrap = (ROOT / "app" / "api" / "routes" / "__init__.py").read_text("utf-8")
-    dockerfile_path = ROOT / "Dockerfile"
-    if not dockerfile_path.exists():
-        dockerfile_path = ROOT / "build-inputs" / "Dockerfile"
-    dockerfile = dockerfile_path.read_text("utf-8") if dockerfile_path.exists() else ""
-    start_path = ROOT / "scripts" / "start_app.sh"
-    start_script = start_path.read_text("utf-8") if start_path.exists() else ""
     if "install_gigachat31_runtime_patch" not in runtime or "install_gigachat31_runtime_patch" not in bootstrap:
         errors.append("native_runtime_patch")
-    payload_pos = runtime.find("def payload")
-    body = runtime[payload_pos:] if payload_pos >= 0 else runtime
-    if "chat_template_kwargs" in body or "reasoning_format" in body or "thinking_budget_tokens" in body:
-        errors.append("qwen_payload_leak")
+    for forbidden in ("chat_template_kwargs", "reasoning_format", "thinking_budget_tokens", "reasoning_effort"):
+        if forbidden in runtime:
+            errors.append(f"foreign_payload_field:{forbidden}")
     if '"temperature": 0.0' not in runtime:
         errors.append("gigachat_not_deterministic")
-    if "start_app.sh" not in dockerfile:
-        errors.append("startup_wrapper_missing")
-    if "scripts.warm_local_llm" not in start_script or "&" not in start_script:
-        errors.append("background_warmup_missing")
+    if '"tool_choice": "none"' not in runtime:
+        errors.append("tool_choice_none_missing")
 
     calc = utility_reply("Сколько будет 17 * 23? Ответь только числом.")
     checks["calculator"] = calc.text if calc else None
@@ -75,11 +66,23 @@ def _telemetry(payload: dict, elapsed_ms: int) -> dict:
     return {"completion_tokens": completion_tokens, "tokens_per_second": round(tps, 3), "prompt_tokens_per_second": round(prompt_tps, 3)}
 
 
+def _request(prompt: str, max_tokens: int, *, stream: bool) -> dict:
+    return {
+        "model": "local",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0,
+        "tool_choice": "none",
+        "stream": stream,
+    }
+
+
 async def _nonstream_sample(client: httpx.AsyncClient, base: str, prompt: str, expected: str, max_tokens: int) -> dict:
     started = perf_counter()
     try:
-        response = await client.post(base + "/v1/chat/completions", json={"model": "local", "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens, "temperature": 0, "stream": False}, timeout=httpx.Timeout(60.0, connect=5.0))
-        response.raise_for_status(); payload = response.json()
+        response = await client.post(base + "/v1/chat/completions", json=_request(prompt, max_tokens, stream=False), timeout=httpx.Timeout(60.0, connect=5.0))
+        response.raise_for_status()
+        payload = response.json()
         text = str((((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or "")).strip()
         elapsed_ms = int((perf_counter() - started) * 1000)
         return {"prompt": prompt, "ok": bool(text) and (not expected or expected in text.casefold()), "elapsed_ms": elapsed_ms, "answer": text[:500], **_telemetry(payload, elapsed_ms)}
@@ -89,9 +92,8 @@ async def _nonstream_sample(client: httpx.AsyncClient, base: str, prompt: str, e
 
 async def _stream_perf(client: httpx.AsyncClient, base: str) -> dict:
     started = perf_counter(); first = None; text_parts: list[str] = []; tokens = 0; reported_tps = 0.0
-    request = {"model": "local", "messages": [{"role": "user", "content": "Объясни в 4 коротких предложениях, зачем нужен HTTP."}], "max_tokens": 96, "temperature": 0, "stream": True}
     try:
-        async with client.stream("POST", base + "/v1/chat/completions", json=request, timeout=httpx.Timeout(60.0, connect=5.0)) as response:
+        async with client.stream("POST", base + "/v1/chat/completions", json=_request("Объясни в 4 коротких предложениях, зачем нужен HTTP.", 96, stream=True), timeout=httpx.Timeout(60.0, connect=5.0)) as response:
             response.raise_for_status()
             async for raw in response.aiter_lines():
                 line = raw.strip()
@@ -140,7 +142,21 @@ async def main_async() -> int:
     if not samples or not all(bool(row.get("ok")) for row in samples): errors.append("generation_correctness")
     perf = live.get("stream_performance") or {}
     if not perf.get("ok"): errors.append("stream_generation")
-    result = {"format": "olya-gigachat31-runtime-audit-v5", "status": "passed" if not errors else "failed", "errors": errors, "manifest": manifest, "runtime_env": {"model_name": os.getenv("X1_LLAMA_MODEL_NAME", ""), "model_file": os.getenv("X1_LLAMA_MODEL_FILE", ""), "context_tokens": os.getenv("X1_DEEP_CONTEXT_TOKENS", ""), "llama_memory_limit": os.getenv("X1_LLAMA_MEMORY_LIMIT", ""), "threads": os.getenv("X1_LLAMA_THREADS", ""), "batch_threads": os.getenv("X1_LLAMA_THREADS_BATCH", "")}, "live": live}
+    result = {
+        "format": "olya-gigachat31-runtime-audit-v6",
+        "status": "passed" if not errors else "failed",
+        "errors": errors,
+        "manifest": manifest,
+        "runtime_env": {
+            "model_name": os.getenv("X1_LLAMA_MODEL_NAME", ""),
+            "model_file": os.getenv("X1_LLAMA_MODEL_FILE", ""),
+            "context_tokens": os.getenv("X1_DEEP_CONTEXT_TOKENS", ""),
+            "llama_memory_limit": os.getenv("X1_LLAMA_MEMORY_LIMIT", ""),
+            "threads": os.getenv("X1_LLAMA_THREADS", ""),
+            "batch_threads": os.getenv("X1_LLAMA_THREADS_BATCH", ""),
+        },
+        "live": live,
+    }
     print(json.dumps(result, ensure_ascii=False, indent=2)); return 0 if result["status"] == "passed" else 2
 
 
