@@ -3,9 +3,8 @@ use_default_settings:
     keep_only:
       - google
       - yandex
-      - bing
       - duckduckgo
-      - startpage
+      - bing
 
 general:
   debug: false
@@ -15,23 +14,19 @@ search:
   safe_search: 1
   autocomplete: ""
   formats:
-    - html
     - json
 
-# Google and Yandex stay the preferred SERP sources while healthy. Bing is the
-# first fallback; DuckDuckGo and Startpage are bounded secondary fallbacks.
-# Application-side circuit breakers prevent CAPTCHA/429 engines from delaying
-# every user request.
+# One internal metasearch request only. Google/Yandex are retained for result
+# quality when the server IP can access them; DDG and Bing provide keyless
+# fallbacks. Application code takes at most TOP-5 results.
 engines:
   - name: google
     disabled: false
   - name: yandex
     disabled: false
-  - name: bing
-    disabled: false
   - name: duckduckgo
     disabled: false
-  - name: startpage
+  - name: bing
     disabled: false
 
 server:
@@ -45,5 +40,5 @@ ui:
   static_use_hash: true
 
 outgoing:
-  request_timeout: 1.6
-  max_request_timeout: 2.2
+  request_timeout: 1.4
+  max_request_timeout: 1.8
