@@ -6,6 +6,7 @@ from pathlib import Path
 
 import app.api.routes  # noqa: F401 - install runtime patches
 from app import answer_strategy_patch
+from app.inference.client import LlamaClient
 from app.services import fast_web_grounding
 from app.services.searxng_discovery import SearxngDiscovery
 
@@ -18,6 +19,7 @@ def audit() -> dict:
 
     cases = {
         "practical_chess": "что нужно знать чтобы часто побеждать в шахматах",
+        "stable_fact": "кто написал мастер и маргарита",
         "explain": "что такое HTTP и как он работает",
         "compare": "что лучше PostgreSQL или MySQL для интернет-магазина",
         "writing": "напиши поздравление с днем рождения",
@@ -27,6 +29,8 @@ def audit() -> dict:
 
     if not answer_strategy_patch._knowledge_synthesis(cases["practical_chess"]):
         errors.append("chess_not_knowledge_synthesis")
+    if not answer_strategy_patch._stable_atomic(cases["stable_fact"]):
+        errors.append("stable_fact_not_fast_atomic")
     if not fast_web_grounding.should_auto_ground(cases["practical_chess"]):
         errors.append("chess_not_auto_grounded")
     if "6-9 actionable points" not in shapes["practical_chess"]:
@@ -54,18 +58,22 @@ def audit() -> dict:
 
     checks = {
         "chess_auto_web": fast_web_grounding.should_auto_ground(cases["practical_chess"]),
+        "stable_fact_fast_path": answer_strategy_patch._stable_atomic(cases["stable_fact"]),
         "practical_shape": shapes["practical_chess"],
         "explain_shape": shapes["explain"],
         "compare_shape": shapes["compare"],
         "primary_engines": list(SearxngDiscovery.primary_engines),
         "fallback_engines": list(SearxngDiscovery.fallback_engines),
         "compact_synthesis_installed": bool(getattr(fast_web_grounding.execute_fast_web_grounding, "_olya_compact_synthesis", False)),
+        "source_appendix_installed": bool(getattr(LlamaClient.generate, "_olya_source_appendix", False)),
     }
     if not checks["compact_synthesis_installed"]:
         errors.append("compact_synthesis_not_installed")
+    if not checks["source_appendix_installed"]:
+        errors.append("source_appendix_not_installed")
 
     return {
-        "format": "olya-answer-strategy-audit-v1",
+        "format": "olya-answer-strategy-audit-v2",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "checks": checks,
