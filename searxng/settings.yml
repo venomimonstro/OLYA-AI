@@ -1,4 +1,8 @@
-use_default_settings: true
+use_default_settings:
+  engines:
+    keep_only:
+      - bing
+      - startpage
 
 general:
   debug: false
@@ -11,24 +15,14 @@ search:
     - html
     - json
 
-# Production interactive search uses only engines that remain stable from the
-# server IP. Engines that repeatedly trigger CAPTCHA/429/parser failures are
-# disabled instead of being hammered by health checks and every user query.
+# Production interactive search is intentionally restricted to the two engines
+# that remain usable from the server IP. keep_only prevents hidden default
+# engines (Wikidata, Google CSE, etc.) from being queried by generic searches.
 engines:
   - name: bing
     disabled: false
   - name: startpage
     disabled: false
-  - name: google
-    disabled: true
-  - name: yandex
-    disabled: true
-  - name: duckduckgo
-    disabled: true
-  - name: brave
-    disabled: true
-  - name: qwant
-    disabled: true
 
 server:
   bind_address: "0.0.0.0"
