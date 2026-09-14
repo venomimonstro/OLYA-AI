@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.files import FileCitationRead
 
@@ -47,8 +47,6 @@ class ChatRequest(BaseModel):
     task_id: str | None = None
     research_source_ids: list[str] = Field(default_factory=list, max_length=10)
     development_command: Literal["auto", "status", "continue", "pause", "resume", "rollback"] | None = None
-    # Durable idempotency/reconnect key. Browser clients generate one per
-    # logical submission and reuse it only while reconnecting that same run.
     client_request_id: str | None = Field(default=None, min_length=12, max_length=80, pattern=r"^[A-Za-z0-9_.:-]+$")
 
     @model_validator(mode="after")
@@ -94,13 +92,16 @@ class ChatResponse(BaseModel):
     usage: ChatUsage
     quality: QualityReport | None = None
     development: dict[str, Any] | None = None
-    # High-level, user-safe record of autonomous work performed for this turn.
-    # Never contains hidden reasoning, prompt contents or raw source bodies.
     task_execution: dict[str, Any] | None = None
     conversation_id: str | None = None
     run_id: str | None = None
     client_request_id: str | None = None
     file_citations: list[FileCitationRead] = Field(default_factory=list)
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def public_model_brand(cls, _value):
+        return "OLYA AI"
 
 
 class ChatRunStatus(BaseModel):
