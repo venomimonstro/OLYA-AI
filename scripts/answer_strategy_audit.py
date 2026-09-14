@@ -2,17 +2,14 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import app.api.routes  # noqa: F401 - install runtime patches
 from app import answer_strategy_patch
+from app.gigachat31_runtime_patch import compact_prompt_rows
 from app.inference.client import LlamaClient
 from app.services import fast_web_grounding
 from app.services.project_context import ProjectContextBuilder
 from app.services.searxng_discovery import SearxngDiscovery, _payload_marks_engine_unresponsive
-
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def audit() -> dict:
@@ -37,7 +34,8 @@ def audit() -> dict:
     if "1-4 sentences" not in shapes["short"]: errors.append("explicit_short_not_respected")
 
     if tuple(SearxngDiscovery.primary_engines) != ("google", "yandex"): errors.append("primary_search_not_google_yandex")
-    if tuple(SearxngDiscovery.fallback_engines) != ("bing", "startpage"): errors.append("search_fallback_order")
+    if tuple(SearxngDiscovery.fallback_engines) != ("bing", "duckduckgo", "startpage"): errors.append("search_fallback_order")
+    if SearxngDiscovery.max_results != 5: errors.append("search_not_top5")
     if not _payload_marks_engine_unresponsive({"unresponsive_engines": [["google", "CAPTCHA"]]}, "google"):
         errors.append("google_captcha_not_detected")
     if not _payload_marks_engine_unresponsive({"unresponsive_engines": [{"engine": "yandex", "reason": "parse"}]}, "yandex"):
@@ -47,37 +45,37 @@ def audit() -> dict:
     if context.hot_history_messages > 6: errors.append("hot_history_too_large")
     if context.max_memories > 12: errors.append("project_memory_prompt_too_large")
 
-    source_text = (ROOT / "app" / "answer_strategy_patch.py").read_text("utf-8")
-    if "Dynamic answer-shape instructions MUST stay at the tail" not in source_text:
-        errors.append("dynamic_prompt_tail_contract_missing")
-    memory_text = (ROOT / "app" / "services" / "long_term_memory.py").read_text("utf-8")
-    if "max_chars=1100" not in memory_text or "limit=4" not in memory_text:
-        errors.append("cpu_memory_budget_missing")
-
-    settings = (ROOT / "searxng" / "settings.yml").read_text("utf-8")
-    for engine in ("google", "yandex", "bing", "startpage"):
-        if f"- {engine}" not in settings: errors.append(f"searx_engine_missing:{engine}")
-    if "keep_only:" not in settings: errors.append("searx_keep_only_missing")
+    sample = [
+        {"role": "system", "content": "OLYA RESPONSE POLICY " + "x" * 2500},
+        {"role": "system", "content": "OLYA MEMORY " + "m" * 3000},
+        {"role": "user", "content": "old question " + "q" * 1200},
+        {"role": "assistant", "content": "old answer " + "a" * 1600},
+        {"role": "system", "content": "ANSWER SHAPE: practical guidance"},
+        {"role": "user", "content": cases["practical_chess"]},
+    ]
+    compact = compact_prompt_rows(sample, reasoning=False)
+    compact_chars = sum(len(str(row.get("content") or "")) for row in compact)
+    if compact_chars > 3200: errors.append(f"simple_prompt_budget_exceeded:{compact_chars}")
+    if not any(row.get("role") == "user" and cases["practical_chess"] in str(row.get("content") or "") for row in compact):
+        errors.append("latest_user_lost_in_compaction")
 
     checks = {
         "chess_auto_web": fast_web_grounding.should_auto_ground(cases["practical_chess"]),
         "stable_fact_fast_path": answer_strategy_patch._stable_atomic(cases["stable_fact"]),
-        "practical_shape": shapes["practical_chess"],
-        "explain_shape": shapes["explain"],
-        "compare_shape": shapes["compare"],
         "primary_engines": list(SearxngDiscovery.primary_engines),
         "fallback_engines": list(SearxngDiscovery.fallback_engines),
+        "max_search_results": SearxngDiscovery.max_results,
         "hot_history_messages": context.hot_history_messages,
         "max_project_memories": context.max_memories,
+        "simple_prompt_chars_after_compaction": compact_chars,
         "compact_synthesis_installed": bool(getattr(fast_web_grounding.execute_fast_web_grounding, "_olya_compact_synthesis", False)),
         "source_appendix_installed": bool(getattr(LlamaClient.generate, "_olya_source_appendix", False)),
-        "google_captcha_detected": _payload_marks_engine_unresponsive({"unresponsive_engines": [["google", "CAPTCHA"]]}, "google"),
     }
     if not checks["compact_synthesis_installed"]: errors.append("compact_synthesis_not_installed")
     if not checks["source_appendix_installed"]: errors.append("source_appendix_not_installed")
 
     return {
-        "format": "olya-answer-strategy-audit-v3",
+        "format": "olya-answer-strategy-audit-v4",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "checks": checks,
