@@ -36,59 +36,20 @@ HIGH_RISK_MARKERS = (
 )
 
 ANALYTIC_MARKERS = (
-    "проанализируй",
-    "сравни",
-    "разработай стратег",
-    "спроектируй",
-    "архитектур",
-    "оптимизируй",
-    "найди причину",
-    "найди лучш",
-    "подбери лучш",
-    "посоветуй лучш",
-    "рекомендуй лучш",
-    "debug",
-    "root cause",
-    "analyze",
-    "compare",
-    "design",
-    "strategy",
+    "проанализируй", "сравни", "разработай стратег", "спроектируй", "архитектур",
+    "оптимизируй", "найди причину", "найди лучш", "подбери лучш", "посоветуй лучш",
+    "рекомендуй лучш", "debug", "root cause", "analyze", "compare", "design", "strategy",
     "план реализации",
 )
 
 CODE_MARKERS = (
-    "код",
-    "функци",
-    "класс",
-    "api",
-    "sql",
-    "docker",
-    "fastapi",
-    "python",
-    "javascript",
-    "typescript",
-    "repository",
-    "репозитор",
-    "тест",
-    "bug",
-    "баг",
+    "код", "функци", "класс", "api", "sql", "docker", "fastapi", "python", "javascript",
+    "typescript", "repository", "репозитор", "тест", "bug", "баг",
 )
 
-# These signals still lower complexity a little because transformations usually
-# need less planning. They no longer force the deliberately tiny Fast route:
-# in practice that route produced answers that were too short and brittle for
-# the product-quality bar. Auto now bottoms out at Work.
 LIGHT_TASK_MARKERS = (
-    "перепиши",
-    "rephrase",
-    "сократи",
-    "shorten",
-    "исправь орфограф",
-    "proofread",
-    "переведи",
-    "translate",
-    "кратко",
-    "briefly",
+    "перепиши", "rephrase", "сократи", "shorten", "исправь орфограф", "proofread",
+    "переведи", "translate", "кратко", "briefly",
 )
 
 
@@ -96,92 +57,95 @@ def _complexity_score(normalized: str) -> tuple[int, list[str]]:
     score = 0
     reasons: list[str] = []
     size = len(normalized)
-
     if size > 8_000:
-        score += 4
-        reasons.append("very_long_input")
+        score += 4; reasons.append("very_long_input")
     elif size > 4_000:
-        score += 2
-        reasons.append("long_input")
+        score += 2; reasons.append("long_input")
     elif size > 1_800:
-        score += 1
-        reasons.append("medium_input")
+        score += 1; reasons.append("medium_input")
 
     analytic_hits = sum(marker in normalized for marker in ANALYTIC_MARKERS)
     if analytic_hits:
-        score += min(4, analytic_hits * 2)
-        reasons.append("analysis_task")
-
+        score += min(4, analytic_hits * 2); reasons.append("analysis_task")
     if any(marker in normalized for marker in ("найди лучш", "подбери лучш", "посоветуй лучш", "рекомендуй лучш")):
-        score += 1
-        reasons.append("comparative_recommendation")
+        score += 1; reasons.append("comparative_recommendation")
 
     code_hits = sum(marker in normalized for marker in CODE_MARKERS)
     if code_hits >= 2:
-        score += 2
-        reasons.append("code_task")
+        score += 2; reasons.append("code_task")
     elif code_hits == 1:
-        score += 1
-        reasons.append("code_signal")
+        score += 1; reasons.append("code_signal")
 
     structural_signals = normalized.count("\n-") + normalized.count("\n1.") + normalized.count("\n2.")
     if structural_signals >= 3:
-        score += 2
-        reasons.append("multi_deliverable")
-
+        score += 2; reasons.append("multi_deliverable")
     if any(marker in normalized for marker in LIGHT_TASK_MARKERS):
-        score -= 2 if size < 4_000 else 1
-        reasons.append("light_transformation_task")
-
+        score -= 2 if size < 4_000 else 1; reasons.append("light_transformation_task")
     return max(-2, min(10, score)), reasons
 
 
 def choose_route(text: str, requested_mode: str, normal_context: int, deep_context: int) -> RouteDecision:
-    normalized = text.casefold().strip()
+    """Map UI quality levels to real inference profiles.
 
+    Public UX names are Simple / Medium / High. Internal values remain
+    fast / work / deep for backwards compatibility with persisted usage data.
+    Auto remains an API-compatible adaptive mode and is not required in the UI.
+    """
+    normalized = text.casefold().strip()
     deep_limit = max(1024, int(deep_context))
     normal_limit = min(max(1024, int(normal_context)), deep_limit)
     starter_4k = deep_limit <= 4096
-
     score, reasons = _complexity_score(normalized)
     high_risk = next((marker for marker in HIGH_RISK_MARKERS if marker in normalized), None)
     if high_risk:
-        score = max(score, 7)
-        reasons.append("high_risk_or_audit")
+        score = max(score, 7); reasons.append("high_risk_or_audit")
 
-    # Fast is retained only as a backwards-compatible request value. Treat it
-    # like Auto rather than a real quality lane: ordinary legacy requests get
-    # Work, while complex/risky legacy requests may still escalate to Deep.
     if requested_mode == "fast":
-        reasons.insert(0, "fast_upgraded_to_auto")
-        mode: Mode = "deep" if high_risk or score >= 6 else "work"
-    elif requested_mode in {"work", "deep"}:
-        mode = requested_mode  # type: ignore[assignment]
-        reasons.insert(0, "user_selected")
+        mode: Mode = "fast"; reasons.insert(0, "user_selected_simple")
+    elif requested_mode == "work":
+        mode = "work"; reasons.insert(0, "user_selected_medium")
+    elif requested_mode == "deep":
+        mode = "deep"; reasons.insert(0, "user_selected_high")
     elif high_risk or score >= 6:
-        mode = "deep"
+        mode = "deep"; reasons.insert(0, "auto_high")
+    elif score >= 2:
+        mode = "work"; reasons.insert(0, "auto_medium")
     else:
-        mode = "work"
+        mode = "fast"; reasons.insert(0, "auto_simple")
+
+    if mode == "fast":
+        # Super-fast lane: no hidden thinking pass. Still enough output budget
+        # for a useful answer rather than the old artificially terse Fast lane.
+        return RouteDecision(
+            mode="fast",
+            max_context_tokens=normal_limit,
+            max_output_tokens=620 if starter_4k else 1100,
+            reasoning=False,
+            complexity_score=score,
+            reason=",".join(reasons),
+        )
 
     if mode == "deep":
+        # High quality uses internal thinking and the full configured context.
+        # On a 4K runtime keep output below half the context so the prompt and
+        # retrieved evidence are not squeezed out by a huge completion reserve.
         return RouteDecision(
             mode="deep",
             max_context_tokens=deep_limit,
-            max_output_tokens=1200 if starter_4k else 2400,
+            max_output_tokens=1400 if starter_4k else 3000,
             reasoning=True,
             complexity_score=score,
-            reason=",".join(reasons) or "deep_default",
+            reason=",".join(reasons),
         )
 
-    # Work is now the quality floor. Even straightforward questions get enough
-    # output budget for a complete answer; reasoning turns on automatically for
-    # analytical or multi-step tasks.
+    # Medium is the balanced default: larger answers, with internal reasoning
+    # only when the task is genuinely analytical or multi-step.
     work_reasoning = score >= 2
     return RouteDecision(
         mode="work",
         max_context_tokens=normal_limit,
-        max_output_tokens=(900 if work_reasoning else 760) if starter_4k else (1700 if work_reasoning else 1450),
+        max_output_tokens=1050 if starter_4k else 2100,
         reasoning=work_reasoning,
         complexity_score=score,
-        reason=",".join(reasons) or "work_default",
+        reason=",".join(reasons),
     )
