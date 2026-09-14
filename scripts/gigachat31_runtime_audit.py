@@ -9,6 +9,8 @@ from time import perf_counter
 
 import httpx
 
+from app.utility_chat import utility_reply
+
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_NAME = "GigaChat3.1-10B-A1.8B-Q4_K_M"
 EXPECTED_FILE = "GigaChat3.1-10B-A1.8B-q4_K_M.gguf"
@@ -36,12 +38,22 @@ def static_audit() -> tuple[list[str], dict]:
 
     runtime = (ROOT / "app" / "gigachat31_runtime_patch.py").read_text("utf-8")
     bootstrap = (ROOT / "app" / "api" / "routes" / "__init__.py").read_text("utf-8")
+    dockerfile = (ROOT / "Dockerfile").read_text("utf-8") if (ROOT / "Dockerfile").exists() else ""
     if "install_gigachat31_runtime_patch" not in runtime or "install_gigachat31_runtime_patch" not in bootstrap:
         errors.append("native_runtime_patch")
     payload_pos = runtime.find("def payload")
     body = runtime[payload_pos:] if payload_pos >= 0 else runtime
     if "chat_template_kwargs" in body or "reasoning_format" in body or "thinking_budget_tokens" in body:
         errors.append("qwen_payload_leak")
+    if '"temperature": 0.0' not in runtime:
+        errors.append("gigachat_not_deterministic")
+    if dockerfile and "scripts.warm_local_llm" not in dockerfile:
+        errors.append("startup_warmup_missing")
+
+    calc = utility_reply("Сколько будет 17 * 23? Ответь только числом.")
+    checks["calculator"] = calc.text if calc else None
+    if calc is None or calc.kind != "calculator" or calc.text != "391":
+        errors.append("calculator_utility")
     return errors, checks
 
 
@@ -69,24 +81,22 @@ async def _nonstream_sample(client: httpx.AsyncClient, base: str, prompt: str, e
                 "model": "local",
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": max_tokens,
-                "temperature": 0.1,
-                "top_p": 0.9,
+                "temperature": 0,
                 "stream": False,
             },
-            timeout=httpx.Timeout(90.0, connect=5.0),
+            timeout=httpx.Timeout(60.0, connect=5.0),
         )
         response.raise_for_status()
         payload = response.json()
         text = str((((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or "")).strip()
         elapsed_ms = int((perf_counter() - started) * 1000)
-        row = {
+        return {
             "prompt": prompt,
             "ok": bool(text) and (not expected or expected in text.casefold()),
             "elapsed_ms": elapsed_ms,
             "answer": text[:500],
             **_telemetry(payload, elapsed_ms),
         }
-        return row
     except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
         return {"prompt": prompt, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
@@ -97,12 +107,11 @@ async def _stream_perf(client: httpx.AsyncClient, base: str) -> dict:
         "model": "local",
         "messages": [{"role": "user", "content": "Объясни в 4 коротких предложениях, зачем нужен HTTP."}],
         "max_tokens": 96,
-        "temperature": 0.2,
-        "top_p": 0.9,
+        "temperature": 0,
         "stream": True,
     }
     try:
-        async with client.stream("POST", base + "/v1/chat/completions", json=request, timeout=httpx.Timeout(90.0, connect=5.0)) as response:
+        async with client.stream("POST", base + "/v1/chat/completions", json=request, timeout=httpx.Timeout(60.0, connect=5.0)) as response:
             response.raise_for_status()
             async for raw in response.aiter_lines():
                 line = raw.strip()
@@ -158,8 +167,13 @@ async def live_probe() -> dict:
             client, base, "Кто написал роман «Мастер и Маргарита»? Ответь только фамилией.", "булгаков", 24
         ))
         result["samples"].append(await _nonstream_sample(
-            client, base, "Сколько будет 17 * 23? Ответь только числом.", "391", 12
+            client, base, "Столица Франции? Ответь только названием города.", "париж", 24
         ))
+        # Direct model arithmetic is kept as a diagnostic only. Production routes
+        # arithmetic through the deterministic calculator verified above.
+        result["model_math_diagnostic"] = await _nonstream_sample(
+            client, base, "Сколько будет 17 * 23? Ответь только числом.", "391", 16
+        )
         result["stream_performance"] = await _stream_perf(client, base)
     return result
 
@@ -174,7 +188,7 @@ async def main_async() -> int:
     if not perf.get("ok"): errors.append("stream_generation")
 
     result = {
-        "format": "olya-gigachat31-runtime-audit-v3",
+        "format": "olya-gigachat31-runtime-audit-v4",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "manifest": manifest,
