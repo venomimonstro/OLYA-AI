@@ -121,10 +121,11 @@ def audit() -> dict:
         errors.append("interactive_engine_pool_not_bounded")
 
     settings_text = (ROOT / "searxng" / "settings.yml").read_text("utf-8")
-    for blocked in ("google", "yandex", "duckduckgo", "brave", "qwant"):
-        marker = f"- name: {blocked}\n    disabled: true"
-        if marker not in settings_text:
-            errors.append(f"unstable_engine_enabled:{blocked}")
+    if "keep_only:" not in settings_text or "- bing" not in settings_text or "- startpage" not in settings_text:
+        errors.append("searx_keep_only_missing")
+    for unexpected in ("wikidata", "google cse", "duckduckgo", "qwant", "yandex", "brave"):
+        if f"- {unexpected}" in settings_text:
+            errors.append(f"unexpected_keep_only_engine:{unexpected}")
 
     compose_text = (ROOT / "docker-compose.yml").read_text("utf-8")
     if "'engines':'bing'" not in compose_text and '"engines":"bing"' not in compose_text:
@@ -149,7 +150,7 @@ def audit() -> dict:
             errors.append(f"policy_marker_missing:{marker[:28]}")
 
     return {
-        "format": "olya-search-quality-audit-v3",
+        "format": "olya-search-quality-audit-v4",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "engine_pool": engine_pool,
