@@ -73,7 +73,17 @@ _RULES: tuple[tuple[FreshnessCategory, re.Pattern[str], int, int, str], ...] = (
     ),
     (
         "market",
-        re.compile(r"\b(?:курс\s+(?:доллара|евро|юаня|валют)|ключевая\s+ставка|котиров\w*|акци[яий]|индекс\w*|биткоин|bitcoin|ethereum|exchange\s+rate|stock\s+price|market\s+quote|key\s+rate)\b", re.IGNORECASE),
+        re.compile(
+            r"(?:"
+            r"\bкурс\s+(?:доллар(?:а|у|ом|ы)?|евро|юан(?:я|ь)?|рубл(?:я|ь)?|валют\w*|usd|eur|cny|rub)"
+            r"(?:\s+(?:к|в|за))?\s*(?:рубл(?:ю|я|ь)?|доллар(?:у|а)?|евро|юан(?:ю|я|ь)?|usd|eur|cny|rub)?\b|"
+            r"\b(?:usd|eur|cny|rub|btc|eth)\s*[/_-]?\s*(?:usd|eur|cny|rub)\b|"
+            r"\b(?:доллар|доллара|евро|юань|юаня)\s+(?:рубль|рубля|рублю)\b|"
+            r"\b(?:ключевая\s+ставка|котиров\w*|акци[яий]|индекс\w*|биткоин|bitcoin|btc|ethereum|эфириум|eth|"
+            r"exchange\s+rate|stock\s+price|market\s+quote|key\s+rate)\b"
+            r")",
+            re.IGNORECASE,
+        ),
         15 * 60,
         2,
         "Рыночные показатели и ставки изменяются во времени.",
