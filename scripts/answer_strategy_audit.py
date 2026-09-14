@@ -4,81 +4,92 @@ from __future__ import annotations
 import inspect
 import json
 
-import app.api.routes  # noqa: F401 - install runtime patches
-from app import answer_strategy_patch
-from app.gigachat31_runtime_patch import compact_prompt_rows
-from app.services import fast_web_grounding
+import app.api.routes  # noqa: F401 - install the single GigaChat runtime profile
+from app.api.routes import smart_chat
+from app.gigachat31_runtime_patch import install_gigachat31_runtime_patch
+from app.inference.client import LlamaClient
+from app.schemas.chat import ChatMessage
+from app.services.clean_web import should_use_web
 from app.services.project_context import ProjectContextBuilder
-from app.services.searxng_discovery import SearxngDiscovery, _payload_marks_engine_unresponsive
+from app.services.searxng_discovery import SearxngDiscovery
 
 
 def audit() -> dict:
     errors: list[str] = []
-    cases = {
-        "practical_chess": "что нужно знать чтобы часто побеждать в шахматах",
-        "stable_fact": "кто написал мастер и маргарита",
-        "explain": "что такое HTTP и как он работает",
-        "compare": "что лучше PostgreSQL или MySQL для интернет-магазина",
-        "writing": "напиши поздравление с днем рождения",
-        "short": "кратко: столица Франции?",
-    }
-    shapes = {name: answer_strategy_patch._answer_shape(question) for name, question in cases.items()}
 
-    if not answer_strategy_patch._knowledge_synthesis(cases["practical_chess"]): errors.append("chess_not_knowledge_synthesis")
-    if not answer_strategy_patch._stable_atomic(cases["stable_fact"]): errors.append("stable_fact_not_fast_atomic")
-    if not fast_web_grounding.should_auto_ground(cases["practical_chess"]): errors.append("chess_not_auto_grounded")
-    if "6-9 actionable points" not in shapes["practical_chess"]: errors.append("practical_depth_missing")
-    if "4-7 key points" not in shapes["explain"]: errors.append("explain_depth_missing")
-    if "recommendation first" not in shapes["compare"]: errors.append("comparison_shape_missing")
-    if "no research" not in shapes["writing"].casefold(): errors.append("writing_search_guard_missing")
-    if "1-4 sentences" not in shapes["short"]: errors.append("explicit_short_not_respected")
+    bootstrap = inspect.getsource(__import__("app.api.routes", fromlist=["dummy"]))
+    forbidden_installers = (
+        "install_answer_strategy_patch",
+        "install_fresh_search_policy_patch",
+        "install_ultrafast_fresh_web_patch",
+        "install_quality_evidence_policy_patch",
+        "install_high_risk_verification_patch",
+        "install_qwen4b_runtime_patch",
+        "install_reasoning_budget_patch",
+    )
+    for name in forbidden_installers:
+        if name in bootstrap:
+            errors.append(f"legacy_patch_still_bootstrapped:{name}")
 
-    if tuple(SearxngDiscovery.primary_engines) != ("google", "yandex"): errors.append("primary_search_not_google_yandex")
-    if tuple(SearxngDiscovery.fallback_engines) != ("bing", "duckduckgo", "startpage"): errors.append("search_fallback_order")
-    if SearxngDiscovery.max_results != 5: errors.append("search_not_top5")
-    if not _payload_marks_engine_unresponsive({"unresponsive_engines": [["google", "CAPTCHA"]]}, "google"):
-        errors.append("google_captcha_not_detected")
-    if not _payload_marks_engine_unresponsive({"unresponsive_engines": [{"engine": "yandex", "reason": "parse"}]}, "yandex"):
-        errors.append("yandex_failure_not_detected")
+    if "build_clean_web_context" not in inspect.getsource(smart_chat._smart_managed_runner):
+        errors.append("clean_web_not_used_by_chat")
+    if "verification\": \"off\"" not in inspect.getsource(smart_chat._smart_managed_runner):
+        errors.append("interactive_chat_may_run_extra_llm_verification")
+
+    if should_use_web("что такое HTTP?", "auto"):
+        errors.append("ordinary_question_unnecessarily_searches")
+    if should_use_web("как научиться лучше играть в шахматы?", "auto"):
+        errors.append("evergreen_advice_unnecessarily_searches")
+    if not should_use_web("какая погода в Москве сейчас?", "auto"):
+        errors.append("current_question_not_searched")
+    if not should_use_web("найди последние новости OpenAI", "auto"):
+        errors.append("explicit_search_not_detected")
+    if should_use_web("найди последние новости OpenAI", "off"):
+        errors.append("web_off_not_respected")
+
+    if tuple(SearxngDiscovery.primary_engines) != ("google", "yandex", "duckduckgo", "bing"):
+        errors.append("unexpected_search_engines")
+    if tuple(SearxngDiscovery.fallback_engines) != ("duckduckgo", "bing"):
+        errors.append("unexpected_search_fallback")
+    if SearxngDiscovery.max_results != 5:
+        errors.append("search_not_top5")
 
     context = ProjectContextBuilder()
-    if context.hot_history_messages > 6: errors.append("hot_history_too_large")
-    if context.max_memories > 12: errors.append("project_memory_prompt_too_large")
+    if context.hot_history_messages > 6:
+        errors.append("hot_history_too_large")
+    if context.max_memories > 12:
+        errors.append("project_memory_prompt_too_large")
 
-    sample = [
-        {"role": "system", "content": "OLYA RESPONSE POLICY " + "x" * 2500},
-        {"role": "system", "content": "OLYA MEMORY " + "m" * 3000},
-        {"role": "user", "content": "old question " + "q" * 1200},
-        {"role": "assistant", "content": "old answer " + "a" * 1600},
-        {"role": "system", "content": "ANSWER SHAPE: practical guidance"},
-        {"role": "user", "content": cases["practical_chess"]},
-    ]
-    compact = compact_prompt_rows(sample, reasoning=False)
-    compact_chars = sum(len(str(row.get("content") or "")) for row in compact)
-    if compact_chars > 3200: errors.append(f"simple_prompt_budget_exceeded:{compact_chars}")
-    if not any(row.get("role") == "user" and cases["practical_chess"] in str(row.get("content") or "") for row in compact):
-        errors.append("latest_user_lost_in_compaction")
-
-    strategy_source = inspect.getsource(answer_strategy_patch.install_answer_strategy_patch)
-    source_appendix_declared = "_olya_source_appendix" in strategy_source and "Источники:" in strategy_source
-    if not source_appendix_declared: errors.append("source_appendix_missing")
+    install_gigachat31_runtime_patch()
+    fake = object.__new__(LlamaClient)
+    payload = LlamaClient._payload(
+        fake,
+        [ChatMessage(role="system", content="system"), ChatMessage(role="user", content="Привет")],
+        max_tokens=128,
+        reasoning=False,
+    )
+    if payload.get("tool_choice") != "none":
+        errors.append("gigachat_tool_choice_none_missing")
+    if payload.get("temperature") != 0.0:
+        errors.append("gigachat_temperature_not_zero")
+    for forbidden in ("chat_template_kwargs", "reasoning_format", "thinking_budget_tokens", "reasoning_effort"):
+        if forbidden in payload:
+            errors.append(f"foreign_llm_field_present:{forbidden}")
 
     checks = {
-        "chess_auto_web": fast_web_grounding.should_auto_ground(cases["practical_chess"]),
-        "stable_fact_fast_path": answer_strategy_patch._stable_atomic(cases["stable_fact"]),
+        "ordinary_question_uses_web": should_use_web("что такое HTTP?", "auto"),
+        "current_question_uses_web": should_use_web("какая погода в Москве сейчас?", "auto"),
         "primary_engines": list(SearxngDiscovery.primary_engines),
         "fallback_engines": list(SearxngDiscovery.fallback_engines),
         "max_search_results": SearxngDiscovery.max_results,
         "hot_history_messages": context.hot_history_messages,
         "max_project_memories": context.max_memories,
-        "simple_prompt_chars_after_compaction": compact_chars,
-        "compact_synthesis_installed": bool(getattr(fast_web_grounding.execute_fast_web_grounding, "_olya_compact_synthesis", False)),
-        "source_appendix_declared": source_appendix_declared,
+        "gigachat_tool_choice": payload.get("tool_choice"),
+        "gigachat_temperature": payload.get("temperature"),
+        "payload_fields": sorted(payload.keys()),
     }
-    if not checks["compact_synthesis_installed"]: errors.append("compact_synthesis_not_installed")
-
     return {
-        "format": "olya-answer-strategy-audit-v4",
+        "format": "olya-clean-chat-audit-v1",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "checks": checks,
