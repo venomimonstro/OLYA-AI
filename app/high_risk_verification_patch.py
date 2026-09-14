@@ -14,11 +14,12 @@ _HIGH_RISK = re.compile(
 
 
 def install_high_risk_verification_patch() -> None:
-    """Guarantee one quality critic for genuinely high-risk Auto requests.
+    """Guarantee exactly one critic pass for genuinely high-risk Auto tasks.
 
-    Normal interactive chat stays single-pass. This wrapper is intentionally
-    installed after the general interactive single-pass policy so high-risk
-    tasks cannot be accidentally downgraded by a later compatibility patch.
+    Normal interactive chat stays single-pass. Strict mode retains the original
+    verification semantics. Auto high-risk work gets one critic, never the old
+    critic+repair cascade, unless a deterministic hard failure already requires
+    repair. This keeps the quality gate while bounding CPU latency.
     """
     from app.services import conditional_verification as cv
 
@@ -43,7 +44,7 @@ def install_high_risk_verification_patch() -> None:
         )
         if verification in {"off", "strict"} or not _HIGH_RISK.search(str(user_text or "")):
             return plan
-        if plan.repair_deterministic or plan.run_critic:
+        if plan.repair_deterministic:
             return plan
         reasons = tuple(dict.fromkeys((*plan.reasons, "high_risk_quality_gate")))
         return cv.VerificationPlan(
