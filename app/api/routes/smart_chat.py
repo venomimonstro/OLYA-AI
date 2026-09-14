@@ -154,17 +154,22 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
             if merged_sources != managed_payload.research_source_ids:
                 managed_payload = managed_payload.model_copy(update={"research_source_ids": merged_sources})
             context_token = set_task_solver_context(execution.context_messages)
+            evidence_count = max(
+                int(execution.fetched_sources or 0),
+                int(getattr(execution, "fresh_evidence_count", 0) or 0),
+            )
             job._publish_nowait(
                 "status",
                 {
                     "state": "synthesizing",
                     "message": (
-                        f"Сверено источников: {execution.fetched_sources}. Формирую ответ…"
-                        if execution.fetched_sources
+                        f"Сверено актуальных источников: {evidence_count}. Формирую ответ…"
+                        if evidence_count
                         else "Поиск завершён. Проверяю, можно ли дать актуальный ответ…"
                     ),
                     "task_kind": execution.plan.kind,
                     "fetched_sources": execution.fetched_sources,
+                    "fresh_evidence_count": evidence_count,
                     "independent_hosts": execution.independent_hosts,
                 },
             )
@@ -188,7 +193,11 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
                 reset_task_solver_context(context_token)
 
         result.text = _clean_language_boilerplate(question, result.text)
-        if mandatory_fresh and (execution is None or execution.fetched_sources < 1):
+        fresh_evidence_count = 0 if execution is None else max(
+            int(execution.fetched_sources or 0),
+            int(getattr(execution, "fresh_evidence_count", 0) or 0),
+        )
+        if mandatory_fresh and fresh_evidence_count < 1:
             result.text = _freshness_unavailable(question)
 
         # Current-fact requests were intentionally held. Publish the vetted text
@@ -203,6 +212,12 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
             search_latency = getattr(execution, "search_latency_ms", None)
             if isinstance(search_latency, int):
                 metadata["search_latency_ms"] = max(0, search_latency)
+            metadata["fresh_evidence_count"] = max(
+                int(execution.fetched_sources or 0),
+                int(getattr(execution, "fresh_evidence_count", 0) or 0),
+            )
+            metadata["search_confirmed_sources"] = int(getattr(execution, "search_confirmed_sources", 0) or 0)
+            metadata["search_independent_hosts"] = int(getattr(execution, "search_independent_hosts", 0) or 0)
             result.task_execution = metadata
         return result
 
