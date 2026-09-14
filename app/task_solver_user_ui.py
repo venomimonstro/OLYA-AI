@@ -39,6 +39,15 @@ def workspace(db: Session = Depends(get_db)) -> HTMLResponse:
         "web mode request contract",
     )
 
+    # Waiting feedback starts on the click itself, before quota preview,
+    # conversation setup, web discovery or the inference stream is available.
+    document = _replace_once(
+        document,
+        "setBusy(true,'Проверяю доступный ресурс…');setProgress('queued');",
+        "document.body.classList.add('olya-request-pending');setBusy(true,'Проверяю доступный ресурс…');setProgress('queued');",
+        "immediate request waiting state",
+    )
+
     document = _replace_once(
         document,
         "if(item.event==='status'){if(d.conversation_id)conversationId=d.conversation_id;if(d.resumed)state.textContent='Соединение восстановлено. Продолжаю получать ответ…'}else if(item.event==='token')",
