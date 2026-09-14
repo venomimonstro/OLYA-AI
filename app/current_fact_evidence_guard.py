@@ -71,12 +71,6 @@ def _verified_blocks(messages: list[ChatMessage]) -> list[str]:
 
 
 def _confirmed_search_blocks(messages: list[ChatMessage]) -> list[str]:
-    """Accept only explicitly confirmed official-domain search rows.
-
-    This path exists so a live Google/Yandex/Bing/etc result from an official
-    administration page can answer a trivial current-role lookup even when that
-    page blocks our HTML fetcher. Arbitrary search snippets are never promoted.
-    """
     blocks: list[str] = []
     for message in messages:
         text = str(message.content or "")
@@ -101,6 +95,17 @@ def _role_kind(question: str) -> str | None:
     if "премьер" in q or "prime minister" in q:
         return "prime_minister"
     return None
+
+
+def _is_current_role_lookup(question: str) -> bool:
+    decision = classify_freshness(question)
+    return bool(decision.required and decision.category == "official_role" and _role_kind(question))
+
+
+def _unavailable_current_role(question: str) -> str:
+    if len(_CYRILLIC.findall(question)) >= 2:
+        return "Не удалось быстро подтвердить текущую должность по свежим внешним источникам. Старые данные из памяти модели не используются."
+    return "I could not quickly verify the current office holder from fresh external sources, so stale model-memory data was not used."
 
 
 def _clean_candidate(value: str) -> str:
@@ -201,21 +206,27 @@ def install_current_fact_evidence_guard() -> None:
         question = _latest_real_user_text(messages)
         resolved = resolve_current_office_holder(question, messages) if question else None
         if resolved:
-            if on_token is not None:
-                await on_token(resolved)
-            return LlamaGeneration(
-                text=resolved,
-                ttft_ms=0,
-                output_tokens=max(1, len(resolved) // 4),
-                tokens_per_second=0.0,
-                generation_ms=0,
+            text = resolved
+        elif question and _is_current_role_lookup(question):
+            # The dedicated web path already tried to resolve this fact. Never
+            # spend minutes asking local inference to guess a current office holder.
+            text = _unavailable_current_role(question)
+        else:
+            return await current(
+                self,
+                messages,
+                max_tokens=max_tokens,
+                reasoning=reasoning,
+                on_token=on_token,
             )
-        return await current(
-            self,
-            messages,
-            max_tokens=max_tokens,
-            reasoning=reasoning,
-            on_token=on_token,
+        if on_token is not None:
+            await on_token(text)
+        return LlamaGeneration(
+            text=text,
+            ttft_ms=0,
+            output_tokens=max(1, len(text) // 4),
+            tokens_per_second=0.0,
+            generation_ms=0,
         )
 
     guarded._olya_current_fact_evidence_guard = True  # type: ignore[attr-defined]
