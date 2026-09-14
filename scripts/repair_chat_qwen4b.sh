@@ -63,7 +63,7 @@ info "Starting database and search"
 docker compose up -d db searxng
 
 info "Starting/recreating local Qwen3-4B inference"
-docker compose --profile inference up -d --force-recreate llama
+docker compose up -d --force-recreate llama
 for _ in $(seq 1 120); do
   if docker compose exec -T llama sh -lc 'curl -fsS http://127.0.0.1:8080/health >/dev/null' 2>/dev/null; then
     break
