@@ -17,6 +17,13 @@ EXPECTED_BYTES = 6474702976
 
 
 def static_audit() -> tuple[list[str], dict]:
+    """Audit only files that are part of the application image.
+
+    docker-compose.yml intentionally lives on the host and is not copied/mounted
+    into /app in production. Host compose validation belongs to the migration
+    script (`docker compose config`); this audit validates the manifest, runtime
+    patch, bootstrap installation and the live llama.cpp endpoint.
+    """
     errors: list[str] = []
     manifest = json.loads((ROOT / "model-manifest.json").read_text("utf-8"))
     primary = manifest.get("primary") or {}
@@ -36,23 +43,26 @@ def static_audit() -> tuple[list[str], dict]:
 
     runtime = (ROOT / "app" / "gigachat31_runtime_patch.py").read_text("utf-8")
     bootstrap = (ROOT / "app" / "api" / "routes" / "__init__.py").read_text("utf-8")
-    compose = (ROOT / "docker-compose.yml").read_text("utf-8")
-    for marker, code in {
-        "native_runtime_patch": "install_gigachat31_runtime_patch",
-        "qwen_thinking_omitted": "chat_template_kwargs",
-        "model_default": EXPECTED_FILE,
-        "memory_default": "X1_LLAMA_MEMORY_LIMIT:-8g",
-    }.items():
-        haystack = runtime if marker in {"native_runtime_patch", "qwen_thinking_omitted"} else compose
-        if marker == "native_runtime_patch":
-            if code not in runtime or code not in bootstrap: errors.append(marker)
-        elif marker == "qwen_thinking_omitted":
-            # Native Giga payload must not add Qwen-specific fields.
-            payload_pos = runtime.find("def payload")
-            body = runtime[payload_pos:] if payload_pos >= 0 else runtime
-            if code in body: errors.append(marker)
-        elif code not in haystack:
-            errors.append(marker)
+    config = (ROOT / "app" / "core" / "config.py").read_text("utf-8")
+
+    if "install_gigachat31_runtime_patch" not in runtime or "install_gigachat31_runtime_patch" not in bootstrap:
+        errors.append("native_runtime_patch")
+
+    payload_pos = runtime.find("def payload")
+    payload_body = runtime[payload_pos:] if payload_pos >= 0 else runtime
+    for forbidden in ("chat_template_kwargs", "reasoning_format", "thinking_budget_tokens", "enable_thinking"):
+        if forbidden in payload_body:
+            errors.append(f"qwen_field_leaked:{forbidden}")
+
+    if EXPECTED_NAME not in config:
+        errors.append("config_default_model")
+
+    env_name = str(os.getenv("X1_LLAMA_MODEL_NAME", ""))
+    env_file = str(os.getenv("X1_LLAMA_MODEL_FILE", ""))
+    if env_name and env_name != EXPECTED_NAME:
+        errors.append("runtime_env_model_name")
+    if env_file and env_file != EXPECTED_FILE:
+        errors.append("runtime_env_model_file")
 
     return errors, checks
 
@@ -60,7 +70,7 @@ def static_audit() -> tuple[list[str], dict]:
 async def live_probe() -> dict:
     base = str(os.getenv("X1_LLAMA_BASE_URL", "http://llama:8080")).rstrip("/")
     result: dict = {"base_url": base, "health": False, "model_visible": False, "samples": []}
-    timeout = httpx.Timeout(45.0, connect=5.0)
+    timeout = httpx.Timeout(60.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
         try:
             health = await client.get(base + "/health")
@@ -68,6 +78,7 @@ async def live_probe() -> dict:
         except httpx.HTTPError as exc:
             result["health_error"] = f"{type(exc).__name__}: {exc}"
             return result
+
         try:
             models = await client.get(base + "/v1/models")
             if models.is_success:
@@ -111,13 +122,10 @@ async def main_async() -> int:
     errors, manifest = static_audit()
     live = await live_probe()
     if not live.get("health"): errors.append("llama_health")
-    # /v1/models representation differs across llama.cpp releases, so a healthy
-    # model with passing generation samples is sufficient even if its display id
-    # is generic.
     samples = list(live.get("samples") or [])
     if not samples or not all(bool(row.get("ok")) for row in samples): errors.append("generation_samples")
     result = {
-        "format": "olya-gigachat31-runtime-audit-v1",
+        "format": "olya-gigachat31-runtime-audit-v2",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "manifest": manifest,
