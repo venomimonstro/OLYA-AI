@@ -19,6 +19,12 @@ from app.services.auth import get_current_user
 from app.services.chat_runtime import ActiveChatJob, ChatRunConflict, ChatRunSnapshot, chat_execution_manager
 from app.services.fast_web_grounding import execute_fast_web_grounding, should_auto_ground
 from app.services.freshness import classify_freshness
+from app.services.interactive_evidence import (
+    evidence_from_execution,
+    reset_interactive_evidence,
+    set_interactive_evidence,
+)
+from app.services.structured_facts import is_currency_rate_question, resolve_structured_fact
 from app.services.task_solver import execute_task_solver, plan_task, reset_task_solver_context, set_task_solver_context
 from app.task_solver_user_ui import router as _task_solver_user_ui_router
 
@@ -69,8 +75,8 @@ def _russian(text: str) -> bool:
 
 def _freshness_unavailable(question: str) -> str:
     if _russian(question):
-        return "Не удалось подтвердить актуальную информацию по свежим внешним источникам. Я не буду подменять текущие данные устаревшими сведениями из памяти модели. Повторите запрос позже."
-    return "I could not verify the current information from fresh external sources, so I will not substitute stale model-memory data for a current fact. Please try again later."
+        return "Не удалось быстро получить достаточно надёжных актуальных данных. Устаревшие сведения из памяти модели не используются."
+    return "I could not obtain enough reliable current evidence quickly, so stale model-memory data was not used."
 
 
 def _clean_language_boilerplate(question: str, text: str) -> str:
@@ -93,6 +99,8 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
         managed_payload = payload.model_copy(update={"client_request_id": job.client_request_id})
         execution = None
         context_token = None
+        evidence_token = None
+        evidence_state = None
         max_queries = int(getattr(request.app.state.settings, "research_max_search_queries", 4))
         question = _planning_question(managed_payload, max_queries)
         freshness = classify_freshness(question) if question else None
@@ -118,7 +126,28 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
                 or mandatory_fresh
             )
         )
-        if should_solve:
+
+        # Atomic market facts use a primary structured source before generic
+        # metasearch. This removes both SERP fragility and unnecessary model
+        # latency for questions such as the current USD/RUB official rate.
+        structured_candidate = bool(
+            question
+            and plan
+            and plan.kind not in _SPECIALIZED_TASKS
+            and is_currency_rate_question(question)
+        )
+        if structured_candidate:
+            job._publish_nowait(
+                "status",
+                {
+                    "state": "researching",
+                    "message": "Получаю актуальные данные из официального источника…",
+                    "task_kind": "structured_fact",
+                },
+            )
+            execution = await resolve_structured_fact(question)
+
+        if execution is None and should_solve:
             job._publish_nowait(
                 "status",
                 {
@@ -150,35 +179,43 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
                     force_web=force_web,
                 )
 
+        if execution is not None:
             merged_sources = list(dict.fromkeys([*managed_payload.research_source_ids, *execution.source_ids]))[:10]
             if merged_sources != managed_payload.research_source_ids:
                 managed_payload = managed_payload.model_copy(update={"research_source_ids": merged_sources})
             context_token = set_task_solver_context(execution.context_messages)
-            evidence_count = max(
-                int(execution.fetched_sources or 0),
-                int(getattr(execution, "fresh_evidence_count", 0) or 0),
+            evidence_state = evidence_from_execution(
+                execution,
+                category=freshness.category if freshness is not None else "stable",
             )
+            evidence_token = set_interactive_evidence(evidence_state)
+            evidence_count = int(evidence_state.evidence_count)
             job._publish_nowait(
                 "status",
                 {
                     "state": "synthesizing",
                     "message": (
-                        f"Сверено актуальных источников: {evidence_count}. Формирую ответ…"
+                        f"Сверено источников: {evidence_count}. Формирую ответ…"
                         if evidence_count
-                        else "Поиск завершён. Проверяю, можно ли дать актуальный ответ…"
+                        else "Поиск завершён. Формирую максимально надёжный ответ…"
                     ),
                     "task_kind": execution.plan.kind,
                     "fetched_sources": execution.fetched_sources,
                     "fresh_evidence_count": evidence_count,
-                    "independent_hosts": execution.independent_hosts,
+                    "independent_hosts": evidence_state.independent_hosts,
+                    "authoritative": evidence_state.authoritative,
                 },
             )
 
-        # For changing facts, do not stream unverified model tokens. The user
-        # sees the waiting/search animation and receives only the post-grounding
-        # result, so stale memorized facts cannot flash in the UI first.
-        token_sink = None if mandatory_fresh else job.token
-        replace_sink = None if mandatory_fresh else job.replace
+        min_hosts = max(1, int(getattr(freshness, "min_independent_hosts", 1) or 1)) if freshness is not None else 1
+        evidence_ok = bool(evidence_state and evidence_state.satisfies(min_hosts))
+
+        # Once trusted evidence is available, stream the grounded answer instead
+        # of hiding the entire generation. Holding output is only necessary when
+        # a current fact still lacks eligible evidence.
+        hold_output = bool(mandatory_fresh and not evidence_ok)
+        token_sink = None if hold_output else job.token
+        replace_sink = None if hold_output else job.replace
         try:
             result = await legacy_chat._chat_impl(
                 managed_payload,
@@ -191,18 +228,14 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
         finally:
             if context_token is not None:
                 reset_task_solver_context(context_token)
+            if evidence_token is not None:
+                reset_interactive_evidence(evidence_token)
 
         result.text = _clean_language_boilerplate(question, result.text)
-        fresh_evidence_count = 0 if execution is None else max(
-            int(execution.fetched_sources or 0),
-            int(getattr(execution, "fresh_evidence_count", 0) or 0),
-        )
-        if mandatory_fresh and fresh_evidence_count < 1:
+        if mandatory_fresh and not evidence_ok:
             result.text = _freshness_unavailable(question)
 
-        # Current-fact requests were intentionally held. Publish the vetted text
-        # once so reconnect snapshots and the normal SSE UI remain consistent.
-        if mandatory_fresh and result.text:
+        if hold_output and result.text:
             await job.token(result.text)
 
         result.run_id = job.run_id
@@ -212,12 +245,10 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
             search_latency = getattr(execution, "search_latency_ms", None)
             if isinstance(search_latency, int):
                 metadata["search_latency_ms"] = max(0, search_latency)
-            metadata["fresh_evidence_count"] = max(
-                int(execution.fetched_sources or 0),
-                int(getattr(execution, "fresh_evidence_count", 0) or 0),
-            )
+            metadata["fresh_evidence_count"] = int(evidence_state.evidence_count if evidence_state else 0)
             metadata["search_confirmed_sources"] = int(getattr(execution, "search_confirmed_sources", 0) or 0)
             metadata["search_independent_hosts"] = int(getattr(execution, "search_independent_hosts", 0) or 0)
+            metadata["authoritative_evidence"] = bool(evidence_state.authoritative if evidence_state else False)
             result.task_execution = metadata
         return result
 
