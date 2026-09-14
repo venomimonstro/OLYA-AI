@@ -106,8 +106,10 @@ html body .side .new:focus-visible{outline:2px solid #9b9ba3!important;outline-o
     const hasText=lastTurnHasVisibleAssistant();
     if(active&&!hasText){
       const row=ensureWaiting();
-      const label=row.querySelector('.olya-waiting-text');if(label)label.textContent=waitingLabel();
-      row.hidden=false;
+      const label=row.querySelector('.olya-waiting-text');
+      const next=waitingLabel();
+      if(label&&label.textContent!==next)label.textContent=next;
+      if(row.hidden)row.hidden=false;
     }else if(waiting){waiting.remove();waiting=null}
   }
 
