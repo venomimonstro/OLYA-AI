@@ -262,9 +262,11 @@ services:
       - -np
       - "${X1_MAX_CONCURRENT_GENERATIONS:-1}"
       - -t
-      - "${X1_LLAMA_THREADS:-3}"
+      - "${X1_LLAMA_THREADS:-4}"
       - -tb
-      - "${X1_LLAMA_THREADS_BATCH:-3}"
+      - "${X1_LLAMA_THREADS_BATCH:-4}"
+      - --cpu-moe
+      - --jinja
       - --cache-type-k
       - q4_0
       - --cache-type-v
