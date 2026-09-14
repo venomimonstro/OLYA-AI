@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 
 # Install the production bootstrap wrappers before importing routing functions.
 import app.api.routes  # noqa: F401
@@ -12,7 +13,7 @@ from app.services.conditional_verification import plan_verification
 from app.services.fast_web_grounding import should_auto_ground
 from app.services.freshness import classify_freshness
 from app.services.interactive_evidence import InteractiveEvidence, reset_interactive_evidence, set_interactive_evidence
-from app.services.structured_facts import is_currency_rate_question
+from app.services.structured_facts import _parse_cbr_html, _parse_cbr_xml, is_currency_rate_question
 from app.utility_chat import utility_reply
 
 
@@ -85,8 +86,6 @@ def audit() -> dict:
     high_thinking = LlamaClient._thinking_budget(high.max_output_tokens) if high.reasoning else 0
     if not (0 < medium_thinking < high_thinking <= 320):
         errors.append(f"private_reasoning_budget_invalid:{medium_thinking}:{high_thinking}")
-    # _payload does not depend on a live HTTP client, so construct a bare object
-    # and inspect the exact production request without opening any sockets.
     client = object.__new__(LlamaClient)
     high_payload = client._payload([], max_tokens=high.max_output_tokens, reasoning=True)
     simple_payload = client._payload([], max_tokens=simple.max_output_tokens, reasoning=False)
@@ -102,11 +101,22 @@ def audit() -> dict:
         if decision.max_output_tokens > 220:
             errors.append(f"atomic_current_lookup_output_too_large:{mode}:{decision.max_output_tokens}")
 
+    # Both official Bank of Russia representations must parse. Production races
+    # them in parallel, removing the former XML single point of failure.
+    xml_sample = b'<ValCurs Date="14.09.2026"><Valute><CharCode>USD</CharCode><Nominal>1</Nominal><Value>82,5000</Value></Valute></ValCurs>'
+    xml_date, xml_values = _parse_cbr_xml(xml_sample, [("USD", "доллар США")])
+    if xml_date != "14.09.2026" or len(xml_values) != 1 or xml_values[0].unit_rate != Decimal("82.5000"):
+        errors.append("cbr_xml_parser_failed")
+    html_sample = '<p>Банк России установил с 14.09.2026</p><table><tr><td>840</td><td>USD</td><td>1</td><td>Доллар США</td><td>82,5000</td></tr></table>'
+    html_date, html_values = _parse_cbr_html(html_sample, [("USD", "доллар США")])
+    if html_date != "14.09.2026" or len(html_values) != 1 or html_values[0].unit_rate != Decimal("82.5000"):
+        errors.append("cbr_html_parser_failed")
+
     evidence = InteractiveEvidence(
         category="market",
         evidence_count=1,
         independent_hosts=1,
-        urls=("https://www.cbr.ru/scripts/XML_daily.asp",),
+        urls=("https://www.cbr.ru/currency_base/daily/",),
         authoritative=True,
         resolved_answer="1 USD = test RUB",
         source_kind="structured_official",
@@ -130,32 +140,59 @@ def audit() -> dict:
     if plan.extra_inference_budget != 0:
         errors.append("trusted_atomic_fact_extra_inference_budget_nonzero")
 
+    stable_plan = plan_verification(
+        verification="auto",
+        user_text="кто написал мастер и маргарита?",
+        route_mode="work",
+        requirements=[],
+        freshness_required=False,
+        verified_source_count=0,
+        answer="Автор указан по найденным источникам.",
+        deterministic=None,
+    )
+    ordinary_plan = plan_verification(
+        verification="auto",
+        user_text="объясни простыми словами что такое DNS",
+        route_mode="work",
+        requirements=[],
+        freshness_required=False,
+        verified_source_count=0,
+        answer="DNS сопоставляет доменные имена и IP-адреса.",
+        deterministic=None,
+    )
+    if stable_plan.extra_inference_budget != 0:
+        errors.append("stable_atomic_fact_extra_inference_budget_nonzero")
+    if ordinary_plan.extra_inference_budget != 0:
+        errors.append("ordinary_interactive_extra_inference_budget_nonzero")
+
+    high_risk_plan = plan_verification(
+        verification="auto",
+        user_text="проведи аудит безопасности production системы и найди уязвимости",
+        route_mode="deep",
+        requirements=[],
+        freshness_required=False,
+        verified_source_count=0,
+        answer="Черновой аудит.",
+        deterministic=None,
+    )
+    if high_risk_plan.extra_inference_budget == 0:
+        errors.append("high_risk_verification_unexpectedly_disabled")
+
     return {
-        "format": "olya-answer-pipeline-audit-v2",
+        "format": "olya-answer-pipeline-audit-v3",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "matrix": matrix,
         "quality_profiles": {
-            "simple": {
-                "mode": simple.mode,
-                "reasoning": simple.reasoning,
-                "max_output_tokens": simple.max_output_tokens,
-                "thinking_budget_tokens": 0,
-            },
-            "medium": {
-                "mode": medium.mode,
-                "reasoning": medium.reasoning,
-                "max_output_tokens": medium.max_output_tokens,
-                "thinking_budget_tokens": medium_thinking,
-            },
-            "high": {
-                "mode": high.mode,
-                "reasoning": high.reasoning,
-                "max_output_tokens": high.max_output_tokens,
-                "thinking_budget_tokens": high_thinking,
-            },
+            "simple": {"mode": simple.mode, "reasoning": simple.reasoning, "max_output_tokens": simple.max_output_tokens, "thinking_budget_tokens": 0},
+            "medium": {"mode": medium.mode, "reasoning": medium.reasoning, "max_output_tokens": medium.max_output_tokens, "thinking_budget_tokens": medium_thinking},
+            "high": {"mode": high.mode, "reasoning": high.reasoning, "max_output_tokens": high.max_output_tokens, "thinking_budget_tokens": high_thinking},
         },
+        "currency_official_fallbacks": ["cbr_xml", "cbr_html"],
         "trusted_atomic_extra_inferences": plan.extra_inference_budget,
+        "stable_atomic_extra_inferences": stable_plan.extra_inference_budget,
+        "ordinary_extra_inferences": ordinary_plan.extra_inference_budget,
+        "high_risk_extra_inferences": high_risk_plan.extra_inference_budget,
     }
 
 
