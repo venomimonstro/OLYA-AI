@@ -88,6 +88,11 @@ then
   mark_fail "SearXNG health/search failed"
 fi
 
+say "Checking actual production route bindings"
+if ! docker compose exec -T app python -m scripts.runtime_binding_audit; then
+  mark_fail "production route binding audit failed"
+fi
+
 say "Running static search-quality regression"
 if ! docker compose exec -T app python -m scripts.search_quality_audit; then
   mark_fail "search quality static audit failed"
@@ -113,4 +118,4 @@ if [ "$fail" -ne 0 ]; then
   exit 2
 fi
 
-say "PASSED: app, host port, readiness, llama, SearXNG, relevance search and answer pipeline are operational"
+say "PASSED: app, host port, readiness, llama, SearXNG, route bindings, relevance search and answer pipeline are operational"
