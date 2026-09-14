@@ -7,6 +7,7 @@ import json
 import app.api.routes  # noqa: F401
 from app.atomic_fact_latency_patch import is_stable_atomic_fact
 from app.inference import router as inference_router
+from app.inference.client import LlamaClient
 from app.services.conditional_verification import plan_verification
 from app.services.fast_web_grounding import should_auto_ground
 from app.services.freshness import classify_freshness
@@ -69,16 +70,36 @@ def audit() -> dict:
         })
 
     simple = _route("объясни что такое HTTP простыми словами", "fast")
-    medium = _route("проанализируй причины падения конверсии и предложи план исправления", "work")
+    medium = _route("проанализируй проблему, сравни варианты и разработай стратегию исправления", "work")
     high = _route("проведи архитектурный аудит системы, найди риски и разработай план миграции", "deep")
     if simple.mode != "fast" or simple.reasoning:
         errors.append("simple_profile_not_fast_non_reasoning")
-    if medium.mode != "work":
-        errors.append("medium_profile_not_work")
+    if medium.mode != "work" or not medium.reasoning:
+        errors.append("medium_complex_profile_not_reasoning")
     if high.mode != "deep" or not high.reasoning:
         errors.append("high_profile_not_deep_reasoning")
     if not (simple.max_output_tokens < medium.max_output_tokens < high.max_output_tokens):
         errors.append("quality_output_budgets_not_monotonic")
+
+    medium_thinking = LlamaClient._thinking_budget(medium.max_output_tokens) if medium.reasoning else 0
+    high_thinking = LlamaClient._thinking_budget(high.max_output_tokens) if high.reasoning else 0
+    if not (0 < medium_thinking < high_thinking <= 320):
+        errors.append(f"private_reasoning_budget_invalid:{medium_thinking}:{high_thinking}")
+    client = LlamaClient("http://127.0.0.1:9")
+    try:
+        high_payload = client._payload([], max_tokens=high.max_output_tokens, reasoning=True)
+        simple_payload = client._payload([], max_tokens=simple.max_output_tokens, reasoning=False)
+    finally:
+        # No network request was made; close is async, so the audit avoids
+        # instantiating a running event loop merely for payload inspection.
+        try:
+            client._client._transport = None  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    if int(high_payload.get("thinking_budget_tokens", -1)) != high_thinking:
+        errors.append("high_payload_missing_reasoning_budget")
+    if int(simple_payload.get("thinking_budget_tokens", -1)) != 0:
+        errors.append("simple_payload_reasoning_not_disabled")
 
     for mode in ("fast", "work", "deep"):
         decision = _route("какой курс доллар рубль сейчас?", mode)
@@ -116,7 +137,7 @@ def audit() -> dict:
         errors.append("trusted_atomic_fact_extra_inference_budget_nonzero")
 
     return {
-        "format": "olya-answer-pipeline-audit-v1",
+        "format": "olya-answer-pipeline-audit-v2",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "matrix": matrix,
@@ -125,16 +146,19 @@ def audit() -> dict:
                 "mode": simple.mode,
                 "reasoning": simple.reasoning,
                 "max_output_tokens": simple.max_output_tokens,
+                "thinking_budget_tokens": 0,
             },
             "medium": {
                 "mode": medium.mode,
                 "reasoning": medium.reasoning,
                 "max_output_tokens": medium.max_output_tokens,
+                "thinking_budget_tokens": medium_thinking,
             },
             "high": {
                 "mode": high.mode,
                 "reasoning": high.reasoning,
                 "max_output_tokens": high.max_output_tokens,
+                "thinking_budget_tokens": high_thinking,
             },
         },
         "trusted_atomic_extra_inferences": plan.extra_inference_budget,
