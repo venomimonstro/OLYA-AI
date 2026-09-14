@@ -130,7 +130,11 @@ def plan_verification(
         )
 
     repair_deterministic = bool(failed)
-    run_critic = not repair_deterministic and score >= 3
+    # Qwen4B on CPU must not perform a second full generation for an ordinary
+    # fresh fact that already has fetched evidence. Work + freshness scores 3;
+    # deterministic evidence checks are enough there. Score >=4 still covers
+    # deep, semantic high-risk, missing-evidence and otherwise complex answers.
+    run_critic = not repair_deterministic and score >= 4
     repair_critic = bool(
         run_critic
         and (
