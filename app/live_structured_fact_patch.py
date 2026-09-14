@@ -28,12 +28,11 @@ def install_live_structured_fact_patch() -> None:
         )
 
     async def resolve_any(question: str):
+        # Fiat FX already has its own dual-CBR resolver. If it fails, return None
+        # immediately so smart_chat uses generic web fallback instead of calling
+        # the same CBR endpoints a second time.
         if current_detector(question):
-            result = await current_resolver(question)
-            if result is not None:
-                return result
-        # live_structured_facts captured the original currency resolver at import
-        # time, so this call cannot recurse through the patched module globals.
+            return await current_resolver(question)
         return await live.resolve_live_structured_fact(question)
 
     is_live_candidate._olya_live_structured = True  # type: ignore[attr-defined]
