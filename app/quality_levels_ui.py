@@ -13,6 +13,15 @@ def _nonce(document: str) -> str:
 def enhance_quality_levels(document: str) -> str:
     if _MARKER in document or 'id="mode"' not in document:
         return document
+
+    # Public UX uses product language only. Internal fast/work/deep values remain
+    # stable in the API/database for backwards compatibility.
+    document = document.replace(
+        "Fast = 1 единица, Work = 2, Deep = 4.",
+        "Простой = 1 единица, Средний = 2, Высокий = 4.",
+    )
+    document = document.replace("Fast/Auto", "Простой или Средний")
+
     nonce = _nonce(document)
     nonce_attr = f' nonce="{nonce}"' if nonce else ""
     css = r'''
