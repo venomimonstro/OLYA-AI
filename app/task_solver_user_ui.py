@@ -11,6 +11,7 @@ from app.workspace_reliability_v5 import enhance_workspace_reliability_v5
 from app.quality_levels_ui import enhance_quality_levels
 from app.workspace_premium_v6 import enhance_workspace_premium_v6
 from app.workspace_parallel_draft_patch import enhance_parallel_draft_safety
+from app.workspace_recovery_controls import enhance_recovery_controls
 
 router = APIRouter(tags=["user-workspace"])
 
@@ -67,6 +68,7 @@ def workspace(db: Session = Depends(get_db)) -> HTMLResponse:
     document = enhance_quality_levels(document)
     document = enhance_workspace_premium_v6(document)
     document = enhance_parallel_draft_safety(document)
+    document = enhance_recovery_controls(document)
 
     response = HTMLResponse(document, status_code=base.status_code)
     for key, value in base.headers.items():
