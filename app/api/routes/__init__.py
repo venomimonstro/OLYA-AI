@@ -8,6 +8,7 @@ policy apply consistently to normal chat, streaming chat and verification calls.
 from app.runtime_quality_patch import install_runtime_quality_patch
 from app.qwen4b_runtime_patch import install_qwen4b_runtime_patch
 from app.reasoning_budget_patch import install_reasoning_budget_patch
+from app.gigachat31_runtime_patch import install_gigachat31_runtime_patch
 from app.work_quality_floor_patch import install_work_quality_floor_patch
 from app.current_fact_latency_patch import install_current_fact_latency_patch
 from app.chat_reliability_patch import install_chat_reliability_patch
@@ -32,6 +33,7 @@ from app.tester_access_patch import install_tester_access_patch
 install_runtime_quality_patch()
 install_qwen4b_runtime_patch()
 install_reasoning_budget_patch()
+install_gigachat31_runtime_patch()
 install_work_quality_floor_patch()
 install_current_fact_latency_patch()
 install_chat_reliability_patch()
@@ -53,9 +55,6 @@ install_identity_patch()
 install_admin_surface_patch()
 install_tester_access_patch()
 
-# Public attribution and the dedicated administrator login are registered before
-# main.py includes the public UI router. Normal /login remains a user-only entry
-# point and never redirects into the administration surface.
 from app import public_ui as _public_ui
 from app.admin_login_ui import router as _admin_login_router
 
@@ -75,5 +74,5 @@ if not getattr(_original_public_page, "_x1_creator_credit", False):
                 args = (*args[:2], body, *args[3:])
         return _original_public_page(*args, **kwargs)
 
-    _public_page_with_creator._x1_creator_credit = True  # type: ignore[attr-defined]
+    _public_page_with_creator._x1_creator_credit = True
     _public_ui._page = _public_page_with_creator
