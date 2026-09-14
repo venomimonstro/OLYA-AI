@@ -146,8 +146,12 @@ class ProjectContextBuilder:
                                    project_id=conversation.project_id, text=turn.content)
 
             bundle = build_memory_bundle(
-                db, conversation_id=conversation.id, project_id=conversation.project_id,
-                query=query, hot_messages=self.hot_history_messages,
+                db,
+                conversation_id=conversation.id,
+                project_id=conversation.project_id,
+                query=query,
+                hot_messages=self.hot_history_messages,
+                user_id=conversation.owner_id,
             )
             memory_message = memory_context_message(bundle)
             if memory_message is not None:
