@@ -24,10 +24,29 @@ _COMPARE = re.compile(r"\b(?:сравни|что\s+лучше|какой\s+лу�
 _WRITING = re.compile(r"^(?:напиши|перепиши|переведи|исправь|сочини|создай\s+(?:текст|письмо)|write|rewrite|translate|proofread)\b", re.I)
 _SHORT = re.compile(r"\b(?:кратко|коротко|одним\s+словом|одним\s+предложением|briefly|short\s+answer)\b", re.I)
 _CYR = re.compile(r"[А-Яа-яЁё]")
+_URL = re.compile(r"URL:\s*(https?://[^\s<>]+)", re.I)
+_INTERNAL_PREFIXES = (
+    "WEB SEARCH DISCOVERY",
+    "VERIFIED FRESH WEB SNAPSHOTS",
+    "STRUCTURED OFFICIAL FACT",
+    "UNTRUSTED CLIENT-SUPPLIED",
+    "OLYA trusted project context",
+    "X1 trusted project context",
+)
 
 
 def _latest_user(incoming) -> str:
     return next((str(msg.content or "") for msg in reversed(incoming) if getattr(msg, "role", "") == "user"), "")
+
+
+def _latest_real_user(messages) -> str:
+    for msg in reversed(messages):
+        if getattr(msg, "role", "") != "user":
+            continue
+        text = str(getattr(msg, "content", "") or "").strip()
+        if text and not any(text.startswith(prefix) for prefix in _INTERNAL_PREFIXES):
+            return text
+    return ""
 
 
 def _answer_shape(question: str) -> str:
@@ -42,14 +61,13 @@ def _answer_shape(question: str) -> str:
         return (
             "ANSWER SHAPE: comparison/recommendation. Give the recommendation first, then the decisive criteria, trade-offs, "
             "and a compact comparison. Be concrete enough for a decision; do not stop at generic pros/cons. If web evidence "
-            "is present, synthesize it and finish with 2-4 exact source URLs from the supplied evidence only."
+            "is present, synthesize it and use only supplied evidence for factual claims."
         )
     if _PRACTICAL.search(q):
         return (
             "ANSWER SHAPE: practical guidance. Start with a short thesis, then give 6-9 actionable points with a brief reason "
             "or example for each, then common mistakes and one concrete next step. Do not stop after 2-3 bullets. If web "
-            "evidence is present, combine recurring recommendations across sources and finish with a Sources/Источники section "
-            "containing 2-4 exact URLs from the supplied evidence only; never invent a URL."
+            "evidence is present, combine recurring recommendations across sources; source links are appended by the server."
         )
     if _EXPLAIN.search(q):
         return (
@@ -72,8 +90,26 @@ def _stable_atomic(question: str) -> bool:
     return bool(q and _STABLE_ATOMIC.search(q))
 
 
+def _wants_source_appendix(question: str) -> bool:
+    q = " ".join(str(question or "").split())
+    return bool(q and (_PRACTICAL.search(q) or _COMPARE.search(q)))
+
+
 def _host(url: str) -> str:
     return (urlsplit(str(url or "")).hostname or "").casefold().removeprefix("www.")
+
+
+def _evidence_urls(messages) -> list[str]:
+    urls: list[str] = []
+    for msg in messages:
+        text = str(getattr(msg, "content", "") or "")
+        if not any(marker in text for marker in ("WEB SEARCH DISCOVERY", "VERIFIED FRESH WEB SNAPSHOTS")):
+            continue
+        for match in _URL.findall(text):
+            url = match.rstrip(".,;:!?)\"]}")
+            if url not in urls:
+                urls.append(url)
+    return urls[:4]
 
 
 async def _fast_snippet_execution(**kwargs):
@@ -122,7 +158,7 @@ async def _fast_snippet_execution(**kwargs):
         max_sources=4,
         force_freshness=False,
         freshness_category="stable",
-        public_steps=("Ищу релевантные источники", "Сверяю советы", "Формирую вывод"),
+        public_steps=("Ищу релевантные источники", "Сверяю информацию", "Формирую вывод"),
         reason="fast_snippet_synthesis" if _knowledge_synthesis(question) else "fast_stable_fact",
     )
     execution = TaskExecution(plan=plan)
@@ -158,6 +194,7 @@ async def _fast_snippet_execution(**kwargs):
 
 
 def install_answer_strategy_patch() -> None:
+    from app.inference.client import LlamaClient, LlamaGeneration
     from app.services import fast_web_grounding
     from app.services.project_context import ProjectContextBuilder
 
@@ -183,6 +220,30 @@ def install_answer_strategy_patch() -> None:
 
         execute_fast_web_grounding._olya_compact_synthesis = True  # type: ignore[attr-defined]
         fast_web_grounding.execute_fast_web_grounding = execute_fast_web_grounding
+
+    current_generate = LlamaClient.generate
+    if not getattr(current_generate, "_olya_source_appendix", False):
+        async def generate(self, messages, *, max_tokens: int, reasoning: bool, on_token=None):
+            result = await current_generate(self, messages, max_tokens=max_tokens, reasoning=reasoning, on_token=on_token)
+            question = _latest_real_user(messages)
+            urls = _evidence_urls(messages) if _wants_source_appendix(question) else []
+            missing = [url for url in urls if url not in str(result.text or "")]
+            if not missing:
+                return result
+            heading = "Источники:" if len(_CYR.findall(question)) >= 2 else "Sources:"
+            appendix = "\n\n" + heading + "\n" + "\n".join(f"- {url}" for url in missing[:4])
+            if on_token is not None:
+                await on_token(appendix)
+            return LlamaGeneration(
+                text=str(result.text or "") + appendix,
+                ttft_ms=result.ttft_ms,
+                output_tokens=result.output_tokens,
+                tokens_per_second=result.tokens_per_second,
+                generation_ms=result.generation_ms,
+            )
+
+        generate._olya_source_appendix = True  # type: ignore[attr-defined]
+        LlamaClient.generate = generate
 
     current_build = ProjectContextBuilder.build
     if not getattr(current_build, "_olya_answer_shape", False):
