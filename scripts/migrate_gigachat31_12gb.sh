@@ -27,11 +27,16 @@ if ram < 11.0:
     raise SystemExit(f"GigaChat 3.1 Q4 production profile requires >=11 GiB detected RAM; found {ram:.2f} GiB")
 PY
 
-free_gb=$(df -Pk "$ROOT" | awk 'NR==2 {print int($4/1024/1024)}')
-(( free_gb >= 12 )) || fail "At least 12 GB free disk is required for the 6.47 GB model plus safe partial download; found ${free_gb} GB"
+cores=$(nproc)
+threads=$cores
+(( threads > 12 )) && threads=12
+(( threads < 2 )) && threads=2
+batch_threads=$threads
+info "Detected CPU threads=${cores}; GigaChat decode_threads=${threads}; batch_threads=${batch_threads}"
 
-# Fail before changing the running stack if the migration/audit files themselves
-# are malformed or Compose cannot resolve the current installation.
+free_gb=$(df -Pk "$ROOT" | awk 'NR==2 {print int($4/1024/1024)}')
+(( free_gb >= 6 )) || fail "At least 6 GB free disk is required after the model is already present; found ${free_gb} GB"
+
 bash -n scripts/migrate_gigachat31_12gb.sh
 python3 -m py_compile scripts/gigachat31_runtime_audit.py scripts/download_model.py
 docker compose config --quiet
@@ -56,14 +61,15 @@ rollback(){
 }
 trap rollback ERR INT TERM
 
-info "Downloading and verifying pinned GigaChat 3.1 Lightning Q4_K_M"
+info "Downloading/verifying pinned GigaChat 3.1 Lightning Q4_K_M"
 python3 scripts/download_model.py --profile primary --retries 6 --timeout 180
 python3 scripts/download_model.py --profile primary --verify-only
 
 info "Applying 12 GiB runtime envelope"
-python3 - <<'PY'
+python3 - "$threads" "$batch_threads" <<'PY'
 from pathlib import Path
-
+import sys
+threads=sys.argv[1]; batch_threads=sys.argv[2]
 path=Path('.env')
 lines=path.read_text('utf-8').splitlines()
 updates={
@@ -74,6 +80,8 @@ updates={
     'X1_LLAMA_MEMORY_LIMIT':'8g',
     'X1_MAX_CONTEXT_TOKENS':'4096',
     'X1_DEEP_CONTEXT_TOKENS':'4096',
+    'X1_LLAMA_THREADS':threads,
+    'X1_LLAMA_THREADS_BATCH':batch_threads,
     'X1_MAX_CONCURRENT_GENERATIONS':'1',
     'X1_INFERENCE_MAX_QUEUED_PER_PRINCIPAL':'4',
     'X1_MAX_QUEUE_SIZE':'24',
@@ -90,8 +98,7 @@ for line in lines:
             continue
     out.append(line)
 for key,value in updates.items():
-    if key not in seen:
-        out.append(f'{key}={value}')
+    if key not in seen: out.append(f'{key}={value}')
 path.write_text('\n'.join(out).rstrip()+'\n','utf-8')
 PY
 chmod 600 .env
@@ -100,17 +107,16 @@ info "Validating resolved GigaChat Compose configuration"
 resolved_compose=$(mktemp)
 docker compose config > "$resolved_compose"
 grep -Fq '/models/GigaChat3.1-10B-A1.8B-q4_K_M.gguf' "$resolved_compose" || { rm -f "$resolved_compose"; fail "Compose did not resolve the GigaChat model file"; }
+grep -Fq -- '--cpu-moe' "$resolved_compose" || { rm -f "$resolved_compose"; fail "Compose did not enable llama.cpp CPU-MoE"; }
 rm -f "$resolved_compose"
 
-info "Rebuilding application runtime and restarting local inference"
+info "Rebuilding application runtime and restarting optimized local inference"
 docker compose up -d --build --force-recreate llama app
 
 info "Waiting for GigaChat llama.cpp health"
 ready=0
 for _ in $(seq 1 90); do
-  if docker compose exec -T llama sh -lc "curl -fsS http://127.0.0.1:8080/health >/dev/null" >/dev/null 2>&1; then
-    ready=1; break
-  fi
+  if docker compose exec -T llama sh -lc "curl -fsS http://127.0.0.1:8080/health >/dev/null" >/dev/null 2>&1; then ready=1; break; fi
   sleep 2
 done
 [ "$ready" -eq 1 ] || { docker compose logs --tail=160 llama >&2 || true; fail "GigaChat llama.cpp did not become healthy"; }
@@ -118,12 +124,12 @@ done
 info "Verifying model artifact inside host storage"
 python3 scripts/download_model.py --profile primary --verify-only
 
-info "Running live GigaChat 3.1 integration audit"
+info "Running live GigaChat 3.1 integration + performance audit"
 docker compose exec -T app python -m scripts.gigachat31_runtime_audit
 
 info "Running core answer-pipeline sanity checks"
 docker compose exec -T app python -m scripts.answer_pipeline_audit
 
 trap - ERR INT TERM
-info "GigaChat 3.1 migration completed successfully (RAM=${ram_gib}GiB, context=4096, llama_limit=8g)"
+info "GigaChat 3.1 migration completed successfully (RAM=${ram_gib}GiB, cpu=${cores}, threads=${threads}, context=4096, llama_limit=8g, cpu_moe=on)"
 info "Rollback env retained at: $backup"
