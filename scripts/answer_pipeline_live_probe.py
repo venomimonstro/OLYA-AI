@@ -21,6 +21,7 @@ async def _search_probe(
     expected_terms: tuple[str, ...] = (),
     expected_domain: str = "",
     stable_consensus: bool = False,
+    require_two_domains: bool = True,
 ) -> dict:
     started = perf_counter()
     errors: list[str] = []
@@ -56,7 +57,7 @@ async def _search_probe(
         errors.append("no_results")
     if len(observed) < 2:
         errors.append("fewer_than_two_engines")
-    if len(domains) < 2:
+    if require_two_domains and len(domains) < 2:
         errors.append("fewer_than_two_domains")
     if elapsed_ms > 3800:
         errors.append("search_too_slow")
@@ -120,6 +121,7 @@ async def probe() -> dict:
         language="ru",
         expected_terms=("булгаков",),
         stable_consensus=True,
+        require_two_domains=True,
     )
     if author["errors"]:
         errors.extend(f"author:{item}" for item in author["errors"])
@@ -129,6 +131,7 @@ async def probe() -> dict:
         "current President of the United States site:whitehouse.gov",
         language="en",
         expected_domain="whitehouse.gov",
+        require_two_domains=False,
     )
     if current_role["errors"]:
         errors.extend(f"current_role:{item}" for item in current_role["errors"])
