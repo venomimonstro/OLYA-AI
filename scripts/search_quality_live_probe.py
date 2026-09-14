@@ -53,7 +53,7 @@ async def one(discovery: SearxngDiscovery, case: dict) -> dict:
     query = str(case["query"])
     started = perf_counter()
     try:
-        hits = await discovery.search(query, count=10, country="RU", language=str(case["language"]))
+        hits = await discovery.search(query, count=8, country="RU", language=str(case["language"]))
     except Exception as exc:
         return {
             "query": query,
@@ -104,13 +104,19 @@ async def one(discovery: SearxngDiscovery, case: dict) -> dict:
 
 async def main_async() -> int:
     base = os.getenv("X1_SEARXNG_BASE_URL", "http://searxng:8080")
-    discovery = SearxngDiscovery(base, timeout_seconds=3.2)
-    rows = await asyncio.gather(*(one(discovery, case) for case in CASES))
+    discovery = SearxngDiscovery(base, timeout_seconds=3.0)
+    rows: list[dict] = []
+    # Run sequentially: the probe must measure production quality, not create a
+    # synthetic burst that gets the server IP rate-limited by public engines.
+    for case in CASES:
+        rows.append(await one(discovery, case))
+        await asyncio.sleep(0.15)
     errors = [row["query"] for row in rows if not row.get("ok")]
     result = {
-        "format": "olya-search-quality-live-probe-v3",
+        "format": "olya-search-quality-live-probe-v4",
         "status": "passed" if not errors else "failed",
         "errors": errors,
+        "engine_pool": list(discovery.general_engines),
         "cases": rows,
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
