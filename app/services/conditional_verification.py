@@ -6,6 +6,7 @@ from typing import Iterable
 
 from app.schemas.chat import AnswerRequirement
 from app.services.freshness import classify_freshness
+from app.services.interactive_evidence import current_interactive_evidence
 from app.services.quality import DeterministicAudit
 from app.services.scope_lock import compile_scope_contract
 
@@ -22,6 +23,15 @@ _LOW_RISK_TRANSFORM = re.compile(
     r"fix\s+(?:typos|grammar)|rewrite|translate|shorten)\b",
     re.IGNORECASE,
 )
+_ATOMIC_FRESH_CATEGORIES = {
+    "official_role",
+    "market",
+    "weather",
+    "price",
+    "schedule",
+    "software_version",
+    "availability",
+}
 
 
 @dataclass(frozen=True)
@@ -53,6 +63,25 @@ def _failed_keys(audit: DeterministicAudit | None) -> set[str]:
     return {str(item.get("key", "")) for item in audit.checks if item.get("status") == "failed"}
 
 
+def _trusted_atomic_evidence(user_text: str, freshness_required: bool) -> tuple[bool, str]:
+    if not freshness_required:
+        return False, ""
+    decision = classify_freshness(user_text)
+    if decision.category not in _ATOMIC_FRESH_CATEGORIES:
+        return False, ""
+    # Long analytical versions of a current-data question still benefit from
+    # normal quality review. The shortcut is for interactive atomic lookups.
+    clean = " ".join(str(user_text or "").split())
+    if len(clean) > 320 or re.search(r"\b(?:подробно|детально|проанализ|сравни|исследуй|почему|прогноз|стратег)\w*", clean, re.I):
+        return False, ""
+    live = current_interactive_evidence()
+    min_hosts = max(1, int(decision.min_independent_hosts or 1))
+    if not live.satisfies(min_hosts):
+        return False, ""
+    reason = "authoritative_primary_evidence" if live.authoritative else "trusted_interactive_evidence"
+    return True, reason
+
+
 def plan_verification(
     *,
     verification: str,
@@ -67,10 +96,22 @@ def plan_verification(
     if verification == "off":
         return VerificationPlan("off", 0, (), False, False, False)
 
-    # Current office-holder questions are verified by the dedicated external
-    # evidence path (live metasearch + official-domain extraction). A second
-    # LLM critic adds latency but cannot improve the authoritative fact and can
-    # even reintroduce stale memorized data. Keep this path zero-extra-inference.
+    requirements = list(requirements)
+    trusted_atomic, trusted_reason = _trusted_atomic_evidence(user_text, freshness_required)
+    if trusted_atomic and not requirements:
+        # The factual value has already been checked by the server-side evidence
+        # pipeline. Asking the same small local model to critique/rewrite it adds
+        # latency and can reintroduce hallucination, so keep this zero-extra-pass.
+        return VerificationPlan(
+            mode=verification,
+            risk_score=1,
+            reasons=(trusted_reason, "atomic_fact_zero_extra_inference"),
+            run_critic=False,
+            repair_deterministic=False,
+            repair_critic=False,
+            critic_max_tokens=0,
+        )
+
     fresh_decision = classify_freshness(user_text)
     if freshness_required and fresh_decision.category == "official_role":
         return VerificationPlan(
@@ -85,7 +126,7 @@ def plan_verification(
 
     reasons: list[str] = []
     score = 0
-    requirement_count = sum(1 for _ in requirements)
+    requirement_count = len(requirements)
     failed = _failed_keys(deterministic)
     scope_active = compile_scope_contract(user_text).active
 
