@@ -12,6 +12,7 @@ from app.current_fact_latency_patch import install_current_fact_latency_patch
 from app.chat_reliability_patch import install_chat_reliability_patch
 from app.response_policy_patch import install_response_policy_patch
 from app.fresh_search_policy_patch import install_fresh_search_policy_patch
+from app.ultrafast_fresh_web_patch import install_ultrafast_fresh_web_patch
 from app.current_fact_evidence_guard import install_current_fact_evidence_guard
 from app.reasoning_privacy_patch import install_reasoning_privacy_patch
 from app.testing_unlimited_usage_patch import install_testing_unlimited_usage_patch
@@ -26,6 +27,7 @@ install_current_fact_latency_patch()
 install_chat_reliability_patch()
 install_response_policy_patch()
 install_fresh_search_policy_patch()
+install_ultrafast_fresh_web_patch()
 install_current_fact_evidence_guard()
 install_reasoning_privacy_patch()
 install_testing_unlimited_usage_patch()
