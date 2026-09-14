@@ -6,6 +6,7 @@ from app.schemas.chat import ChatMessage
 from app.services.file_context import FileContextBuilder
 from app.services.development import compact_project_development_context
 from app.services.long_term_memory import build_memory_bundle, memory_context_message, remember_user_turn
+import app.services.memory_write_through  # noqa: F401 - persist memory on every user message
 from app.services.task_solver import current_task_solver_context
 
 
