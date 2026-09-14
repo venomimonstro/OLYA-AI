@@ -4,6 +4,7 @@ use_default_settings:
       - google
       - yandex
       - bing
+      - duckduckgo
       - startpage
 
 general:
@@ -17,16 +18,18 @@ search:
     - html
     - json
 
-# Google and Yandex are the preferred SERP sources for OLYA. Bing and
-# Startpage remain bounded fallbacks when the server IP is challenged or a
-# primary engine is temporarily unavailable. Application-side circuit breakers
-# prevent CAPTCHA/429 engines from delaying user answers.
+# Google and Yandex stay the preferred SERP sources while healthy. Bing is the
+# first fallback; DuckDuckGo and Startpage are bounded secondary fallbacks.
+# Application-side circuit breakers prevent CAPTCHA/429 engines from delaying
+# every user request.
 engines:
   - name: google
     disabled: false
   - name: yandex
     disabled: false
   - name: bing
+    disabled: false
+  - name: duckduckgo
     disabled: false
   - name: startpage
     disabled: false
@@ -42,5 +45,5 @@ ui:
   static_use_hash: true
 
 outgoing:
-  request_timeout: 1.8
-  max_request_timeout: 2.4
+  request_timeout: 1.6
+  max_request_timeout: 2.2
