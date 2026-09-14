@@ -6,7 +6,7 @@ _MARKER = "OLYA_RECOVERY_CONTROLS_V1"
 
 
 def _nonce(document: str) -> str:
-    match = re.search(r'nonce=["\']([^"\']+)["\']', document, flags=re.I)
+    match = re.search(r'''nonce=["']([^"']+)["']''', document, flags=re.I)
     return match.group(1) if match else ""
 
 
