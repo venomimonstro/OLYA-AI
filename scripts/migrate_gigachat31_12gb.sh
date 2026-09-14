@@ -30,6 +30,12 @@ PY
 free_gb=$(df -Pk "$ROOT" | awk 'NR==2 {print int($4/1024/1024)}')
 (( free_gb >= 12 )) || fail "At least 12 GB free disk is required for the 6.47 GB model plus safe partial download; found ${free_gb} GB"
 
+# Fail before changing the running stack if the migration/audit files themselves
+# are malformed or Compose cannot resolve the current installation.
+bash -n scripts/migrate_gigachat31_12gb.sh
+python3 -m py_compile scripts/gigachat31_runtime_audit.py scripts/download_model.py
+docker compose config --quiet
+
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 backup="backups/env-before-gigachat31-${stamp}"
 mkdir -p backups models
@@ -89,6 +95,12 @@ for key,value in updates.items():
 path.write_text('\n'.join(out).rstrip()+'\n','utf-8')
 PY
 chmod 600 .env
+
+info "Validating resolved GigaChat Compose configuration"
+resolved_compose=$(mktemp)
+docker compose config > "$resolved_compose"
+grep -Fq '/models/GigaChat3.1-10B-A1.8B-q4_K_M.gguf' "$resolved_compose" || { rm -f "$resolved_compose"; fail "Compose did not resolve the GigaChat model file"; }
+rm -f "$resolved_compose"
 
 info "Rebuilding application runtime and restarting local inference"
 docker compose up -d --build --force-recreate llama app
