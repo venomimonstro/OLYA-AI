@@ -15,24 +15,10 @@ class RouteDecision:
 
 
 HIGH_RISK_MARKERS = (
-    "аудит безопасности",
-    "security audit",
-    "найди уязвим",
-    "find vulnerab",
-    "проведи исследование",
-    "deep research",
-    "проанализируй репозитор",
-    "audit the repository",
-    "архитектурный аудит",
-    "seo аудит",
-    "seo-аудит",
-    "seo audit",
-    "аудит сайта",
-    "site audit",
-    "production incident",
-    "расследуй инцидент",
-    "юридический анализ",
-    "medical diagnosis",
+    "аудит безопасности", "security audit", "найди уязвим", "find vulnerab",
+    "проведи исследование", "deep research", "проанализируй репозитор", "audit the repository",
+    "архитектурный аудит", "seo аудит", "seo-аудит", "seo audit", "аудит сайта", "site audit",
+    "production incident", "расследуй инцидент", "юридический анализ", "medical diagnosis",
 )
 
 ANALYTIC_MARKERS = (
@@ -85,12 +71,7 @@ def _complexity_score(normalized: str) -> tuple[int, list[str]]:
 
 
 def choose_route(text: str, requested_mode: str, normal_context: int, deep_context: int) -> RouteDecision:
-    """Map UI quality levels to real inference profiles.
-
-    Public UX names are Simple / Medium / High. Internal values remain
-    fast / work / deep for backwards compatibility with persisted usage data.
-    Auto remains an API-compatible adaptive mode and is not required in the UI.
-    """
+    """Three real quality levels with an API-only adaptive Auto mode."""
     normalized = text.casefold().strip()
     deep_limit = max(1024, int(deep_context))
     normal_limit = min(max(1024, int(normal_context)), deep_limit)
@@ -114,8 +95,6 @@ def choose_route(text: str, requested_mode: str, normal_context: int, deep_conte
         mode = "fast"; reasons.insert(0, "auto_simple")
 
     if mode == "fast":
-        # Super-fast lane: no hidden thinking pass. Still enough output budget
-        # for a useful answer rather than the old artificially terse Fast lane.
         return RouteDecision(
             mode="fast",
             max_context_tokens=normal_limit,
@@ -126,9 +105,6 @@ def choose_route(text: str, requested_mode: str, normal_context: int, deep_conte
         )
 
     if mode == "deep":
-        # High quality uses internal thinking and the full configured context.
-        # On a 4K runtime keep output below half the context so the prompt and
-        # retrieved evidence are not squeezed out by a huge completion reserve.
         return RouteDecision(
             mode="deep",
             max_context_tokens=deep_limit,
@@ -138,9 +114,10 @@ def choose_route(text: str, requested_mode: str, normal_context: int, deep_conte
             reason=",".join(reasons),
         )
 
-    # Medium is the balanced default: larger answers, with internal reasoning
-    # only when the task is genuinely analytical or multi-step.
-    work_reasoning = score >= 2
+    # Medium spends hidden-thinking compute only on clearly multi-step work.
+    # This preserves the quality gradient without making routine requests slow
+    # on the starter CPU node.
+    work_reasoning = score >= 4
     return RouteDecision(
         mode="work",
         max_context_tokens=normal_limit,
