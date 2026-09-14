@@ -12,8 +12,6 @@ def strip_private_reasoning(text: str) -> str:
     value = str(text or "")
     value = _THINK_BLOCK.sub("", value)
     value = _REASONING_BLOCK.sub("", value)
-    # Defensive cleanup for an unterminated private block. Never expose its
-    # contents merely because the backend stopped before writing a closing tag.
     for opener in ("<think", "<reasoning", "<analysis"):
         pos = value.casefold().find(opener)
         if pos >= 0:
@@ -40,8 +38,6 @@ class _PrivateReasoningStream:
                 closes = [(lower.find(tag), tag) for tag in ("</think>", "</reasoning>", "</analysis>")]
                 closes = [(pos, tag) for pos, tag in closes if pos >= 0]
                 if not closes:
-                    # Keep only enough tail to recognize a closing tag split
-                    # across chunks; all preceding private content is discarded.
                     self.buffer = self.buffer[-16:]
                     break
                 pos, tag = min(closes, key=lambda item: item[0])
@@ -63,8 +59,6 @@ class _PrivateReasoningStream:
                 self.private = True
                 continue
 
-            # Hold a short suffix so an opening tag split between chunks is not
-            # emitted prematurely. This adds negligible latency (<10 chars).
             if len(self.buffer) <= 12:
                 break
             out.append(self.buffer[:-12])
@@ -89,8 +83,14 @@ def install_reasoning_privacy_patch() -> None:
         return
 
     async def guarded(self, messages, *, max_tokens: int, reasoning: bool, on_token=None):
+        # Non-thinking profiles should preserve literal user-requested markup
+        # such as <analysis> examples. The privacy filter is only necessary when
+        # the backend's internal thinking mode is actually enabled.
+        if not reasoning:
+            return await current(self, messages, max_tokens=max_tokens, reasoning=False, on_token=on_token)
+
         if on_token is None:
-            result = await current(self, messages, max_tokens=max_tokens, reasoning=reasoning, on_token=None)
+            result = await current(self, messages, max_tokens=max_tokens, reasoning=True, on_token=None)
             clean = strip_private_reasoning(result.text)
             return LlamaGeneration(
                 text=clean,
@@ -101,7 +101,7 @@ def install_reasoning_privacy_patch() -> None:
             )
 
         stream = _PrivateReasoningStream(on_token)
-        result = await current(self, messages, max_tokens=max_tokens, reasoning=reasoning, on_token=stream.feed)
+        result = await current(self, messages, max_tokens=max_tokens, reasoning=True, on_token=stream.feed)
         await stream.finish()
         clean = strip_private_reasoning(result.text)
         return LlamaGeneration(
