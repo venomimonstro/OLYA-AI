@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from urllib.parse import urlsplit
 
 
@@ -26,6 +27,13 @@ _PRIMARY_HOSTS = {
     "w3.org",
 }
 
+_FAST_CHANGING = re.compile(
+    r"\b(?:курс|usd|eur|cny|rub|btc|bitcoin|ethereum|eth|погода|weather|forecast|"
+    r"котиров|stock|price|цена|сейчас|today|current|latest)\b",
+    re.IGNORECASE,
+)
+_SOFTWARE = re.compile(r"\b(?:version|версия|release|релиз|python|node|react|postgres|docker|nginx|php)\b", re.IGNORECASE)
+
 
 def _is_primary(host: str) -> bool:
     if not host:
@@ -43,7 +51,6 @@ def _looks_like_docs(host: str, title: str, snippet: str) -> bool:
     text = f"{title} {snippet}".casefold()
     return (
         host.startswith("docs.")
-        or "/docs" in text
         or "documentation" in text
         or "документац" in text
         or "reference" in text
@@ -51,15 +58,20 @@ def _looks_like_docs(host: str, title: str, snippet: str) -> bool:
     )
 
 
-def install_search_quality_patch() -> None:
-    """Prefer primary evidence without making ordinary search slower.
+def _cache_ttl(query: str, requested: int) -> int:
+    """Keep fast-changing search fallbacks fresh without wasting repeat queries."""
+    value = " ".join(str(query or "").split())
+    if _FAST_CHANGING.search(value):
+        # Structured resolvers normally handle FX/crypto/weather first. This TTL
+        # protects the generic web fallback when a direct provider is unavailable.
+        return min(int(requested), 90)
+    if _SOFTWARE.search(value):
+        return min(int(requested), 15 * 60)
+    return min(max(int(requested), 60), 6 * 60 * 60)
 
-    SearXNG already fans one query out to several engines. The missing quality
-    layer was authority-aware source ordering: an official regulator or project
-    documentation should beat an SEO article merely because the article ranked
-    one position higher in a SERP. This patch keeps source diversity while
-    explicitly preferring primary sources and technical documentation.
-    """
+
+def install_search_quality_patch() -> None:
+    """Authority-aware ranking plus freshness-aware search caching."""
     from app.services import discovery as discovery
     from app.services import task_solver as task_solver
 
@@ -67,6 +79,7 @@ def install_search_quality_patch() -> None:
         return
 
     base_classify = discovery.classify_source
+    base_cached_search = discovery.cached_provider_search
 
     def classify_source(url: str, title: str = "", snippet: str = "") -> tuple[str, float]:
         host = _host(url)
@@ -79,6 +92,8 @@ def install_search_quality_patch() -> None:
     def enrich_hit(hit):
         source_kind, base_score = classify_source(hit.url, hit.title, hit.snippet)
         rank_bonus = max(0.0, (11 - min(int(hit.rank or 10), 10)) / 120)
+        # Agreement between several search engines is a useful discovery signal,
+        # but it never outranks primary-source authority by itself.
         provider_bonus = 0.015 if "," in str(hit.provider or "") else 0.0
         return {
             "query": hit.query,
@@ -90,6 +105,21 @@ def install_search_quality_patch() -> None:
             "source_kind": source_kind,
             "discovery_score": round(min(base_score + rank_bonus + provider_bonus, 0.995), 3),
         }
+
+    async def cached_provider_search(
+        db, discovery_obj, query: str, *, count: int, country: str | None,
+        language: str | None, ttl_seconds: int = 3600, quality_mode: bool = False,
+    ):
+        return await base_cached_search(
+            db,
+            discovery_obj,
+            query,
+            count=count,
+            country=country,
+            language=language,
+            ttl_seconds=_cache_ttl(query, ttl_seconds),
+            quality_mode=quality_mode,
+        )
 
     def diversify_hits(hits, *, kind: str, limit: int):
         enriched = [enrich_hit(hit) for hit in discovery.dedupe_hits(hits, limit=max(limit * 5, limit))]
@@ -113,8 +143,6 @@ def install_search_quality_patch() -> None:
         seen_urls: set[str] = set()
         per_host: dict[str, int] = {}
 
-        # Recommendations deliberately preserve heterogeneous evidence. Factual
-        # questions instead naturally start with the strongest primary source.
         preferred = (
             ("primary_official", "official_candidate", "maps_catalog", "reviews", "web")
             if kind == "local_recommendation"
@@ -158,8 +186,11 @@ def install_search_quality_patch() -> None:
 
     classify_source._olya_authority_ranking = True  # type: ignore[attr-defined]
     enrich_hit._olya_authority_ranking = True  # type: ignore[attr-defined]
+    cached_provider_search._olya_fresh_cache = True  # type: ignore[attr-defined]
     diversify_hits._olya_authority_ranking = True  # type: ignore[attr-defined]
     discovery.classify_source = classify_source
     discovery.enrich_hit = enrich_hit
+    discovery.cached_provider_search = cached_provider_search
     task_solver.enrich_hit = enrich_hit
+    task_solver.cached_provider_search = cached_provider_search
     task_solver.diversify_hits = diversify_hits
