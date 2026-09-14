@@ -7,6 +7,7 @@ policy apply consistently to normal chat, streaming chat and verification calls.
 
 from app.runtime_quality_patch import install_runtime_quality_patch
 from app.qwen4b_runtime_patch import install_qwen4b_runtime_patch
+from app.reasoning_budget_patch import install_reasoning_budget_patch
 from app.work_quality_floor_patch import install_work_quality_floor_patch
 from app.current_fact_latency_patch import install_current_fact_latency_patch
 from app.chat_reliability_patch import install_chat_reliability_patch
@@ -26,6 +27,7 @@ from app.tester_access_patch import install_tester_access_patch
 
 install_runtime_quality_patch()
 install_qwen4b_runtime_patch()
+install_reasoning_budget_patch()
 install_work_quality_floor_patch()
 install_current_fact_latency_patch()
 install_chat_reliability_patch()
