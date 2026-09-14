@@ -4,9 +4,9 @@ import re
 
 
 _HIGH_RISK = re.compile(
-    r"\b(?:аудит\s+безопасност|уязвим|архитектурн\w*\s+аудит|production\s+incident|"
-    r"проанализируй\s+репозитор|юридическ\w*\s+анализ|медицинск\w*\s+(?:диагноз|анализ)|"
-    r"финансов\w*\s+(?:модель|расч[её]т|анализ)|налогов\w*\s+расч[её]т|"
+    r"\b(?:аудит\s+безопасност\w*|уязвим\w*|архитектурн\w*\s+аудит\w*|production\s+incident|"
+    r"проанализируй\s+репозитор\w*|юридическ\w*\s+анализ\w*|медицинск\w*\s+(?:диагноз\w*|анализ\w*)|"
+    r"финансов\w*\s+(?:модель\w*|расч[её]т\w*|анализ\w*)|налогов\w*\s+расч[её]т\w*|"
     r"deep\s+research|проведи\s+исследование|security\s+audit|architecture\s+audit|"
     r"audit\s+the\s+repository|legal\s+analysis|medical\s+analysis|financial\s+analysis)\b",
     re.IGNORECASE,
