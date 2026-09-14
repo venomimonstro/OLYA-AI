@@ -25,10 +25,14 @@ def install_fresh_search_policy_patch() -> None:
     ):
         decision = classify_freshness(query)
         if decision.required:
-            # A one-hour generic cache is too stale for "сейчас/сегодня" facts.
-            # Five minutes still protects the free metasearch engines from bursts
-            # while allowing office holders, news, prices and schedules to move.
-            ttl_seconds = min(max(0, int(ttl_seconds)), 300)
+            # Current office holders are resolved live every time: neither model
+            # memory nor an older cached SERP may decide who occupies a role now.
+            if decision.category == "official_role":
+                ttl_seconds = 0
+            else:
+                # Other changing facts get a short cache to protect free engines
+                # from bursts while remaining substantially fresher than 1 hour.
+                ttl_seconds = min(max(0, int(ttl_seconds)), 300)
             quality_mode = True
         return await current(
             db,
