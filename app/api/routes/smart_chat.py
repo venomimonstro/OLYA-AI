@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 from time import perf_counter
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -17,17 +18,21 @@ from app.schemas.chat import ChatRequest, ChatResponse, ChatRunStatus
 from app.services.auth import get_current_user
 from app.services.chat_runtime import ActiveChatJob, ChatRunConflict, ChatRunSnapshot, chat_execution_manager
 from app.services.fast_web_grounding import execute_fast_web_grounding, should_auto_ground
+from app.services.freshness import classify_freshness
 from app.services.task_solver import execute_task_solver, plan_task, reset_task_solver_context, set_task_solver_context
 from app.task_solver_user_ui import router as _task_solver_user_ui_router
 
 router = APIRouter(prefix="/v1", tags=["chat"])
 _SPECIALIZED_TASKS = {"website_audit", "local_recommendation"}
+_CYRILLIC = re.compile(r"[А-Яа-яЁё]")
+_ENGLISH_BOILERPLATE = (
+    re.compile(r"(?:However,\s*)?please note that[^.!?]*(?:[.!?]|$)", re.IGNORECASE),
+    re.compile(r"this information may change over time[^.!?]*(?:[.!?]|$)", re.IGNORECASE),
+    re.compile(r"it is recommended to verify[^.!?]*(?:[.!?]|$)", re.IGNORECASE),
+)
 
 
 def _install_workspace_route() -> None:
-    # main.py imports user_ui before smart_chat. Replace its /app route in-place
-    # so the already-held router reference gets the enhanced workspace and
-    # FastAPI never receives two competing /app handlers.
     retained = [route for route in _base_user_ui.router.routes if str(getattr(route, "path", "")) != "/app"]
     enhanced = [route for route in _task_solver_user_ui_router.routes if str(getattr(route, "path", "")) == "/app"]
     if len(enhanced) != 1:
@@ -58,6 +63,27 @@ def _planning_question(payload: ChatRequest, max_queries: int) -> str:
     return latest
 
 
+def _russian(text: str) -> bool:
+    return len(_CYRILLIC.findall(text or "")) >= 2
+
+
+def _freshness_unavailable(question: str) -> str:
+    if _russian(question):
+        return "Не удалось подтвердить актуальную информацию по свежим внешним источникам. Я не буду подменять текущие данные устаревшими сведениями из памяти модели. Повторите запрос позже."
+    return "I could not verify the current information from fresh external sources, so I will not substitute stale model-memory data for a current fact. Please try again later."
+
+
+def _clean_language_boilerplate(question: str, text: str) -> str:
+    value = str(text or "")
+    if not _russian(question):
+        return value.strip()
+    for pattern in _ENGLISH_BOILERPLATE:
+        value = pattern.sub("", value)
+    value = re.sub(r"\s{2,}", " ", value)
+    value = re.sub(r"\s+([,.;:!?])", r"\1", value)
+    return value.strip()
+
+
 async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id: str, job: ActiveChatJob) -> ChatResponse:
     with SessionLocal() as job_db:
         job_user = job_db.get(User, user_id)
@@ -69,25 +95,27 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
         context_token = None
         max_queries = int(getattr(request.app.state.settings, "research_max_search_queries", 4))
         question = _planning_question(managed_payload, max_queries)
+        freshness = classify_freshness(question) if question else None
+        mandatory_fresh = bool(freshness and freshness.required)
         force_web = managed_payload.web_mode == "always"
         plan = plan_task(question, max_queries=max_queries, force_web=force_web) if question else None
 
-        # Auto web mode now checks ordinary factual/comparative questions too,
-        # while creative rewrites and stable explanations stay local and fast.
-        auto_fact_grounding = bool(
-            question
-            and managed_payload.web_mode == "auto"
-            and should_auto_ground(question)
-        )
+        auto_fact_grounding = bool(question and managed_payload.web_mode == "auto" and should_auto_ground(question))
         should_solve = bool(
-            managed_payload.web_mode != "off"
-            and plan
-            and (plan.requires_web or auto_fact_grounding)
+            plan
+            and (
+                mandatory_fresh
+                or (
+                    managed_payload.web_mode != "off"
+                    and (plan.requires_web or auto_fact_grounding)
+                )
+            )
             and (
                 not managed_payload.research_source_ids
                 or plan.kind in _SPECIALIZED_TASKS
                 or force_web
                 or auto_fact_grounding
+                or mandatory_fresh
             )
         )
         if should_solve:
@@ -95,13 +123,10 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
                 "status",
                 {
                     "state": "researching",
-                    "message": "Ищу и сверяю источники…",
+                    "message": "Ищу и сверяю актуальные источники…" if mandatory_fresh else "Ищу и сверяю источники…",
                     "task_kind": plan.kind if plan else "web_research",
                 },
             )
-            # Deep collection remains for audits/local recommendations. Ordinary
-            # grounded answers use the low-latency path so Qwen can start much
-            # earlier instead of waiting on 4 searches + 5 page downloads.
             if plan.kind in _SPECIALIZED_TASKS:
                 execution = await execute_task_solver(
                     db=job_db,
@@ -122,7 +147,7 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
                     fetcher=request.app.state.research,
                     question=question,
                     project_id=managed_payload.project_id,
-                    force_web=force_web or auto_fact_grounding,
+                    force_web=force_web,
                 )
 
             merged_sources = list(dict.fromkeys([*managed_payload.research_source_ids, *execution.source_ids]))[:10]
@@ -136,25 +161,41 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
                     "message": (
                         f"Сверено источников: {execution.fetched_sources}. Формирую ответ…"
                         if execution.fetched_sources
-                        else "Поиск завершён. Формирую ответ…"
+                        else "Поиск завершён. Проверяю, можно ли дать актуальный ответ…"
                     ),
                     "task_kind": execution.plan.kind,
                     "fetched_sources": execution.fetched_sources,
                     "independent_hosts": execution.independent_hosts,
                 },
             )
+
+        # For changing facts, do not stream unverified model tokens. The user
+        # sees the waiting/search animation and receives only the post-grounding
+        # result, so stale memorized facts cannot flash in the UI first.
+        token_sink = None if mandatory_fresh else job.token
+        replace_sink = None if mandatory_fresh else job.replace
         try:
             result = await legacy_chat._chat_impl(
                 managed_payload,
                 request,
                 job_user,
                 job_db,
-                on_token=job.token,
-                on_replace=job.replace,
+                on_token=token_sink,
+                on_replace=replace_sink,
             )
         finally:
             if context_token is not None:
                 reset_task_solver_context(context_token)
+
+        result.text = _clean_language_boilerplate(question, result.text)
+        if mandatory_fresh and (execution is None or execution.fetched_sources < 1):
+            result.text = _freshness_unavailable(question)
+
+        # Current-fact requests were intentionally held. Publish the vetted text
+        # once so reconnect snapshots and the normal SSE UI remain consistent.
+        if mandatory_fresh and result.text:
+            await job.token(result.text)
+
         result.run_id = job.run_id
         result.client_request_id = job.client_request_id
         if execution is not None:
@@ -267,14 +308,7 @@ async def chat_stream(payload: ChatRequest, request: Request, user: User = Depen
                 yield _sse("result", snapshot.result)
                 return
             if snapshot.status in {"failed", "interrupted"}:
-                yield _sse(
-                    "error",
-                    {
-                        "status_code": 503,
-                        "detail": snapshot.error_detail or "Chat run failed",
-                        "retryable": snapshot.retryable,
-                    },
-                )
+                yield _sse("error", {"status_code": 503, "detail": snapshot.error_detail or "Chat run failed", "retryable": snapshot.retryable})
                 return
             if snapshot.status == "cancelled":
                 yield _sse("cancelled", {"detail": snapshot.error_detail or "Chat run was cancelled"})
@@ -283,32 +317,19 @@ async def chat_stream(payload: ChatRequest, request: Request, user: User = Depen
             while True:
                 if await request.is_disconnected():
                     if legacy_disconnect_cancels:
-                        await chat_execution_manager.cancel(
-                            user_id=user.id,
-                            client_request_id=snapshot.client_request_id,
-                        )
+                        await chat_execution_manager.cancel(user_id=user.id, client_request_id=snapshot.client_request_id)
                     return
                 try:
                     event, data = await asyncio.wait_for(queue.get(), timeout=0.25)
                 except TimeoutError:
                     if job is not None and job.task is not None and job.task.done():
-                        terminal = await chat_execution_manager.status(
-                            user_id=user.id,
-                            client_request_id=snapshot.client_request_id,
-                        )
+                        terminal = await chat_execution_manager.status(user_id=user.id, client_request_id=snapshot.client_request_id)
                         if terminal.status == "succeeded" and terminal.result:
                             yield _sse("result", terminal.result)
                         elif terminal.status == "cancelled":
                             yield _sse("cancelled", {"detail": terminal.error_detail})
                         else:
-                            yield _sse(
-                                "error",
-                                {
-                                    "status_code": 503,
-                                    "detail": terminal.error_detail or "Chat run failed",
-                                    "retryable": terminal.retryable,
-                                },
-                            )
+                            yield _sse("error", {"status_code": 503, "detail": terminal.error_detail or "Chat run failed", "retryable": terminal.retryable})
                         return
                     now = perf_counter()
                     if now - heartbeat_at >= 2.0:
