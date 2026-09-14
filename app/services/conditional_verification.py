@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from app.schemas.chat import AnswerRequirement
+from app.services.freshness import classify_freshness
 from app.services.quality import DeterministicAudit
 from app.services.scope_lock import compile_scope_contract
 
@@ -40,8 +41,6 @@ class VerificationPlan:
         if self.repair_deterministic:
             return 1
         if self.run_critic:
-            # A second pass is only reserved for high-risk answers where the
-            # evidence-aware critic is allowed to trigger a targeted repair.
             return 2 if self.repair_critic else 1
         if "explicit_requirements" in self.reasons or "scope_lock" in self.reasons:
             return 1
@@ -67,6 +66,22 @@ def plan_verification(
 ) -> VerificationPlan:
     if verification == "off":
         return VerificationPlan("off", 0, (), False, False, False)
+
+    # Current office-holder questions are verified by the dedicated external
+    # evidence path (live metasearch + official-domain extraction). A second
+    # LLM critic adds latency but cannot improve the authoritative fact and can
+    # even reintroduce stale memorized data. Keep this path zero-extra-inference.
+    fresh_decision = classify_freshness(user_text)
+    if freshness_required and fresh_decision.category == "official_role":
+        return VerificationPlan(
+            mode=verification,
+            risk_score=2,
+            reasons=("official_role_external_evidence",),
+            run_critic=False,
+            repair_deterministic=False,
+            repair_critic=False,
+            critic_max_tokens=0,
+        )
 
     reasons: list[str] = []
     score = 0
@@ -130,10 +145,6 @@ def plan_verification(
         )
 
     repair_deterministic = bool(failed)
-    # Qwen4B on CPU must not perform a second full generation for an ordinary
-    # fresh fact that already has fetched evidence. Work + freshness scores 3;
-    # deterministic evidence checks are enough there. Score >=4 still covers
-    # deep, semantic high-risk, missing-evidence and otherwise complex answers.
     run_critic = not repair_deterministic and score >= 4
     repair_critic = bool(
         run_critic
