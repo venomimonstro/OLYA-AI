@@ -6,41 +6,62 @@ from pathlib import Path
 
 from app.current_fact_evidence_guard import resolve_current_office_holder
 from app.schemas.chat import ChatMessage
+from app.services.conditional_verification import plan_verification
 from app.services.fast_web_grounding import should_auto_ground
 from app.services.freshness import classify_freshness
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def audit() -> dict:
-    errors: list[dict] = []
-    question = "кто сейчас президент сша?"
-    decision = classify_freshness(question)
-    if not decision.required or decision.category != "official_role":
-        errors.append({"code": "president_not_current_role", "decision": decision.__dict__})
-    if not should_auto_ground(question):
-        errors.append({"code": "president_not_auto_grounded"})
-
-    sample_messages = [
+def _sample_messages(question: str) -> list[ChatMessage]:
+    return [
         ChatMessage(
             role="user",
             content=(
-                "VERIFIED FRESH WEB SNAPSHOTS.\n\n"
-                "[VERIFIED SOURCE 1]\n"
-                "Title: The Administration\n"
-                "URL: https://www.whitehouse.gov/administration/\n"
-                "Fetched at: 2026-09-14T10:00:00+00:00\n"
-                "Content excerpt:\nThe Administration\nPresident Donald J. Trump\n"
-                "45th & 47th President of the United States\n"
+                "WEB SEARCH DISCOVERY.\n\n"
+                "[SEARCH 1] provider=searxng:google,bing search_confirmed=1\n"
+                "Title: President Donald J. Trump\n"
+                "URL: https://www.whitehouse.gov/administration/donald-j-trump/\n"
+                "Snippet: President Donald J. Trump is the 45th & 47th President of the United States."
             ),
         ),
         ChatMessage(role="user", content=question),
     ]
-    resolved = resolve_current_office_holder(question, sample_messages)
-    if not resolved or "Дональд Трамп" not in resolved:
-        errors.append({"code": "authoritative_role_resolution_failed", "resolved": resolved})
-    if resolved and "Байден" in resolved:
-        errors.append({"code": "stale_holder_survived_evidence_guard", "resolved": resolved})
+
+
+def audit() -> dict:
+    errors: list[dict] = []
+    questions = ["кто сейчас президент сша?", "кто сегодня президент америки?"]
+    decisions = {}
+    resolutions = {}
+    for question in questions:
+        decision = classify_freshness(question)
+        decisions[question] = decision
+        if not decision.required or decision.category != "official_role":
+            errors.append({"code": "president_not_current_role", "question": question, "decision": decision.__dict__})
+        if not should_auto_ground(question):
+            errors.append({"code": "president_not_auto_grounded", "question": question})
+        resolved = resolve_current_office_holder(question, _sample_messages(question))
+        resolutions[question] = resolved
+        if not resolved or "Дональд Трамп" not in resolved:
+            errors.append({"code": "authoritative_role_resolution_failed", "question": question, "resolved": resolved})
+        if resolved and "Байден" in resolved:
+            errors.append({"code": "stale_holder_survived_evidence_guard", "question": question, "resolved": resolved})
+        verification = plan_verification(
+            verification="auto",
+            user_text=question,
+            route_mode="work",
+            requirements=[],
+            freshness_required=True,
+            verified_source_count=0,
+        )
+        if verification.run_critic or verification.extra_inference_budget != 0:
+            errors.append({
+                "code": "official_role_still_uses_llm_critic",
+                "question": question,
+                "run_critic": verification.run_critic,
+                "extra_inference_budget": verification.extra_inference_budget,
+            })
 
     smart = (ROOT / "app" / "api" / "routes" / "smart_chat.py").read_text("utf-8")
     fast = (ROOT / "app" / "services" / "fast_web_grounding.py").read_text("utf-8")
@@ -49,28 +70,25 @@ def audit() -> dict:
     search_policy = (ROOT / "app" / "fresh_search_policy_patch.py").read_text("utf-8")
     searx_client = (ROOT / "app" / "services" / "searxng_discovery.py").read_text("utf-8")
     bootstrap = (ROOT / "app" / "api" / "routes" / "__init__.py").read_text("utf-8")
+    conditional = (ROOT / "app" / "services" / "conditional_verification.py").read_text("utf-8")
 
-    # Do not read /app/searxng/settings.yml here. Production app images do not
-    # contain the sidecar's bind-mounted configuration by design. Engine
-    # availability/provenance is verified separately by current_search_live_probe
-    # against the running SearXNG service.
     required = {
         "mandatory_fresh_search": (smart, "mandatory_fresh"),
-        "hold_unverified_stream": (smart, "token_sink = None if mandatory_fresh else job.token"),
-        "freshness_failure_guard": (smart, "_freshness_unavailable"),
+        "fresh_evidence_guard": (smart, "fresh_evidence_count"),
         "official_whitehouse_query": (fast, "current President of the United States site:whitehouse.gov"),
-        "official_whitehouse_page": (fast, "https://www.whitehouse.gov/administration/"),
-        "verified_snapshot_context": (fast, "VERIFIED FRESH WEB SNAPSHOTS"),
+        "official_search_confirmation": (fast, "search_confirmed=1"),
+        "single_role_query": (fast, 'max_queries = 1 if freshness.category == "official_role"'),
+        "single_role_fetch": (fast, 'fetch_limit = 1 if freshness.category == "official_role"'),
+        "short_role_fetch_timeout": (fast, 'fetch_timeout = 2.5 if freshness.category == "official_role"'),
         "same_language_policy": (policy, "Always answer in the language of the user's latest message"),
         "evidence_over_memory": (policy, "external evidence supplied in the context is authoritative"),
         "deterministic_evidence_guard": (evidence_guard, "resolve_current_office_holder"),
+        "no_model_on_missing_role_evidence": (evidence_guard, "_unavailable_current_role"),
         "office_holder_no_cache": (search_policy, "ttl_seconds = 0"),
-        "five_minute_other_fresh_cache": (search_policy, "300"),
-        "fresh_quality_mode": (search_policy, "quality_mode = True"),
+        "zero_critic_role_path": (conditional, "official_role_external_evidence"),
         "evidence_guard_installed": (bootstrap, "install_current_fact_evidence_guard()"),
-        "fresh_search_policy_installed": (bootstrap, "install_fresh_search_policy_patch()"),
-        "explicit_engine_query": (searx_client, '"engines": ",".join(self.general_engines)'),
-        "engine_provenance": (searx_client, "_provider_name"),
+        "parallel_engine_requests": (searx_client, "asyncio.create_task(one(engine))"),
+        "early_engine_completion": (searx_client, "len(results) >= 2"),
         "google_engine_client": (searx_client, '"google"'),
         "yandex_engine_client": (searx_client, '"yandex"'),
         "duckduckgo_engine_client": (searx_client, '"duckduckgo"'),
@@ -80,19 +98,23 @@ def audit() -> dict:
             errors.append({"code": code, "missing": marker})
 
     return {
-        "format": "olya-current-facts-audit-v3",
+        "format": "olya-current-facts-audit-v4",
         "status": "passed" if not errors else "failed",
         "errors": errors,
-        "president_freshness": {
-            "required": decision.required,
-            "category": decision.category,
-            "min_independent_hosts": decision.min_independent_hosts,
+        "phrases": {
+            question: {
+                "category": decisions[question].category,
+                "required": decisions[question].required,
+                "resolved": resolutions[question],
+            }
+            for question in questions
         },
-        "deterministic_sample": resolved,
         "office_holder_cache_seconds": 0,
-        "other_fresh_cache_seconds": 300,
+        "role_search_queries": 1,
+        "role_page_fetches": 1,
+        "role_fetch_timeout_seconds": 2.5,
+        "llm_critic_for_role_lookup": False,
         "search_engine_client_policy": ["google", "yandex", "bing", "duckduckgo", "brave", "startpage", "qwant"],
-        "live_engine_verification": "run scripts.current_search_live_probe",
     }
 
 
