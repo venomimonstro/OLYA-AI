@@ -65,13 +65,10 @@ def setv(key: str, value: str | int) -> None:
         out.append(prefix + str(value))
     lines = out
 
-# Qwen3-4B Q4_K_M is the pinned quality floor for the small CPU/RAM node.
 setv('X1_LLAMA_MODEL_NAME', 'Qwen3-4B-Q4_K_M')
 setv('X1_LLAMA_MODEL_FILE', 'Qwen3-4B-Q4_K_M.gguf')
 setv('X1_LLAMA_BASE_URL', 'http://llama:8080')
 setv('X1_SERVER_OPTIMIZATION_PROFILE', 'starter_6gb')
-
-# Keep the 4B model resident without starving PostgreSQL/app/OS on a 6 GiB host.
 setv('X1_LLAMA_MEMORY_LIMIT', '3200m')
 setv('X1_MAX_CONTEXT_TOKENS', '4096')
 setv('X1_DEEP_CONTEXT_TOKENS', '4096')
@@ -81,12 +78,8 @@ setv('X1_MAX_CONCURRENT_GENERATIONS', '1')
 setv('X1_MAX_QUEUE_SIZE', '16')
 setv('X1_INFERENCE_MAX_QUEUED_PER_PRINCIPAL', '1')
 setv('X1_INFERENCE_QUEUE_TIMEOUT_SECONDS', '120')
-
-# 4B is slower than 2B on CPU. Do not kill a valid long answer prematurely.
 setv('X1_DEFAULT_MAX_OUTPUT_TOKENS', '900')
 setv('X1_REQUEST_TIMEOUT_SECONDS', '300')
-
-# Preserve RAM for inference. These can be moved to remote workers after a server upgrade.
 setv('X1_PROJECT_SANDBOX_BACKEND', 'disabled')
 setv('X1_DOCUMENT_RENDER_BACKEND', 'disabled')
 setv('X1_IMAGE_BACKEND', 'disabled')
@@ -96,7 +89,6 @@ setv('X1_SEARX_MEMORY_LIMIT_MB', '256')
 setv('X1_APP_MEMORY_LIMIT_MB', '768')
 setv('X1_DATABASE_POOL_SIZE', '3')
 setv('X1_DATABASE_MAX_OVERFLOW', '1')
-
 path.write_text('\n'.join(lines).rstrip() + '\n', 'utf-8')
 PY
 chmod 600 .env
@@ -114,8 +106,8 @@ info "Ensuring PostgreSQL and private search are available"
 docker compose up -d db searxng
 
 info "Recreating local inference with the 4B model"
-docker compose --profile inference pull llama >/dev/null
-docker compose --profile inference up -d --force-recreate llama
+docker compose pull llama >/dev/null
+docker compose up -d --force-recreate llama
 
 info "Waiting for Qwen3-4B health"
 for _ in $(seq 1 120); do
@@ -124,7 +116,10 @@ for _ in $(seq 1 120); do
   fi
   sleep 2
 done
-docker compose exec -T llama sh -lc 'curl -fsS http://127.0.0.1:8080/health >/dev/null' >/dev/null 2>&1 || fail "Qwen3-4B did not become healthy"
+if ! docker compose exec -T llama sh -lc 'curl -fsS http://127.0.0.1:8080/health >/dev/null' >/dev/null 2>&1; then
+  docker compose logs --tail=160 llama >&2 || true
+  fail "Qwen3-4B did not become healthy"
+fi
 
 info "Recreating app so it receives the new model and timeout settings"
 docker compose up -d --force-recreate app
@@ -134,7 +129,10 @@ for _ in $(seq 1 90); do
   fi
   sleep 2
 done
-curl -fsS "http://127.0.0.1:${app_port}/health" >/dev/null 2>&1 || fail "OLYA AI app did not become healthy"
+if ! curl -fsS "http://127.0.0.1:${app_port}/health" >/dev/null 2>&1; then
+  docker compose logs --tail=160 app >&2 || true
+  fail "OLYA AI app did not become healthy"
+fi
 
 info "Running a real non-thinking inference smoke test"
 docker compose exec -T app python - <<'PY'
