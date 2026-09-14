@@ -44,10 +44,12 @@ COPY --chown=x1:x1 regression ./regression
 COPY --chown=x1:x1 Dockerfile ./build-inputs/Dockerfile
 COPY --chown=x1:x1 docker-compose.yml ./build-inputs/docker-compose.yml
 RUN python -m scripts.build_provenance --root /app --write /app/BUILD_PROVENANCE.json --no-manifest >/dev/null \
-    && chown x1:x1 /app/BUILD_PROVENANCE.json
+    && chown x1:x1 /app/BUILD_PROVENANCE.json \
+    && chmod +x /app/scripts/start_app.sh
 
 USER x1
 
-# Warm the local model before Uvicorn becomes reachable. This turns expensive
-# first-inference mmap/page faults into startup cost instead of user-visible TTFT.
-CMD ["sh", "-c", "python -m scripts.warm_local_llm && alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --limit-concurrency ${X1_HTTP_LIMIT_CONCURRENCY:-32} --backlog ${X1_HTTP_BACKLOG:-512} --timeout-keep-alive ${X1_HTTP_KEEPALIVE_SECONDS:-5}"]
+# HTTP availability is independent from model warm-up. start_app.sh runs schema
+# migrations synchronously, then warms llama.cpp in the background and starts
+# Uvicorn immediately. A transient warm-up failure can no longer cause a 502.
+CMD ["/app/scripts/start_app.sh"]
