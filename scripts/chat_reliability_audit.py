@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 
 from app.current_fact_latency_patch import _is_concise_fresh_lookup
+from app.user_workspace_base import workspace as base_workspace
+from app.workspace_reliability_v5 import enhance_workspace_reliability_v5
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -42,6 +44,22 @@ def audit() -> dict:
     for code, (source, marker) in required.items():
         if marker not in source:
             errors.append({"code": code, "missing": marker})
+
+    # Execute the HTML transformer against the actual base workspace so marker
+    # drift is caught before a user opens /app.
+    try:
+        transformed = enhance_workspace_reliability_v5(base_workspace().body.decode("utf-8"))
+        for marker in (
+            "olya_active_conversation_v1",
+            "olya_chat_draft_v2::",
+            "localStorage.setItem(pendingKey",
+            "restoreActiveConversation()",
+            "window.addEventListener('pagehide',saveDraft)",
+        ):
+            if marker not in transformed:
+                errors.append({"code": "runtime_html_marker_missing", "missing": marker})
+    except Exception as exc:
+        errors.append({"code": "workspace_transform_failed", "detail": str(exc)})
 
     return {
         "format": "olya-chat-reliability-v1",
