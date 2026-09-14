@@ -5,40 +5,53 @@ import asyncio
 import json
 import os
 from time import perf_counter
+from urllib.parse import urlsplit
 
-import httpx
-
-import app.api.routes  # noqa: F401 - installs authority-aware search patches
-from app.services.discovery import SearchHit
-from app.services import discovery as discovery_service
+import app.api.routes  # noqa: F401 - install runtime search policy
+from app.services.searxng_discovery import SearxngDiscovery
 from app.services import task_solver
 
 
 CASES = (
-    ("current President of the United States site:whitehouse.gov", "en"),
-    ("кто написал мастер и маргарита Булгаков", "ru"),
-    ("latest Python version site:python.org", "en"),
+    {
+        "query": "current President of the United States site:whitehouse.gov",
+        "language": "en",
+        "required_host": "whitehouse.gov",
+        "expected_terms": ("president", "administration", "white house"),
+    },
+    {
+        "query": "кто написал мастер и маргарита Булгаков",
+        "language": "ru",
+        "required_host": "",
+        "expected_terms": ("булгаков", "мастер", "маргарита"),
+    },
+    {
+        "query": "latest Python version site:python.org",
+        "language": "en",
+        "required_host": "python.org",
+        "expected_terms": ("python", "download", "release"),
+    },
 )
 
 
-async def one(client: httpx.AsyncClient, base: str, query: str, language: str) -> dict:
+def _host(url: str) -> str:
+    return (urlsplit(str(url or "")).hostname or "").casefold().removeprefix("www.")
+
+
+def _host_ok(host: str, required: str) -> bool:
+    return not required or host == required or host.endswith("." + required)
+
+
+def _text(row: dict) -> str:
+    return " ".join((str(row.get("title") or ""), str(row.get("snippet") or ""), str(row.get("url") or ""))).casefold()
+
+
+async def one(discovery: SearxngDiscovery, case: dict) -> dict:
+    query = str(case["query"])
     started = perf_counter()
     try:
-        response = await client.get(
-            base.rstrip("/") + "/search",
-            params={
-                "q": query,
-                "format": "json",
-                "safesearch": 1,
-                "pageno": 1,
-                "categories": "general",
-                "language": language,
-            },
-            timeout=httpx.Timeout(4.0, connect=1.5),
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
+        hits = await discovery.search(query, count=10, country="RU", language=str(case["language"]))
+    except Exception as exc:
         return {
             "query": query,
             "ok": False,
@@ -46,50 +59,46 @@ async def one(client: httpx.AsyncClient, base: str, query: str, language: str) -
             "error": f"{type(exc).__name__}: {exc}",
         }
 
-    hits: list[SearchHit] = []
-    for index, row in enumerate(payload.get("results") or [], start=1):
-        if not isinstance(row, dict):
-            continue
-        url = str(row.get("url") or "")
-        if not url.startswith(("http://", "https://")):
-            continue
-        hits.append(SearchHit(
-            query=query,
-            title=str(row.get("title") or "")[:500],
-            url=url,
-            snippet=str(row.get("content") or row.get("snippet") or "")[:1200],
-            rank=index,
-            provider="searxng",
-        ))
-        if len(hits) >= 12:
-            break
-
     ranked = task_solver.diversify_hits(hits, kind="web_research", limit=4)
+    selected = []
+    for row in ranked:
+        host = _host(str(row.get("url") or ""))
+        text = _text(row)
+        term_hits = [term for term in case["expected_terms"] if str(term).casefold() in text]
+        selected.append({
+            "title": row.get("title"),
+            "url": row.get("url"),
+            "domain": host,
+            "provider": row.get("provider"),
+            "source_kind": row.get("source_kind"),
+            "discovery_score": row.get("discovery_score"),
+            "term_hits": term_hits,
+        })
+
+    required_host = str(case["required_host"])
+    host_pass = any(_host_ok(str(row.get("domain") or ""), required_host) for row in selected) if required_host else True
+    lexical_pass = any(row.get("term_hits") for row in selected)
+    # site: queries must actually return that site. General entity queries need
+    # lexical evidence rather than merely any HTTP result.
+    ok = bool(selected) and host_pass and lexical_pass
     return {
         "query": query,
-        "ok": bool(ranked),
+        "ok": ok,
         "elapsed_ms": int((perf_counter() - started) * 1000),
         "raw_results": len(hits),
-        "selected": [
-            {
-                "title": row.get("title"),
-                "url": row.get("url"),
-                "source_kind": row.get("source_kind"),
-                "discovery_score": row.get("discovery_score"),
-            }
-            for row in ranked
-        ],
+        "selected": selected,
+        "checks": {"required_host": required_host, "host_pass": host_pass, "lexical_pass": lexical_pass},
     }
 
 
 async def main_async() -> int:
     base = os.getenv("X1_SEARXNG_BASE_URL", "http://searxng:8080")
-    async with httpx.AsyncClient(trust_env=False) as client:
-        rows = await asyncio.gather(*(one(client, base, query, lang) for query, lang in CASES))
+    discovery = SearxngDiscovery(base, timeout_seconds=3.2)
+    rows = await asyncio.gather(*(one(discovery, case) for case in CASES))
     errors = [row["query"] for row in rows if not row.get("ok")]
     result = {
-        "format": "olya-search-quality-live-probe-v1",
-        "status": "passed" if not errors else "degraded",
+        "format": "olya-search-quality-live-probe-v2",
+        "status": "passed" if not errors else "failed",
         "errors": errors,
         "cases": rows,
     }
