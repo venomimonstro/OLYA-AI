@@ -102,7 +102,9 @@ html body .side .new:focus-visible{outline:2px solid #9b9ba3!important;outline-o
     return waiting;
   }
   function syncWaiting(){
-    const active=send.classList.contains('stop');
+    const pending=document.body.classList.contains('olya-request-pending');
+    const stopping=send.classList.contains('stop');
+    const active=pending||stopping;
     const hasText=lastTurnHasVisibleAssistant();
     if(active&&!hasText){
       const row=ensureWaiting();
@@ -111,6 +113,7 @@ html body .side .new:focus-visible{outline:2px solid #9b9ba3!important;outline-o
       if(label&&label.textContent!==next)label.textContent=next;
       if(row.hidden)row.hidden=false;
     }else if(waiting){waiting.remove();waiting=null}
+    if(!send.disabled&&!stopping&&pending){document.body.classList.remove('olya-request-pending')}
   }
 
   function cleanHost(url){try{return new URL(url).hostname.replace(/^www\./,'')}catch(_){return ''}}
@@ -147,6 +150,7 @@ html body .side .new:focus-visible{outline:2px solid #9b9ba3!important;outline-o
   if(state)new MutationObserver(syncWaiting).observe(state,{childList:true,subtree:true,characterData:true});
   const messagesObserver=new MutationObserver(()=>{syncWaiting();upgradeSources()});
   messagesObserver.observe(messages,{childList:true,subtree:true,characterData:true});
+  document.body.addEventListener('olya-request-state',syncWaiting);
   syncWaiting();upgradeSources();
 })();
 '''
