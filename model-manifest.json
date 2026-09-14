@@ -1,6 +1,16 @@
 {
   "format": "x1-llm-model-manifest-v1",
   "primary": {
+    "model_name": "GigaChat3.1-10B-A1.8B-Q4_K_M",
+    "family": "GigaChat3.1-10B-A1.8B",
+    "quantization": "Q4_K_M",
+    "repository": "ai-sage/GigaChat3.1-10B-A1.8B-GGUF",
+    "revision": "b466fd503c15352571df22630152cb8d7282309e",
+    "filename": "GigaChat3.1-10B-A1.8B-q4_K_M.gguf",
+    "sha256": "68a8732fb5cee04f83ebffd7924e15c534d4442c5a43d2ba9e2041fe310b8deb",
+    "size_bytes": 6474702976
+  },
+  "legacy_rollback": {
     "model_name": "Qwen3-4B-Q4_K_M",
     "family": "Qwen3-4B",
     "quantization": "Q4_K_M",
@@ -10,35 +20,26 @@
     "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
     "size_bytes": 2497280256
   },
-  "legacy_rollback": {
-    "model_name": "Qwen3.6-35B-A3B-Q4_K_M",
-    "family": "Qwen3.6-35B-A3B",
-    "quantization": "Q4_K_M",
-    "repository": "ggml-org/Qwen3.6-35B-A3B-GGUF",
-    "revision": "3d8df365c4f151fb00629e8d9f2a2b6a4f8b441a",
-    "filename": "Qwen3.6-35B-A3B-Q4_K_M.gguf",
-    "sha256": "671e47e0ec53c665d048b98c3ecbfd5236b5ca9c3e02ed19fc8f81f7b85140c7",
-    "size_bytes": 20419565568
-  },
   "host_policy": {
-    "minimum_detected_ram_gib": 8,
-    "non_llama_reserve_gib": 2,
-    "llama_memory_cap_gib": 6,
-    "llama_min_memory_gib": 3,
+    "minimum_detected_ram_gib": 11,
+    "non_llama_reserve_gib": 3,
+    "llama_memory_cap_gib": 8,
+    "llama_min_memory_gib": 8,
     "context_tiers": [
-      {"min_ram_gib": 8, "max_ram_gib_exclusive": 16, "tokens": 8192},
-      {"min_ram_gib": 16, "max_ram_gib_exclusive": null, "tokens": 12288}
+      {"min_ram_gib": 11, "max_ram_gib_exclusive": 16, "tokens": 4096},
+      {"min_ram_gib": 16, "max_ram_gib_exclusive": 24, "tokens": 8192},
+      {"min_ram_gib": 24, "max_ram_gib_exclusive": null, "tokens": 12288}
     ]
   },
   "low_ram_policy": {
     "automatic_downgrade": false,
-    "starter_profile": "starter_6gb",
+    "starter_profile": "legacy_qwen4b",
     "minimum_detected_ram_gib": 5,
-    "primary_target_ram_gib": 6,
+    "primary_target_ram_gib": 12,
     "primary_target_cpu_cores": 4,
     "primary_target_disk_gib": 80,
     "context_tokens": 4096,
-    "llama_memory_limit": "3200m",
-    "reason": "The low-RAM starter is an explicit deployment profile, not a silent downgrade. Generic/full installation requires at least 8 GiB and may enable heavy workers; starter_6gb keeps those workers disabled."
+    "llama_memory_limit": "8g",
+    "reason": "GigaChat 3.1 Lightning Q4_K_M is the supported 12 GiB production profile. The previous Qwen3-4B artifact is retained only for explicit rollback; no silent downgrade is allowed."
   }
 }
