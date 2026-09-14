@@ -14,6 +14,7 @@ from app.current_fact_latency_patch import install_current_fact_latency_patch
 from app.chat_reliability_patch import install_chat_reliability_patch
 from app.response_policy_patch import install_response_policy_patch
 from app.search_quality_patch import install_search_quality_patch
+from app.answer_strategy_patch import install_answer_strategy_patch
 from app.fresh_search_policy_patch import install_fresh_search_policy_patch
 from app.ultrafast_fresh_web_patch import install_ultrafast_fresh_web_patch
 from app.atomic_fact_latency_patch import install_atomic_fact_latency_patch
@@ -41,6 +42,7 @@ install_current_fact_latency_patch()
 install_chat_reliability_patch()
 install_response_policy_patch()
 install_search_quality_patch()
+install_answer_strategy_patch()
 install_fresh_search_policy_patch()
 install_ultrafast_fresh_web_patch()
 install_atomic_fact_latency_patch()
