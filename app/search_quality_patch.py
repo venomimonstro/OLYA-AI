@@ -62,8 +62,6 @@ def _cache_ttl(query: str, requested: int) -> int:
     """Keep fast-changing search fallbacks fresh without wasting repeat queries."""
     value = " ".join(str(query or "").split())
     if _FAST_CHANGING.search(value):
-        # Structured resolvers normally handle FX/crypto/weather first. This TTL
-        # protects the generic web fallback when a direct provider is unavailable.
         return min(int(requested), 90)
     if _SOFTWARE.search(value):
         return min(int(requested), 15 * 60)
@@ -71,7 +69,7 @@ def _cache_ttl(query: str, requested: int) -> int:
 
 
 def install_search_quality_patch() -> None:
-    """Authority-aware ranking plus freshness-aware search caching."""
+    """Authority-aware ranking, relevance-safe cache and freshness-aware TTL."""
     from app.services import discovery as discovery
     from app.services import task_solver as task_solver
 
@@ -92,8 +90,6 @@ def install_search_quality_patch() -> None:
     def enrich_hit(hit):
         source_kind, base_score = classify_source(hit.url, hit.title, hit.snippet)
         rank_bonus = max(0.0, (11 - min(int(hit.rank or 10), 10)) / 120)
-        # Agreement between several search engines is a useful discovery signal,
-        # but it never outranks primary-source authority by itself.
         provider_bonus = 0.015 if "," in str(hit.provider or "") else 0.0
         return {
             "query": hit.query,
@@ -106,20 +102,55 @@ def install_search_quality_patch() -> None:
             "discovery_score": round(min(base_score + rank_bonus + provider_bonus, 0.995), 3),
         }
 
+    def _relevant(query: str, hits):
+        # Import lazily to avoid a bootstrap cycle: searxng_discovery itself
+        # depends on discovery.SearchHit.
+        from app.services.searxng_discovery import _relevance_score
+
+        result = []
+        for hit in hits:
+            if _relevance_score(
+                query,
+                title=str(getattr(hit, "title", "") or ""),
+                url=str(getattr(hit, "url", "") or ""),
+                snippet=str(getattr(hit, "snippet", "") or ""),
+            ) > 0:
+                result.append(hit)
+        return result
+
     async def cached_provider_search(
         db, discovery_obj, query: str, *, count: int, country: str | None,
         language: str | None, ttl_seconds: int = 3600, quality_mode: bool = False,
     ):
-        return await base_cached_search(
+        effective_ttl = _cache_ttl(query, ttl_seconds)
+        hits = await base_cached_search(
             db,
             discovery_obj,
             query,
             count=count,
             country=country,
             language=language,
-            ttl_seconds=_cache_ttl(query, ttl_seconds),
+            ttl_seconds=effective_ttl,
             quality_mode=quality_mode,
         )
+        relevant = _relevant(query, hits)
+        if relevant:
+            return relevant[:count]
+
+        # Old deployments may have cached unrelated SERP rows before the
+        # relevance gate existed. Force one live refresh and overwrite that cache
+        # entry rather than serving poisoned evidence until its TTL expires.
+        refreshed = await base_cached_search(
+            db,
+            discovery_obj,
+            query,
+            count=count,
+            country=country,
+            language=language,
+            ttl_seconds=0,
+            quality_mode=quality_mode,
+        )
+        return _relevant(query, refreshed)[:count]
 
     def diversify_hits(hits, *, kind: str, limit: int):
         enriched = [enrich_hit(hit) for hit in discovery.dedupe_hits(hits, limit=max(limit * 5, limit))]
