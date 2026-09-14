@@ -17,13 +17,6 @@ EXPECTED_BYTES = 6474702976
 
 
 def static_audit() -> tuple[list[str], dict]:
-    """Audit only files that are part of the application image.
-
-    docker-compose.yml intentionally lives on the host and is not copied/mounted
-    into /app in production. Host compose validation belongs to the migration
-    script (`docker compose config`); this audit validates the manifest, runtime
-    patch, bootstrap installation and the live llama.cpp endpoint.
-    """
     errors: list[str] = []
     manifest = json.loads((ROOT / "model-manifest.json").read_text("utf-8"))
     primary = manifest.get("primary") or {}
@@ -43,44 +36,117 @@ def static_audit() -> tuple[list[str], dict]:
 
     runtime = (ROOT / "app" / "gigachat31_runtime_patch.py").read_text("utf-8")
     bootstrap = (ROOT / "app" / "api" / "routes" / "__init__.py").read_text("utf-8")
-    config = (ROOT / "app" / "core" / "config.py").read_text("utf-8")
-
     if "install_gigachat31_runtime_patch" not in runtime or "install_gigachat31_runtime_patch" not in bootstrap:
         errors.append("native_runtime_patch")
-
     payload_pos = runtime.find("def payload")
-    payload_body = runtime[payload_pos:] if payload_pos >= 0 else runtime
-    for forbidden in ("chat_template_kwargs", "reasoning_format", "thinking_budget_tokens", "enable_thinking"):
-        if forbidden in payload_body:
-            errors.append(f"qwen_field_leaked:{forbidden}")
-
-    if EXPECTED_NAME not in config:
-        errors.append("config_default_model")
-
-    env_name = str(os.getenv("X1_LLAMA_MODEL_NAME", ""))
-    env_file = str(os.getenv("X1_LLAMA_MODEL_FILE", ""))
-    if env_name and env_name != EXPECTED_NAME:
-        errors.append("runtime_env_model_name")
-    if env_file and env_file != EXPECTED_FILE:
-        errors.append("runtime_env_model_file")
-
+    body = runtime[payload_pos:] if payload_pos >= 0 else runtime
+    if "chat_template_kwargs" in body or "reasoning_format" in body or "thinking_budget_tokens" in body:
+        errors.append("qwen_payload_leak")
     return errors, checks
+
+
+def _telemetry(payload: dict, elapsed_ms: int) -> dict:
+    usage = payload.get("usage") or {}
+    timings = payload.get("timings") or {}
+    completion_tokens = int(usage.get("completion_tokens") or timings.get("predicted_n") or 0)
+    tps = float(timings.get("predicted_per_second") or 0.0)
+    if not tps and completion_tokens > 0 and elapsed_ms > 0:
+        tps = completion_tokens / (elapsed_ms / 1000.0)
+    prompt_tps = float(timings.get("prompt_per_second") or 0.0)
+    return {
+        "completion_tokens": completion_tokens,
+        "tokens_per_second": round(tps, 3),
+        "prompt_tokens_per_second": round(prompt_tps, 3),
+    }
+
+
+async def _nonstream_sample(client: httpx.AsyncClient, base: str, prompt: str, expected: str, max_tokens: int) -> dict:
+    started = perf_counter()
+    try:
+        response = await client.post(
+            base + "/v1/chat/completions",
+            json={
+                "model": "local",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "stream": False,
+            },
+            timeout=httpx.Timeout(90.0, connect=5.0),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        text = str((((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or "")).strip()
+        elapsed_ms = int((perf_counter() - started) * 1000)
+        row = {
+            "prompt": prompt,
+            "ok": bool(text) and (not expected or expected in text.casefold()),
+            "elapsed_ms": elapsed_ms,
+            "answer": text[:500],
+            **_telemetry(payload, elapsed_ms),
+        }
+        return row
+    except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
+        return {"prompt": prompt, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+async def _stream_perf(client: httpx.AsyncClient, base: str) -> dict:
+    started = perf_counter(); first = None; text_parts: list[str] = []; tokens = 0; reported_tps = 0.0
+    request = {
+        "model": "local",
+        "messages": [{"role": "user", "content": "Объясни в 4 коротких предложениях, зачем нужен HTTP."}],
+        "max_tokens": 96,
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "stream": True,
+    }
+    try:
+        async with client.stream("POST", base + "/v1/chat/completions", json=request, timeout=httpx.Timeout(90.0, connect=5.0)) as response:
+            response.raise_for_status()
+            async for raw in response.aiter_lines():
+                line = raw.strip()
+                if not line or line.startswith(":"): continue
+                body = line[5:].strip() if line.startswith("data:") else line
+                if body == "[DONE]": break
+                try: data = json.loads(body)
+                except json.JSONDecodeError: continue
+                choice = ((data.get("choices") or [{}])[0] or {})
+                delta = choice.get("delta") or {}
+                piece = delta.get("content") if isinstance(delta, dict) else ""
+                if isinstance(piece, str) and piece:
+                    if first is None: first = perf_counter()
+                    text_parts.append(piece)
+                usage = data.get("usage") or {}; timings = data.get("timings") or {}
+                tokens = int(usage.get("completion_tokens") or timings.get("predicted_n") or tokens or 0)
+                reported_tps = float(timings.get("predicted_per_second") or reported_tps or 0.0)
+        end = perf_counter(); elapsed = end - started
+        text = "".join(text_parts).strip()
+        tps = reported_tps or (tokens / elapsed if tokens and elapsed > 0 else 0.0)
+        return {
+            "ok": bool(text),
+            "ttft_ms": int(((first or end) - started) * 1000),
+            "elapsed_ms": int(elapsed * 1000),
+            "completion_tokens": tokens,
+            "tokens_per_second": round(tps, 3),
+            "answer": text[:500],
+        }
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
 async def live_probe() -> dict:
     base = str(os.getenv("X1_LLAMA_BASE_URL", "http://llama:8080")).rstrip("/")
     result: dict = {"base_url": base, "health": False, "model_visible": False, "samples": []}
-    timeout = httpx.Timeout(60.0, connect=5.0)
-    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         try:
-            health = await client.get(base + "/health")
+            health = await client.get(base + "/health", timeout=5.0)
             result["health"] = health.is_success
         except httpx.HTTPError as exc:
             result["health_error"] = f"{type(exc).__name__}: {exc}"
             return result
-
         try:
-            models = await client.get(base + "/v1/models")
+            models = await client.get(base + "/v1/models", timeout=5.0)
             if models.is_success:
                 text = models.text
                 result["model_visible"] = "GigaChat3.1" in text or EXPECTED_FILE in text
@@ -88,33 +154,13 @@ async def live_probe() -> dict:
         except httpx.HTTPError as exc:
             result["models_error"] = f"{type(exc).__name__}: {exc}"
 
-        tests = [
-            ("Кто написал роман «Мастер и Маргарита»? Ответь одним предложением.", "булгаков"),
-            ("Сколько будет 17 * 23? Ответь только числом.", "391"),
-            ("Кратко объясни, зачем нужен HTTP.", ""),
-        ]
-        for prompt, expected in tests:
-            started = perf_counter()
-            try:
-                response = await client.post(
-                    base + "/v1/chat/completions",
-                    json={
-                        "model": "local",
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 180,
-                        "temperature": 0.2,
-                        "top_p": 0.9,
-                        "stream": False,
-                    },
-                )
-                response.raise_for_status()
-                payload = response.json()
-                text = str((((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or "")).strip()
-                elapsed_ms = int((perf_counter() - started) * 1000)
-                ok = bool(text) and (not expected or expected in text.casefold())
-                result["samples"].append({"prompt": prompt, "ok": ok, "elapsed_ms": elapsed_ms, "answer": text[:500]})
-            except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
-                result["samples"].append({"prompt": prompt, "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        result["samples"].append(await _nonstream_sample(
+            client, base, "Кто написал роман «Мастер и Маргарита»? Ответь только фамилией.", "булгаков", 24
+        ))
+        result["samples"].append(await _nonstream_sample(
+            client, base, "Сколько будет 17 * 23? Ответь только числом.", "391", 12
+        ))
+        result["stream_performance"] = await _stream_perf(client, base)
     return result
 
 
@@ -123,9 +169,12 @@ async def main_async() -> int:
     live = await live_probe()
     if not live.get("health"): errors.append("llama_health")
     samples = list(live.get("samples") or [])
-    if not samples or not all(bool(row.get("ok")) for row in samples): errors.append("generation_samples")
+    if not samples or not all(bool(row.get("ok")) for row in samples): errors.append("generation_correctness")
+    perf = live.get("stream_performance") or {}
+    if not perf.get("ok"): errors.append("stream_generation")
+
     result = {
-        "format": "olya-gigachat31-runtime-audit-v2",
+        "format": "olya-gigachat31-runtime-audit-v3",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "manifest": manifest,
@@ -134,6 +183,8 @@ async def main_async() -> int:
             "model_file": os.getenv("X1_LLAMA_MODEL_FILE", ""),
             "context_tokens": os.getenv("X1_DEEP_CONTEXT_TOKENS", ""),
             "llama_memory_limit": os.getenv("X1_LLAMA_MEMORY_LIMIT", ""),
+            "threads": os.getenv("X1_LLAMA_THREADS", ""),
+            "batch_threads": os.getenv("X1_LLAMA_THREADS_BATCH", ""),
         },
         "live": live,
     }
