@@ -7,6 +7,19 @@ set -eu
 # inference failure handling.
 alembic upgrade head
 
+# Long-form generation is opt-in at the router level, but the process-wide
+# request deadline still needs enough headroom for ~10k-character articles on
+# the 6-thread CPU profile. A larger ceiling does not slow normal requests; they
+# still finish immediately when inference completes.
+case "${X1_REQUEST_TIMEOUT_SECONDS:-180}" in
+  ''|*[!0-9]*) export X1_REQUEST_TIMEOUT_SECONDS=360 ;;
+  *)
+    if [ "${X1_REQUEST_TIMEOUT_SECONDS:-180}" -lt 360 ]; then
+      export X1_REQUEST_TIMEOUT_SECONDS=360
+    fi
+    ;;
+esac
+
 (
   python -m scripts.warm_local_llm >/tmp/olya-llm-warmup.log 2>&1 || true
 ) &
