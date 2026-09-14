@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from decimal import Decimal
 
 # Install the production bootstrap wrappers before importing routing functions.
@@ -21,9 +22,20 @@ def _route(text: str, mode: str):
     return inference_router.choose_route(text, mode, 4096, 4096)
 
 
+def _is_gigachat_runtime() -> bool:
+    value = " ".join(
+        (
+            str(os.getenv("X1_LLAMA_MODEL_NAME", "")),
+            str(os.getenv("X1_LLAMA_MODEL_FILE", "")),
+        )
+    ).casefold()
+    return "gigachat3.1" in value
+
+
 def audit() -> dict:
     errors: list[str] = []
     matrix: list[dict] = []
+    gigachat = _is_gigachat_runtime()
 
     cases = [
         ("привет", "utility", False, False),
@@ -31,6 +43,8 @@ def audit() -> dict:
         ("какая столица Франции?", "stable_fact", True, False),
         ("кто сейчас президент США?", "official_role", True, True),
         ("какой курс доллар рубль сейчас?", "market", True, True),
+        ("какой сейчас курс USD/RUB?", "market", True, True),
+        ("сколько сейчас стоит биткоин?", "market", True, True),
         ("какая сегодня погода в Москве?", "weather", True, True),
         ("какая сейчас ключевая ставка?", "market", True, True),
         ("какая последняя версия Python?", "software_version", True, True),
@@ -61,14 +75,20 @@ def audit() -> dict:
             errors.append(f"freshness:{question}:{fresh.required}!={expected_fresh}")
         if "курс доллар рубль" in question and not structured:
             errors.append("currency_structured_resolver_not_selected")
-        matrix.append({
-            "question": question,
-            "kind": actual_kind,
-            "web": web,
-            "fresh": bool(fresh.required),
-            "structured": structured,
-            "stable_atomic": atomic,
-        })
+        matrix.append(
+            {
+                "question": question,
+                "kind": actual_kind,
+                "web": web,
+                "fresh": bool(fresh.required),
+                "structured": structured,
+                "stable_atomic": atomic,
+            }
+        )
+
+    calc = utility_reply("Сколько будет 17 * 23? Ответь только числом.")
+    if calc is None or calc.kind != "calculator" or calc.text != "391":
+        errors.append("calculator_fast_path_failed")
 
     simple = _route("объясни что такое HTTP простыми словами", "fast")
     medium = _route("проанализируй проблему, сравни варианты и разработай стратегию исправления", "work")
@@ -82,18 +102,47 @@ def audit() -> dict:
     if not (simple.max_output_tokens < medium.max_output_tokens < high.max_output_tokens):
         errors.append("quality_output_budgets_not_monotonic")
 
-    medium_thinking = LlamaClient._thinking_budget(medium.max_output_tokens) if medium.reasoning else 0
-    high_thinking = LlamaClient._thinking_budget(high.max_output_tokens) if high.reasoning else 0
-    if not (0 < medium_thinking < high_thinking <= 320):
-        errors.append(f"private_reasoning_budget_invalid:{medium_thinking}:{high_thinking}")
     client = object.__new__(LlamaClient)
     high_payload = client._payload([], max_tokens=high.max_output_tokens, reasoning=True)
     simple_payload = client._payload([], max_tokens=simple.max_output_tokens, reasoning=False)
-    if int(high_payload.get("thinking_budget_tokens", -1)) != high_thinking:
-        errors.append("high_payload_missing_reasoning_budget")
-    if int(simple_payload.get("thinking_budget_tokens", -1)) != 0:
-        errors.append("simple_payload_reasoning_not_disabled")
+    quality_mechanism = "qwen_thinking_budget"
+    medium_thinking = LlamaClient._thinking_budget(medium.max_output_tokens) if medium.reasoning else 0
+    high_thinking = LlamaClient._thinking_budget(high.max_output_tokens) if high.reasoning else 0
 
+    if gigachat:
+        quality_mechanism = "gigachat_private_quality_instruction"
+        forbidden = {"thinking_budget_tokens", "reasoning_format", "reasoning_effort", "chat_template_kwargs"}
+        leaked = sorted(key for key in forbidden if key in high_payload or key in simple_payload)
+        if leaked:
+            errors.append("gigachat_qwen_payload_leak:" + ",".join(leaked))
+        if float(high_payload.get("temperature", -1)) != 0.0 or float(simple_payload.get("temperature", -1)) != 0.0:
+            errors.append("gigachat_sampling_not_deterministic")
+        high_messages = list(high_payload.get("messages") or [])
+        high_system = "\n".join(str(row.get("content") or "") for row in high_messages if row.get("role") == "system")
+        if "тщательную внутреннюю проверку" not in high_system:
+            errors.append("gigachat_high_quality_instruction_missing")
+        if simple_payload.get("messages"):
+            simple_system = "\n".join(
+                str(row.get("content") or "")
+                for row in simple_payload.get("messages") or []
+                if row.get("role") == "system"
+            )
+            if "тщательную внутреннюю проверку" in simple_system:
+                errors.append("gigachat_simple_unexpected_quality_instruction")
+        # GigaChat does not expose Qwen-style hidden thinking budgets.
+        medium_thinking = 0
+        high_thinking = 0
+    else:
+        if not (0 < medium_thinking < high_thinking <= 320):
+            errors.append(f"private_reasoning_budget_invalid:{medium_thinking}:{high_thinking}")
+        if int(high_payload.get("thinking_budget_tokens", -1)) != high_thinking:
+            errors.append("high_payload_missing_reasoning_budget")
+        if int(simple_payload.get("thinking_budget_tokens", -1)) != 0:
+            errors.append("simple_payload_reasoning_not_disabled")
+
+    # Atomic current facts must never become slower merely because the user chose
+    # Medium/High. Search/structured evidence determines the fact; deep reasoning
+    # is useful for analysis, not for rethinking an exchange rate or office holder.
     for mode in ("fast", "work", "deep"):
         decision = _route("какой курс доллар рубль сейчас?", mode)
         if decision.mode != "fast" or decision.reasoning:
@@ -175,18 +224,37 @@ def audit() -> dict:
         answer="Черновой аудит.",
         deterministic=None,
     )
-    if high_risk_plan.extra_inference_budget == 0:
-        errors.append("high_risk_verification_unexpectedly_disabled")
+    if high_risk_plan.extra_inference_budget != 1 or not high_risk_plan.run_critic:
+        errors.append(
+            f"high_risk_quality_gate_invalid:{high_risk_plan.extra_inference_budget}:{high_risk_plan.run_critic}"
+        )
 
     return {
-        "format": "olya-answer-pipeline-audit-v3",
+        "format": "olya-answer-pipeline-audit-v4",
         "status": "passed" if not errors else "failed",
         "errors": errors,
+        "runtime_family": "gigachat31" if gigachat else "qwen_compatible",
         "matrix": matrix,
+        "calculator": calc.text if calc else None,
         "quality_profiles": {
-            "simple": {"mode": simple.mode, "reasoning": simple.reasoning, "max_output_tokens": simple.max_output_tokens, "thinking_budget_tokens": 0},
-            "medium": {"mode": medium.mode, "reasoning": medium.reasoning, "max_output_tokens": medium.max_output_tokens, "thinking_budget_tokens": medium_thinking},
-            "high": {"mode": high.mode, "reasoning": high.reasoning, "max_output_tokens": high.max_output_tokens, "thinking_budget_tokens": high_thinking},
+            "simple": {
+                "mode": simple.mode,
+                "reasoning": simple.reasoning,
+                "max_output_tokens": simple.max_output_tokens,
+            },
+            "medium": {
+                "mode": medium.mode,
+                "reasoning": medium.reasoning,
+                "max_output_tokens": medium.max_output_tokens,
+            },
+            "high": {
+                "mode": high.mode,
+                "reasoning": high.reasoning,
+                "max_output_tokens": high.max_output_tokens,
+            },
+            "mechanism": quality_mechanism,
+            "medium_hidden_budget": medium_thinking,
+            "high_hidden_budget": high_thinking,
         },
         "currency_official_fallbacks": ["cbr_xml", "cbr_html"],
         "trusted_atomic_extra_inferences": plan.extra_inference_budget,
