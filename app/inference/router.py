@@ -106,14 +106,13 @@ def choose_route(text: str, requested_mode: str, normal_context: int, deep_conte
     else:
         mode = "fast"; reasons.insert(0, "auto_simple")
 
-    # A 4K server can safely reserve roughly 3.2K completion tokens when the
-    # user explicitly asks for a long article. Prompt compilation automatically
-    # shrinks old history for this request only. Routine answers keep small caps.
+    # Explicit long-form gets a large completion budget, while preserving enough
+    # of the 4K window for the user's brief and the compact OLYA system policy.
     if long_form and starter_4k:
         return RouteDecision(
             mode="work" if mode == "fast" else mode,
             max_context_tokens=deep_limit,
-            max_output_tokens=3200,
+            max_output_tokens=3000,
             reasoning=False,
             complexity_score=score,
             reason=",".join(reasons),
