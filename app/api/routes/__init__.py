@@ -25,6 +25,7 @@ from app.structured_governor_bypass_patch import install_structured_governor_byp
 from app.reasoning_privacy_patch import install_reasoning_privacy_patch
 from app.quality_evidence_policy_patch import install_quality_evidence_policy_patch
 from app.interactive_verification_policy_patch import install_interactive_verification_policy_patch
+from app.high_risk_verification_patch import install_high_risk_verification_patch
 from app.testing_unlimited_usage_patch import install_testing_unlimited_usage_patch
 from app.identity_patch import install_identity_patch
 from app.admin_surface_patch import install_admin_surface_patch
@@ -50,6 +51,7 @@ install_structured_governor_bypass_patch()
 install_reasoning_privacy_patch()
 install_quality_evidence_policy_patch()
 install_interactive_verification_policy_patch()
+install_high_risk_verification_patch()
 install_testing_unlimited_usage_patch()
 install_identity_patch()
 install_admin_surface_patch()
