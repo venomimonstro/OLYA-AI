@@ -1,18 +1,98 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from urllib.parse import urlsplit
 
 import httpx
 
 from app.services.discovery import DiscoveryError, SearchHit, canonical_result_url
 
 
+_SITE_FILTER = re.compile(r"(?:^|\s)site:([a-z0-9.-]+)", re.IGNORECASE)
+_TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9+#._-]*")
+_STOPWORDS = {
+    # Russian query glue / recency words.
+    "кто", "что", "где", "когда", "какой", "какая", "какие", "какое", "сейчас", "сегодня",
+    "текущий", "текущая", "текущие", "последний", "последняя", "последние", "найди", "покажи",
+    "написал", "автор", "это", "для", "или", "как", "его", "ее", "её", "при", "про", "из", "по",
+    # English query glue / recency words.
+    "who", "what", "where", "when", "which", "current", "latest", "today", "now", "the", "of", "for",
+    "and", "is", "are", "was", "were", "show", "find", "site", "version",
+}
+
+
+def _site_constraint(query: str) -> str:
+    match = _SITE_FILTER.search(str(query or ""))
+    return str(match.group(1) if match else "").casefold().strip(".")
+
+
+def _meaningful_tokens(query: str) -> tuple[str, ...]:
+    clean = _SITE_FILTER.sub(" ", str(query or "")).casefold()
+    tokens: list[str] = []
+    for token in _TOKEN_RE.findall(clean):
+        value = token.strip("._-+")
+        if len(value) < 3 or value in _STOPWORDS or value.isdigit():
+            continue
+        if value not in tokens:
+            tokens.append(value)
+    return tuple(tokens[:10])
+
+
+def _host_matches(host: str, expected: str) -> bool:
+    return bool(expected and (host == expected or host.endswith("." + expected)))
+
+
+def _relevance_score(query: str, *, title: str, url: str, snippet: str) -> float:
+    """Cheap deterministic SERP relevance gate.
+
+    Search engines occasionally return CAPTCHA fallbacks, generic homepages or
+    unrelated results while still responding HTTP 200. Those rows must never
+    become evidence merely because a provider returned them.
+    """
+    parsed = urlsplit(str(url or ""))
+    host = (parsed.hostname or "").casefold().removeprefix("www.")
+    required_host = _site_constraint(query)
+    if required_host and not _host_matches(host, required_host):
+        return 0.0
+
+    tokens = _meaningful_tokens(query)
+    if required_host:
+        # A site: constraint is itself a strong relevance contract. Still reward
+        # lexical agreement so the most useful official page ranks first later.
+        base = 0.72
+    else:
+        base = 0.0
+
+    if not tokens:
+        return max(base, 0.55 if required_host else 0.25)
+
+    haystack = " ".join((title, snippet, host, parsed.path)).casefold()
+    matches = sum(1 for token in tokens if token in haystack)
+    ratio = matches / max(len(tokens), 1)
+
+    if not required_host:
+        # No lexical overlap means the row is unusable evidence. For entity-rich
+        # queries (2+ meaningful terms), insist on at least one match and reward
+        # multiple matches strongly.
+        if matches == 0:
+            return 0.0
+        if len(tokens) >= 3 and matches == 1:
+            base = 0.34
+        else:
+            base = 0.48
+
+    title_cf = str(title or "").casefold()
+    title_matches = sum(1 for token in tokens if token in title_cf)
+    return min(1.0, base + ratio * 0.42 + min(title_matches, 3) * 0.06)
+
+
 class SearxngDiscovery:
     """Internal no-key metasearch through the OLYA SearXNG sidecar."""
 
     name = "searxng"
-    # Large engines plus independent/free alternatives. Requests are issued per
-    # engine in parallel so one CAPTCHA/slow engine cannot hold the whole answer.
+    # Requests are issued per engine in parallel so one CAPTCHA/slow engine cannot
+    # hold the whole answer. A deterministic relevance gate runs before merging.
     general_engines = (
         "google",
         "yandex",
@@ -80,9 +160,6 @@ class SearxngDiscovery:
         _ = country
         count = min(max(int(count), 1), 20)
         loop = asyncio.get_running_loop()
-        # Interactive chat values early independent results more than the slow
-        # tail of CAPTCHA/throttled engines. Deep research can still run several
-        # queries; each query itself should return a useful SERP quickly.
         global_budget = min(self.timeout_seconds, 2.8)
         per_engine_timeout = min(self.timeout_seconds, 2.4)
         deadline = loop.time() + global_budget
@@ -117,12 +194,16 @@ class SearxngDiscovery:
                     url = str(row.get("url") or "").strip()
                     if not url.startswith(("http://", "https://")):
                         continue
+                    title = str(row.get("title") or "")[:500]
+                    snippet = str(row.get("content") or row.get("snippet") or "")[:2000]
+                    if _relevance_score(query, title=title, url=url, snippet=snippet) <= 0:
+                        continue
                     hits.append(
                         SearchHit(
                             query=query,
-                            title=str(row.get("title") or "")[:500],
+                            title=title,
                             url=url,
-                            snippet=str(row.get("content") or row.get("snippet") or "")[:2000],
+                            snippet=snippet,
                             rank=index,
                             provider=f"searxng:{engine}",
                         )
@@ -150,9 +231,6 @@ class SearxngDiscovery:
                         if hits:
                             results[engine] = hits
                     merged = self._merge_hits(results, limit=count)
-                    # Two independent engines and four useful results are enough
-                    # for the normal interactive evidence gate. Never wait for a
-                    # third engine merely to decorate an already usable answer.
                     if len(results) >= 2 and len(merged) >= min(count, 4):
                         break
                     if len(results) >= 3 and merged:
@@ -165,5 +243,5 @@ class SearxngDiscovery:
 
         merged = self._merge_hits(results, limit=count)
         if not merged:
-            raise DiscoveryError("Self-hosted search providers returned no results")
+            raise DiscoveryError("Self-hosted search providers returned no relevant results")
         return merged
