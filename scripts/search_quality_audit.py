@@ -8,6 +8,7 @@ from app import search_quality_patch
 from app.services import discovery
 from app.services import task_solver
 from app.services.discovery import SearchHit
+from app.services.searxng_discovery import _relevance_score
 
 
 def audit() -> dict:
@@ -52,6 +53,52 @@ def audit() -> dict:
     if not ranked or "whitehouse.gov" not in str(ranked[0].get("url") or ""):
         errors.append("primary_source_not_first")
 
+    # Regression for the exact garbage rows observed in production.
+    relevance = {
+        "whitehouse_good": _relevance_score(
+            "current President of the United States site:whitehouse.gov",
+            title="The White House — Administration",
+            url="https://www.whitehouse.gov/administration/",
+            snippet="President and administration information",
+        ),
+        "gemini_bad": _relevance_score(
+            "current President of the United States site:whitehouse.gov",
+            title="Google Gemini",
+            url="https://gemini.google.com/?hl=fr",
+            snippet="",
+        ),
+        "python_good": _relevance_score(
+            "latest Python version site:python.org",
+            title="Download Python",
+            url="https://www.python.org/downloads/",
+            snippet="Latest Python releases",
+        ),
+        "excel_bad": _relevance_score(
+            "latest Python version site:python.org",
+            title="Makro ausführen, wenn Zellinhalt sich ändert",
+            url="https://www.herber.de/forum/excel",
+            snippet="Excel Makro Forum",
+        ),
+        "bulgakov_good": _relevance_score(
+            "кто написал мастер и маргарита Булгаков",
+            title="Мастер и Маргарита — Михаил Булгаков",
+            url="https://example.org/bulgakov-master-margarita",
+            snippet="Роман Михаила Булгакова",
+        ),
+        "reddit_home_bad": _relevance_score(
+            "кто написал мастер и маргарита Булгаков",
+            title="Reddit - Dive into anything",
+            url="https://www.reddit.com/",
+            snippet="",
+        ),
+    }
+    for key in ("whitehouse_good", "python_good", "bulgakov_good"):
+        if relevance[key] <= 0:
+            errors.append(f"relevance_false_negative:{key}")
+    for key in ("gemini_bad", "excel_bad", "reddit_home_bad"):
+        if relevance[key] > 0:
+            errors.append(f"relevance_false_positive:{key}")
+
     live_ttls = {
         "usd_rub": search_quality_patch._cache_ttl("USD/RUB курс сейчас", 3600),
         "weather": search_quality_patch._cache_ttl("погода Москва сейчас", 3600),
@@ -80,7 +127,7 @@ def audit() -> dict:
             errors.append(f"policy_marker_missing:{marker[:28]}")
 
     return {
-        "format": "olya-search-quality-audit-v1",
+        "format": "olya-search-quality-audit-v2",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "authority": {
@@ -89,6 +136,7 @@ def audit() -> dict:
             "ordinary_web": blog_row,
             "ranked_urls": [row.get("url") for row in ranked],
         },
+        "relevance": relevance,
         "cache_ttl_seconds": live_ttls,
     }
 
