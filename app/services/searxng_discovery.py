@@ -71,9 +71,8 @@ def _payload_marks_engine_unresponsive(payload: dict, engine: str) -> bool:
     for row in rows:
         if isinstance(row, str) and target in row.casefold():
             return True
-        if isinstance(row, (list, tuple)) and row:
-            if target in str(row[0]).casefold():
-                return True
+        if isinstance(row, (list, tuple)) and row and target in str(row[0]).casefold():
+            return True
         if isinstance(row, dict):
             name = str(row.get("engine") or row.get("name") or "").casefold()
             if target in name:
@@ -82,12 +81,13 @@ def _payload_marks_engine_unresponsive(payload: dict, engine: str) -> bool:
 
 
 class SearxngDiscovery:
-    """Priority metasearch with primary-when-healthy Google/Yandex routing."""
+    """Bounded top-5 metasearch with Google/Yandex preferred when healthy."""
 
     name = "searxng"
     primary_engines = ("google", "yandex")
-    fallback_engines = ("bing", "startpage")
+    fallback_engines = ("bing", "duckduckgo", "startpage")
     general_engines = primary_engines + fallback_engines
+    max_results = 5
 
     def __init__(self, base_url: str, *, timeout_seconds: float = 10.0) -> None:
         self.base_url = base_url.rstrip("/")
@@ -126,7 +126,7 @@ class SearxngDiscovery:
                 rank=len(result) + 1,
                 provider="searxng:" + ",".join(source_engines[:3]) if source_engines else "searxng",
             ))
-            if len(result) >= limit:
+            if len(result) >= min(limit, SearxngDiscovery.max_results):
                 break
         return result
 
@@ -144,22 +144,24 @@ class SearxngDiscovery:
         elif engine == "yandex":
             cooldown = 1800.0 if failures >= 2 else 900.0
         elif engine == "startpage":
-            cooldown = 3600.0 if failures >= 1 else 900.0
+            cooldown = 3600.0
+        elif engine == "duckduckgo":
+            cooldown = 600.0 if failures >= 2 else 180.0
         else:
             cooldown = 300.0 if failures >= 2 else 120.0
         self._suspended_until[engine] = now + cooldown
 
-    async def search(self, query: str, *, count: int = 10, country: str | None = None,
+    async def search(self, query: str, *, count: int = 5, country: str | None = None,
                      language: str | None = None) -> list[SearchHit]:
         if not self.base_url:
             raise DiscoveryError("SearXNG discovery is not configured")
         _ = country
-        count = min(max(int(count), 1), 12)
+        count = min(max(int(count), 1), self.max_results)
         loop = asyncio.get_running_loop()
         results: dict[str, list[SearchHit]] = {}
         required_site = bool(_site_constraint(query))
 
-        async with httpx.AsyncClient(timeout=min(self.timeout_seconds, 1.8), trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=min(self.timeout_seconds, 1.6), trust_env=False) as client:
             async def one(engine: str) -> tuple[str, list[SearchHit], bool]:
                 params: dict[str, object] = {
                     "q": query, "format": "json", "safesearch": 1, "pageno": 1,
@@ -168,8 +170,10 @@ class SearxngDiscovery:
                 if language:
                     params["language"] = language
                 try:
-                    response = await client.get(f"{self.base_url}/search", params=params,
-                                                headers={"Accept": "application/json"})
+                    response = await client.get(
+                        f"{self.base_url}/search", params=params,
+                        headers={"Accept": "application/json"},
+                    )
                     response.raise_for_status()
                     payload = response.json()
                 except (httpx.HTTPError, ValueError):
@@ -184,8 +188,8 @@ class SearxngDiscovery:
                     url = str(row.get("url") or "").strip()
                     if not url.startswith(("http://", "https://")):
                         continue
-                    title = str(row.get("title") or "")[:500]
-                    snippet = str(row.get("content") or row.get("snippet") or "")[:1000]
+                    title = str(row.get("title") or "")[:320]
+                    snippet = str(row.get("content") or row.get("snippet") or "")[:700]
                     if _relevance_score(query, title=title, url=url, snippet=snippet) <= 0:
                         continue
                     hits.append(SearchHit(
@@ -220,12 +224,11 @@ class SearxngDiscovery:
                     if engine not in completed_names:
                         self._record_health(engine, False, loop.time())
 
-            # Google/Yandex are preferred whenever the server IP can use them.
-            await wave(self.primary_engines, min(1.0, self.timeout_seconds))
+            await wave(self.primary_engines, min(0.9, self.timeout_seconds))
             merged = self._merge_hits(results, limit=count)
             primary_good = bool(merged) and (required_site or len(merged) >= min(3, count))
             if not primary_good:
-                await wave(self.fallback_engines, min(1.1, self.timeout_seconds))
+                await wave(self.fallback_engines, min(1.0, self.timeout_seconds))
 
         merged = self._merge_hits(results, limit=count)
         if not merged:
