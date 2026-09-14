@@ -4,8 +4,13 @@ from app.services.freshness import classify_freshness
 
 
 def install_fresh_search_policy_patch() -> None:
-    # fast_web_grounding imports cached_provider_search directly, so patch that
-    # module reference before smart_chat binds the execution path.
+    """Keep changing facts fresh without multiplying provider latency.
+
+    The primary local search provider already aggregates several engines. Asking
+    ProviderPool to fan out again in quality mode duplicates work and lets one
+    slow secondary provider hold the whole answer. Fresh queries therefore use
+    the normal provider path with a very short cache.
+    """
     from app.services import fast_web_grounding
 
     current = fast_web_grounding.cached_provider_search
@@ -25,15 +30,16 @@ def install_fresh_search_policy_patch() -> None:
     ):
         decision = classify_freshness(query)
         if decision.required:
-            # Current office holders are resolved live every time: neither model
-            # memory nor an older cached SERP may decide who occupies a role now.
+            # Office holders must be live. Fast-changing market/weather values
+            # get at most a one-minute cache; other current facts at most 3 min.
             if decision.category == "official_role":
                 ttl_seconds = 0
+            elif decision.category in {"market", "weather", "availability", "schedule"}:
+                ttl_seconds = min(max(0, int(ttl_seconds)), 60)
             else:
-                # Other changing facts get a short cache to protect free engines
-                # from bursts while remaining substantially fresher than 1 hour.
-                ttl_seconds = min(max(0, int(ttl_seconds)), 300)
-            quality_mode = True
+                ttl_seconds = min(max(0, int(ttl_seconds)), 180)
+            # SearXNG already fans one query out to independent web engines.
+            quality_mode = False
         return await current(
             db,
             discovery,
