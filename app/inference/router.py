@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import re
 from typing import Literal
 
 Mode = Literal["fast", "work", "deep"]
@@ -38,6 +39,14 @@ LIGHT_TASK_MARKERS = (
     "переведи", "translate", "кратко", "briefly",
 )
 
+_LONG_FORM_RE = re.compile(
+    r"(?:\b(?:6000|7000|8000|9000|10000|12000|15000|20000)\s*(?:символ|знак|character)|"
+    r"\bне\s+менее\s+\d{4,5}\s*(?:символ|знак)|"
+    r"\b(?:большая|длинная|подробная|развёрнутая|развернутая)\s+статья\b|"
+    r"\bлонгрид\b|\blong[- ]?form\b|\blongread\b|\b(?:3000|4000|5000)\s+words?\b)",
+    re.IGNORECASE,
+)
+
 
 def _complexity_score(normalized: str) -> tuple[int, list[str]]:
     score = 0
@@ -71,15 +80,18 @@ def _complexity_score(normalized: str) -> tuple[int, list[str]]:
 
 
 def choose_route(text: str, requested_mode: str, normal_context: int, deep_context: int) -> RouteDecision:
-    """Three real quality levels with an API-only adaptive Auto mode."""
+    """Choose one inference profile; long-form is opt-in and never slows routine chat."""
     normalized = text.casefold().strip()
     deep_limit = max(1024, int(deep_context))
     normal_limit = min(max(1024, int(normal_context)), deep_limit)
     starter_4k = deep_limit <= 4096
     score, reasons = _complexity_score(normalized)
     high_risk = next((marker for marker in HIGH_RISK_MARKERS if marker in normalized), None)
+    long_form = bool(_LONG_FORM_RE.search(normalized))
     if high_risk:
         score = max(score, 7); reasons.append("high_risk_or_audit")
+    if long_form:
+        score = max(score, 3); reasons.append("explicit_long_form")
 
     if requested_mode == "fast":
         mode: Mode = "fast"; reasons.insert(0, "user_selected_simple")
@@ -93,6 +105,19 @@ def choose_route(text: str, requested_mode: str, normal_context: int, deep_conte
         mode = "work"; reasons.insert(0, "auto_medium")
     else:
         mode = "fast"; reasons.insert(0, "auto_simple")
+
+    # A 4K server can safely reserve roughly 3.2K completion tokens when the
+    # user explicitly asks for a long article. Prompt compilation automatically
+    # shrinks old history for this request only. Routine answers keep small caps.
+    if long_form and starter_4k:
+        return RouteDecision(
+            mode="work" if mode == "fast" else mode,
+            max_context_tokens=deep_limit,
+            max_output_tokens=3200,
+            reasoning=False,
+            complexity_score=score,
+            reason=",".join(reasons),
+        )
 
     if mode == "fast":
         return RouteDecision(
@@ -114,9 +139,6 @@ def choose_route(text: str, requested_mode: str, normal_context: int, deep_conte
             reason=",".join(reasons),
         )
 
-    # Medium spends hidden-thinking compute only on clearly multi-step work.
-    # This preserves the quality gradient without making routine requests slow
-    # on the starter CPU node.
     work_reasoning = score >= 4
     return RouteDecision(
         mode="work",
