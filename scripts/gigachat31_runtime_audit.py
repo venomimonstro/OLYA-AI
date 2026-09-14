@@ -42,6 +42,8 @@ def static_audit() -> tuple[list[str], dict]:
     if not dockerfile_path.exists():
         dockerfile_path = ROOT / "build-inputs" / "Dockerfile"
     dockerfile = dockerfile_path.read_text("utf-8") if dockerfile_path.exists() else ""
+    start_path = ROOT / "scripts" / "start_app.sh"
+    start_script = start_path.read_text("utf-8") if start_path.exists() else ""
     if "install_gigachat31_runtime_patch" not in runtime or "install_gigachat31_runtime_patch" not in bootstrap:
         errors.append("native_runtime_patch")
     payload_pos = runtime.find("def payload")
@@ -50,8 +52,10 @@ def static_audit() -> tuple[list[str], dict]:
         errors.append("qwen_payload_leak")
     if '"temperature": 0.0' not in runtime:
         errors.append("gigachat_not_deterministic")
-    if not dockerfile or "scripts.warm_local_llm" not in dockerfile:
-        errors.append("startup_warmup_missing")
+    if "start_app.sh" not in dockerfile:
+        errors.append("startup_wrapper_missing")
+    if "scripts.warm_local_llm" not in start_script or "&" not in start_script:
+        errors.append("background_warmup_missing")
 
     calc = utility_reply("Сколько будет 17 * 23? Ответь только числом.")
     checks["calculator"] = calc.text if calc else None
@@ -136,7 +140,7 @@ async def main_async() -> int:
     if not samples or not all(bool(row.get("ok")) for row in samples): errors.append("generation_correctness")
     perf = live.get("stream_performance") or {}
     if not perf.get("ok"): errors.append("stream_generation")
-    result = {"format": "olya-gigachat31-runtime-audit-v4", "status": "passed" if not errors else "failed", "errors": errors, "manifest": manifest, "runtime_env": {"model_name": os.getenv("X1_LLAMA_MODEL_NAME", ""), "model_file": os.getenv("X1_LLAMA_MODEL_FILE", ""), "context_tokens": os.getenv("X1_DEEP_CONTEXT_TOKENS", ""), "llama_memory_limit": os.getenv("X1_LLAMA_MEMORY_LIMIT", ""), "threads": os.getenv("X1_LLAMA_THREADS", ""), "batch_threads": os.getenv("X1_LLAMA_THREADS_BATCH", "")}, "live": live}
+    result = {"format": "olya-gigachat31-runtime-audit-v5", "status": "passed" if not errors else "failed", "errors": errors, "manifest": manifest, "runtime_env": {"model_name": os.getenv("X1_LLAMA_MODEL_NAME", ""), "model_file": os.getenv("X1_LLAMA_MODEL_FILE", ""), "context_tokens": os.getenv("X1_DEEP_CONTEXT_TOKENS", ""), "llama_memory_limit": os.getenv("X1_LLAMA_MEMORY_LIMIT", ""), "threads": os.getenv("X1_LLAMA_THREADS", ""), "batch_threads": os.getenv("X1_LLAMA_THREADS_BATCH", "")}, "live": live}
     print(json.dumps(result, ensure_ascii=False, indent=2)); return 0 if result["status"] == "passed" else 2
 
 
