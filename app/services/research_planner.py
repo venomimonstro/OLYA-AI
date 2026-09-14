@@ -17,6 +17,26 @@ class ResearchPlan:
     freshness_min_independent_hosts: int = 0
 
 
+def _software_queries(clean: str) -> list[str]:
+    value = clean.casefold()
+    official = (
+        (("python",), "latest Python release site:python.org"),
+        (("node.js", "nodejs", "node "), "latest Node.js release site:nodejs.org"),
+        (("php",), "latest PHP release site:php.net"),
+        (("postgresql", "postgres "), "latest PostgreSQL release site:postgresql.org"),
+        (("docker",), "Docker Engine release notes site:docs.docker.com"),
+        (("nginx",), "latest nginx release site:nginx.org"),
+        (("react",), "latest React release site:react.dev"),
+        (("fastapi",), "latest FastAPI release site:fastapi.tiangolo.com"),
+    )
+    primary = next((query for markers, query in official if any(marker in value for marker in markers)), "")
+    if primary:
+        # Primary source first, then the user's natural wording for an independent
+        # cross-check. Keep a third changelog query only for deeper research.
+        return [primary, clean, f"{clean} changelog"]
+    return [clean, f"{clean} official release", f"{clean} changelog"]
+
+
 def plan_research(question: str, *, intent: str = "general", location: str | None = None, category: str | None = None) -> ResearchPlan:
     clean = " ".join(question.split()).strip()
     if not clean:
@@ -62,7 +82,7 @@ def plan_research(question: str, *, intent: str = "general", location: str | Non
     if verdict.category == "news":
         queries = [clean, f"{clean} сегодня", f"{clean} официальный источник"]
     elif verdict.category == "software_version":
-        queries = [clean, f"{clean} official release", f"{clean} changelog"]
+        queries = _software_queries(clean)
     elif verdict.category == "law":
         queries = [clean, f"{clean} официальный текст", f"{clean} действует сейчас"]
 
