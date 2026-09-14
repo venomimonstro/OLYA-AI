@@ -9,6 +9,17 @@ class SearxngDiscovery:
     """Internal no-key metasearch through the OLYA SearXNG sidecar."""
 
     name = "searxng"
+    # Mix large engines with independent/free alternatives. A blocked engine is
+    # allowed to fail; SearXNG merges the engines that answer successfully.
+    general_engines = (
+        "google",
+        "yandex",
+        "bing",
+        "duckduckgo",
+        "brave",
+        "startpage",
+        "qwant",
+    )
 
     def __init__(self, base_url: str, *, timeout_seconds: float = 10.0) -> None:
         self.base_url = base_url.rstrip("/")
@@ -42,6 +53,7 @@ class SearxngDiscovery:
             "safesearch": 1,
             "pageno": 1,
             "categories": "general",
+            "engines": ",".join(self.general_engines),
         }
         if language:
             params["language"] = language
