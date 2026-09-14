@@ -5,7 +5,6 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.chat_management_enhancer import install_chat_management_ui
 from app.db import get_db
 from app.models import Conversation, ConversationMemory, Message, User
 from app.schemas.conversations import ConversationCreate, ConversationResponse, ConversationUpdate, MessageResponse
@@ -13,7 +12,6 @@ from app.services.access import require_project_role
 from app.services.auth import get_current_user
 
 router = APIRouter(prefix="/v1/conversations", tags=["conversations"])
-install_chat_management_ui()
 
 _PIN_KIND = "ui"
 _PIN_KEY = "pinned"
