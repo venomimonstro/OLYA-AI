@@ -99,11 +99,37 @@ def _candidates(block: str, relation: str) -> list[str]:
     return out
 
 
+def _supporting_phrases(block: str, relation: str) -> list[str]:
+    if relation != "author":
+        return []
+    patterns = (
+        re.compile(r"\b(?:роман|книга|произведение)\s+([А-ЯЁ][А-Яа-яЁё'’.-]+(?:\s+[А-ЯЁ][А-Яа-яЁё'’.-]+){1,3})", re.I),
+        re.compile(r"\b(?:novel|book|work)\s+by\s+([A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+){1,3})", re.I),
+    )
+    values: list[str] = []
+    for pattern in patterns:
+        for match in pattern.finditer(block):
+            candidate = _clean_name(match.group(1))
+            if candidate:
+                values.append(candidate)
+    return values
+
+
 def _normalize(value: str) -> str:
-    return re.sub(r"[^a-zа-яё0-9]+", "", value.casefold())
+    value = value.casefold().replace("ё", "е")
+    # Normalize common Russian personal-name genitive endings enough for
+    # cross-source consensus without pretending to be a full morphology engine.
+    tokens = []
+    for token in re.findall(r"[a-zа-я0-9]+", value):
+        for suffix, replacement in (("ова", "ов"), ("ева", "ев"), ("ина", "ин"), ("ича", "ич")):
+            if token.endswith(suffix) and len(token) > len(suffix) + 2:
+                token = token[: -len(suffix)] + replacement
+                break
+        tokens.append(token)
+    return "".join(tokens)
 
 
-def resolve_stable_fact(question: str, messages: list[ChatMessage]) -> str | None:
+def _consensus(question: str, messages: list[ChatMessage]) -> tuple[str, str] | None:
     if classify_freshness(question).required:
         return None
     relation = _relation(question)
@@ -116,6 +142,8 @@ def resolve_stable_fact(question: str, messages: list[ChatMessage]) -> str | Non
     per_source: list[str] = []
     for block in blocks:
         candidates = _candidates(block, relation)
+        if not candidates:
+            candidates = _supporting_phrases(block, relation)
         if candidates:
             per_source.append(candidates[0])
     if len(per_source) < 2:
@@ -126,8 +154,20 @@ def resolve_stable_fact(question: str, messages: list[ChatMessage]) -> str | Non
     if not winner or count < 2:
         return None
     answer = next(v for v, k in zip(per_source, keys) if k == winner)
-    russian = len(_CYR.findall(question)) >= 2
+    return relation, answer
 
+
+def resolve_stable_fact(question: str, messages: list[ChatMessage]) -> str | None:
+    resolved = _consensus(question, messages)
+    if resolved is None:
+        return None
+    relation, answer = resolved
+    russian = len(_CYR.findall(question)) >= 2
+    # Direct deterministic output is used only when the evidence already carries
+    # a normal answer-shaped value. Inflected bibliographic phrases are instead
+    # sent as an authoritative hint to the same generation call below.
+    if russian and relation == "author" and re.search(r"(?:ова|ева|ина|ича)\b", answer.casefold()):
+        return None
     if russian:
         templates = {
             "author": f"Автор — {answer}.",
@@ -154,17 +194,42 @@ def install_stable_fact_evidence_guard() -> None:
 
     async def guarded(self, messages, *, max_tokens: int, reasoning: bool, on_token=None):
         question = _latest_user(messages)
-        resolved = resolve_stable_fact(question, messages) if question else None
-        if resolved is None:
+        if not question:
             return await current(self, messages, max_tokens=max_tokens, reasoning=reasoning, on_token=on_token)
-        if on_token is not None:
-            await on_token(resolved)
-        return LlamaGeneration(
-            text=resolved,
-            ttft_ms=0,
-            output_tokens=max(1, len(resolved) // 4),
-            tokens_per_second=0.0,
-            generation_ms=0,
+
+        direct = resolve_stable_fact(question, messages)
+        if direct is not None:
+            if on_token is not None:
+                await on_token(direct)
+            return LlamaGeneration(
+                text=direct,
+                ttft_ms=0,
+                output_tokens=max(1, len(direct) // 4),
+                tokens_per_second=0.0,
+                generation_ms=0,
+            )
+
+        consensus = _consensus(question, messages)
+        if consensus is None:
+            return await current(self, messages, max_tokens=max_tokens, reasoning=reasoning, on_token=on_token)
+
+        relation, evidence_value = consensus
+        authoritative = ChatMessage(
+            role="system",
+            content=(
+                "FACT EVIDENCE CONSENSUS. Multiple independent external sources agree on this relation. "
+                f"Relation: {relation}. Evidence value as written in sources: {evidence_value}. "
+                "Use this identity/fact as authoritative over model memory. You may change grammatical case or "
+                "transliterate it naturally for the user's language, but you must not replace it with another person, "
+                "place or entity. Answer the user's factual question directly and concisely."
+            ),
+        )
+        return await current(
+            self,
+            [authoritative, *messages],
+            max_tokens=max_tokens,
+            reasoning=False,
+            on_token=on_token,
         )
 
     guarded._olya_stable_fact_evidence_guard = True  # type: ignore[attr-defined]
