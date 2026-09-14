@@ -128,13 +128,14 @@ async def execute_fast_web_grounding(
 ) -> TaskExecution:
     """Fast path for normal grounded chat answers.
 
-    Search is deliberately bounded so a user sees the first model token quickly:
-    at most two search queries, three page fetches in parallel, and a short fetch
-    deadline. Deep site audits and local-business research keep using the full
-    task solver instead.
+    Auto mode uses one search request because a single SearXNG result set already
+    provides several independent domains. Explicit "always use internet" may use
+    two. Up to three pages are fetched in parallel under a short deadline. Deep
+    site audits and local-business research keep using the full task solver.
     """
     require_capability(db, user.id, "research")
-    max_queries = min(2, max(1, int(getattr(settings, "research_max_search_queries", 4))))
+    configured_queries = max(1, int(getattr(settings, "research_max_search_queries", 4)))
+    max_queries = min(2 if force_web else 1, configured_queries)
     plan = plan_task(question, max_queries=max_queries, force_web=force_web)
     if not plan.requires_web or plan.kind != "web_research":
         plan = _fallback_plan(question, max_queries=max_queries)
@@ -165,7 +166,7 @@ async def execute_fast_web_grounding(
             )
             gathered.extend(rows)
         except DiscoveryError:
-            execution.warnings.append("Один поисковый запрос временно не дал результатов")
+            execution.warnings.append("Поиск временно не дал результатов")
 
     gathered = dedupe_hits(gathered, limit=min(12, int(getattr(settings, "research_max_discovery_results", 20))))
     execution.discovered_hits = len(gathered)
