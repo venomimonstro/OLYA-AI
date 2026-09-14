@@ -8,6 +8,7 @@ _CONCISE_FRESH_CATEGORIES = {
     "price": 220,
     "schedule": 220,
     "software_version": 220,
+    "availability": 220,
 }
 _ANALYTIC_MARKERS = (
     "подробно", "детально", "проанализ", "сравни", "объясни почему", "истори", "биограф",
@@ -16,8 +17,7 @@ _ANALYTIC_MARKERS = (
 
 
 def _is_concise_fresh_lookup(text: str, requested_mode: str) -> tuple[bool, int]:
-    if requested_mode == "deep":
-        return False, 0
+    _ = requested_mode
     normalized = " ".join(str(text or "").split()).casefold()
     if not normalized or len(normalized) > 260:
         return False, 0
@@ -40,8 +40,10 @@ def install_current_fact_latency_patch() -> None:
         concise, cap = _is_concise_fresh_lookup(text, requested_mode)
         if not concise:
             return decision
-        # Small current lookups should never pay hidden thinking latency. Fresh
-        # evidence/search still runs; only synthesis is forced onto the fast lane.
+        # Quality level controls complex reasoning, not the cost of retrieving an
+        # already-verifiable atomic fact. Even High uses the fast synthesis lane
+        # here; asking a 4B CPU model to "think harder" about an official rate or
+        # office holder only adds latency and hallucination risk.
         return inference_router.RouteDecision(
             mode="fast",
             max_context_tokens=decision.max_context_tokens,
