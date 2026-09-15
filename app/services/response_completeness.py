@@ -26,6 +26,20 @@ def minimum_chars(question: str) -> int:
     return 220
 
 
+def guidance_message(question: str) -> ChatMessage | None:
+    q = " ".join(str(question or "").split())
+    target = minimum_chars(q)
+    if target <= 80 or _EXPLICIT_SHORT.search(q):
+        return None
+    parts: list[str] = []
+    if _COMPLEX.search(q):
+        parts.append("Для анализа, совета или сравнения раскрой минимум три содержательных аспекта и дай практический вывод.")
+    if _LIST_REQUEST.search(q):
+        parts.append("Если запрошены варианты, топ, примеры или шаги, дай несколько действительно разных пунктов.")
+    parts.append("Не отвечай одной строкой на многосоставной запрос. Пиши плотно, без воды и повторов, не выдумывай факты ради объёма.")
+    return ChatMessage(role="system", content="RESPONSE COMPLETENESS: " + " ".join(parts) + f" Ориентир содержательности: около {target}+ символов, если вопрос требует раскрытия.")
+
+
 def _sentence_count(text: str) -> int:
     return len([part for part in re.split(r"(?<=[.!?])\s+|\n+", text) if len(part.strip()) >= 8])
 
@@ -39,20 +53,14 @@ def needs_expansion(question: str, answer: str) -> bool:
     flat = " ".join(text.split())
     if not flat:
         return True
-
-    # Do not force verbosity on a complete numeric/boolean micro-answer.
     if target <= 80 and (re.fullmatch(r"[\d\s.,%+\-—–₽$€]+", flat) or flat.casefold() in {"да", "нет", "yes", "no"}):
         return False
-
     complex_request = bool(_COMPLEX.search(q))
     list_request = bool(_LIST_REQUEST.search(q))
     sentences = _sentence_count(text)
     list_items = len(_LIST_MARKER.findall(text))
-
     if len(flat) < target:
         return True
-    # A long single paragraph/sentence is still under-complete for analytical
-    # tasks; this was the main reason one-line answers slipped through before.
     if complex_request and sentences < 3:
         return True
     if list_request and list_items < 3 and sentences < 5:
