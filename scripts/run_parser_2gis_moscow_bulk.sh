@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 WORKERS="${PARSER_2GIS_WORKERS:-2}"
 CHUNK_SIZE="${PARSER_2GIS_CHUNK_SIZE:-18}"
-MAX_RECORDS="${PARSER_2GIS_MAX_RECORDS:-12000}"
+MAX_RECORDS="${PARSER_2GIS_MAX_RECORDS:-50000}"
 CHROME_MEMORY="${PARSER_2GIS_CHROME_MEMORY_MB:-650}"
 CONTAINER_MEMORY="${PARSER_2GIS_CONTAINER_MEMORY_MB:-900}"
 DELAY_MS="${PARSER_2GIS_DELAY_MS:-0}"
@@ -42,9 +42,6 @@ out.write_text("".join(f"{code}\t{label}\n" for _, code, label in rows), encodin
 print(f"leaf_rubrics={len(rows)}")
 '
 
-# Rebuild URL manifests each run. Results are keyed by chunk size as well as
-# chunk number, so switching between safe/turbo modes can never skip rubrics
-# because of an old .done marker from a differently partitioned manifest.
 rm -f "$CHUNKS"/*.urls 2>/dev/null || true
 python3 - "$RUBRICS" "$CHUNKS" "$CHUNK_SIZE" <<'PY'
 import sys
@@ -104,6 +101,7 @@ run_chunk() {
       --parser.use-gc yes \
       --parser.gc-pages-interval 20 \
       --parser.max-records "$MAX_RECORDS" \
+      --parser.skip-404-response yes \
       --parser.delay_between_clicks "$DELAY_MS" \
       --writer.verbose no >"$logfile" 2>&1; then
     rc=0
