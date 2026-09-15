@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from time import perf_counter
+from collections import OrderedDict
+from datetime import datetime, timezone
+from time import monotonic, perf_counter
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -12,15 +14,22 @@ from sqlalchemy.orm import Session
 from app import user_ui as _base_user_ui
 from app.api.routes import chat as legacy_chat
 from app.db import SessionLocal, get_db
-from app.models import User
-from app.schemas.chat import ChatRequest, ChatResponse, ChatRunStatus
+from app.models import ChatRun, Message, UsageEvent, User
+from app.schemas.chat import ChatRequest, ChatResponse, ChatRunStatus, ChatUsage
 from app.services.auth import get_current_user
 from app.services.chat_runtime import ActiveChatJob, ChatRunConflict, ChatRunSnapshot, chat_execution_manager
 from app.services.clean_web import build_clean_web_context
+from app.services.live_structured_facts import is_live_structured_question, resolve_live_structured_fact
+from app.services.response_strategy import is_atomic_knowledge_question, normalized_question
 from app.services.task_solver import reset_task_solver_context, set_task_solver_context
+from app.utility_chat import utility_reply
 from app.task_solver_user_ui import router as _task_solver_user_ui_router
 
 router = APIRouter(prefix="/v1", tags=["chat"])
+
+_ATOMIC_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+_ATOMIC_CACHE_MAX = 512
+_ATOMIC_CACHE: OrderedDict[str, tuple[float, str]] = OrderedDict()
 
 
 def _install_workspace_route() -> None:
@@ -38,8 +47,134 @@ def _latest_user_text(payload: ChatRequest) -> str:
     return next((message.content for message in reversed(payload.messages) if message.role == "user"), "")
 
 
+def _cache_key(payload: ChatRequest, question: str) -> str | None:
+    if payload.mode not in {"auto", "fast"} or payload.web_mode == "always":
+        return None
+    if payload.project_id or payload.task_id or payload.requirements:
+        return None
+    if not is_atomic_knowledge_question(question):
+        return None
+    value = normalized_question(question)
+    return value[:500] if value else None
+
+
+def _atomic_cache_get(key: str | None) -> str | None:
+    if not key:
+        return None
+    row = _ATOMIC_CACHE.get(key)
+    if row is None:
+        return None
+    expires_at, text = row
+    if expires_at <= monotonic():
+        _ATOMIC_CACHE.pop(key, None)
+        return None
+    _ATOMIC_CACHE.move_to_end(key)
+    return text
+
+
+def _atomic_cache_put(key: str | None, text: str) -> None:
+    if not key or not text.strip():
+        return
+    _ATOMIC_CACHE[key] = (monotonic() + _ATOMIC_CACHE_TTL_SECONDS, text.strip())
+    _ATOMIC_CACHE.move_to_end(key)
+    while len(_ATOMIC_CACHE) > _ATOMIC_CACHE_MAX:
+        _ATOMIC_CACHE.popitem(last=False)
+
+
+def _structured_metadata(execution) -> dict:
+    sources = list(getattr(execution, "public_sources", []) or [])[:5]
+    plan = getattr(execution, "plan", None)
+    return {
+        "kind": "structured_fact",
+        "web_used": True,
+        "searched_results": 0,
+        "fetched_sources": int(getattr(execution, "fetched_sources", len(sources)) or len(sources)),
+        "failed_fetches": 0,
+        "sources": sources,
+        "warnings": [],
+        "steps": list(getattr(plan, "public_steps", ()) or ("Получаю точные данные", "Возвращаю ответ")),
+    }
+
+
+def _instant_metadata(kind: str, *, cached: bool = False) -> dict:
+    return {
+        "kind": kind,
+        "web_used": False,
+        "searched_results": 0,
+        "fetched_sources": 0,
+        "failed_fetches": 0,
+        "sources": [],
+        "warnings": [],
+        "steps": ["Быстрый точный ответ" if not cached else "Ответ из проверенного кеша GigaChat"],
+    }
+
+
+def _persist_fast_answer(
+    *,
+    db: Session,
+    request: Request,
+    user: User,
+    payload: ChatRequest,
+    job: ActiveChatJob,
+    text: str,
+    mode: str,
+    started: float,
+    task_execution: dict,
+) -> ChatResponse:
+    legacy_chat.require_capability(db, user.id, "chat")
+    project, conversation, _task = legacy_chat._resolve_scope(db, user, payload)
+    request.state.x1_conversation_id = conversation.id
+    last_user = next((message for message in reversed(payload.messages) if message.role == "user"), None)
+    legacy_chat._persist_accepted_user_turn(db, conversation, last_user)
+    db.add(Message(conversation_id=conversation.id, role="assistant", content=text))
+    conversation.updated_at = datetime.now(timezone.utc)
+
+    run_row = db.get(ChatRun, job.run_id)
+    if run_row is not None and run_row.user_id == user.id:
+        run_row.conversation_id = conversation.id
+        run_row.project_id = project.id if project else None
+        run_row.updated_at = datetime.now(timezone.utc)
+
+    duration_ms = max(0, int((perf_counter() - started) * 1000))
+    db.add(UsageEvent(
+        user_id=user.id,
+        project_id=project.id if project else None,
+        conversation_id=conversation.id,
+        mode=mode,
+        raw_chars=len(_latest_user_text(payload)),
+        compiled_chars=0,
+        output_chars=len(text),
+        duration_ms=duration_ms,
+        inference_ms=0,
+        queue_ms=0,
+        success=True,
+        request_id=job.run_id,
+    ))
+    db.commit()
+    job.conversation_id = conversation.id
+    return ChatResponse(
+        text=text,
+        model="OLYA AI",
+        usage=ChatUsage(
+            raw_message_chars=len(_latest_user_text(payload)),
+            compiled_message_chars=0,
+            mode=mode,
+            verification="off",
+            queue_ms=0,
+            ttft_ms=duration_ms,
+            output_tokens=0,
+            tokens_per_second=None,
+        ),
+        quality=None,
+        task_execution=task_execution,
+        conversation_id=conversation.id,
+        run_id=job.run_id,
+        client_request_id=job.client_request_id,
+    )
+
+
 async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id: str, job: ActiveChatJob) -> ChatResponse:
-    """Clean interactive path: optional bounded web context, then exactly one chat generation."""
+    """Latency-aware path: exact utility -> live structured -> bounded web -> one GigaChat pass."""
     with SessionLocal() as job_db:
         job_user = job_db.get(User, user_id)
         if job_user is None:
@@ -47,11 +182,83 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
 
         request.state.x1_chat_run_id = job.run_id
         question = _latest_user_text(payload)
+        started = perf_counter()
+
+        # Deterministic local facts must never wait for SearXNG or the LLM queue.
+        instant = utility_reply(question)
+        if instant is not None:
+            job._publish_nowait("status", {
+                "state": "instant",
+                "message": "Отвечаю сразу…",
+                "task_kind": instant.kind,
+            })
+            result = _persist_fast_answer(
+                db=job_db,
+                request=request,
+                user=job_user,
+                payload=payload,
+                job=job,
+                text=instant.text,
+                mode=instant.kind,
+                started=started,
+                task_execution=_instant_metadata(instant.kind),
+            )
+            await job.token(instant.text)
+            return result
+
+        # Current values with reliable structured providers are faster and more
+        # accurate than generic search + synthesis. Respect explicit web=off.
+        if payload.web_mode != "off" and is_live_structured_question(question):
+            job._publish_nowait("status", {
+                "state": "lookup",
+                "message": "Получаю точные актуальные данные…",
+                "task_kind": "structured_fact",
+            })
+            execution = await resolve_live_structured_fact(question)
+            answer = str(getattr(execution, "resolved_answer", "") or "").strip() if execution is not None else ""
+            if answer:
+                result = _persist_fast_answer(
+                    db=job_db,
+                    request=request,
+                    user=job_user,
+                    payload=payload,
+                    job=job,
+                    text=answer,
+                    mode="structured_fact",
+                    started=started,
+                    task_execution=_structured_metadata(execution),
+                )
+                await job.token(answer)
+                return result
+
+        atomic_key = _cache_key(payload, question)
+        cached = _atomic_cache_get(atomic_key)
+        if cached is not None:
+            job._publish_nowait("status", {
+                "state": "instant",
+                "message": "Готово…",
+                "task_kind": "atomic_cache",
+            })
+            result = _persist_fast_answer(
+                db=job_db,
+                request=request,
+                user=job_user,
+                payload=payload,
+                job=job,
+                text=cached,
+                mode="atomic_cache",
+                started=started,
+                task_execution=_instant_metadata("stable_fact", cached=True),
+            )
+            await job.token(cached)
+            return result
+
         deep = payload.mode == "deep"
+        atomic = atomic_key is not None
         job._publish_nowait("status", {
-            "state": "researching" if payload.web_mode == "always" else "working",
-            "message": "Проверяю актуальные данные…" if payload.web_mode == "always" else "Готовлю ответ…",
-            "task_kind": "clean_chat",
+            "state": "thinking" if atomic else ("researching" if payload.web_mode == "always" else "working"),
+            "message": "Проверяю факт…" if atomic else ("Ищу актуальные данные…" if payload.web_mode == "always" else "Формирую ответ…"),
+            "task_kind": "atomic_knowledge" if atomic else "clean_chat",
         })
 
         web = await build_clean_web_context(
@@ -64,15 +271,13 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
         if web.used:
             job._publish_nowait("status", {
                 "state": "synthesizing",
-                "message": "Собрал актуальные данные. Формирую ответ…",
+                "message": "Источники собраны. Формирую ответ…",
                 "task_kind": "web_research",
                 "fetched_sources": web.fetched,
                 "search_results": web.searched,
             })
 
         context_token = set_task_solver_context(web.context_messages) if web.context_messages else None
-        # Interactive chat is intentionally single-pass. Strict verification is
-        # represented in the system instruction, not by a second critic/repair LLM call.
         managed_payload = payload.model_copy(update={
             "client_request_id": job.client_request_id,
             "verification": "off",
@@ -90,6 +295,9 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
         finally:
             if context_token is not None:
                 reset_task_solver_context(context_token)
+
+        if atomic_key and not web.used:
+            _atomic_cache_put(atomic_key, result.text)
 
         result.run_id = job.run_id
         result.client_request_id = job.client_request_id
