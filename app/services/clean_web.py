@@ -44,6 +44,15 @@ _ADVICE_WEB_RE = re.compile(
     r"\bhow\s+to\b|\badvice\b|\brecommend\w*\b)",
     re.I,
 )
+_LOCAL_BUSINESS_RE = re.compile(
+    r"(?:"
+    r"\b(?:лучши\w*|топ|рейтинг|посовет\w*|подбер\w*|найди\w*)\b.{0,110}\b(?:в|рядом|поблизости)\s+[а-яёa-z-]+|"
+    r"\b(?:компани\w*|клиник\w*|центр\w*|сервис\w*|магазин\w*|салон\w*|стоматолог\w*|лаборатор\w*|"
+    r"медцентр\w*|слухопротезирован\w*|аптек\w*|ресторан\w*|кафе|отел\w*|гостиниц\w*)\b.{0,100}"
+    r"\b(?:в|рядом|поблизости)\s+[а-яёa-z-]+"
+    r")",
+    re.I,
+)
 _CYR = re.compile(r"[А-Яа-яЁё]")
 _PRIVATE_CACHE_RE = re.compile(
     r"(?:\b(?:мой|моя|мо[её]|мои|наш|наша|наше|наши|my|our)\b|"
@@ -75,9 +84,9 @@ class CleanWebResult:
             "searched_results": self.searched,
             "fetched_sources": self.fetched,
             "failed_fetches": self.failed_fetches,
-            "sources": self.sources[:5],
+            "sources": self.sources[:10],
             "warnings": [self.warning] if self.warning else [],
-            "steps": ["TOP-5 поиска", "Компактные факты", "Один итоговый ответ"] if self.used else [],
+            "steps": ["Поиск и карты", "Проверка отзывов и контактов", "Итоговый рейтинг"] if self.used else [],
         }
 
 
@@ -94,6 +103,10 @@ def _self_contained_transform(question: str) -> bool:
     return False
 
 
+def _is_local_business_lookup(question: str) -> bool:
+    return bool(_LOCAL_BUSINESS_RE.search(normalized_question(question)))
+
+
 def should_use_web(question: str, web_mode: str) -> bool:
     if web_mode == "off":
         return False
@@ -107,6 +120,7 @@ def should_use_web(question: str, web_mode: str) -> bool:
         or requires_fresh_data(text)
         or _WEB_RE.search(text)
         or _VACANCY_LOOKUP_RE.search(text)
+        or _is_local_business_lookup(text)
     ))
 
 
@@ -166,53 +180,100 @@ def _cache_put(key: str | None, result: CleanWebResult) -> None:
         _WEB_CACHE.pop(oldest, None)
 
 
+async def _search(discovery, query: str, *, count: int, country: str, language: str, timeout: float):
+    try:
+        return await asyncio.wait_for(
+            discovery.search(query, count=count, country=country, language=language),
+            timeout=timeout,
+        )
+    except (DiscoveryError, TimeoutError, asyncio.TimeoutError):
+        return []
+
+
 async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode: str, deep: bool = False) -> CleanWebResult:
     if not should_use_web(question, web_mode):
         return CleanWebResult()
 
+    local_business = _is_local_business_lookup(question)
     key = _cache_key(question, web_mode, deep)
-    ttl = _CACHE_FRESH_TTL if requires_fresh_data(question) else _CACHE_STABLE_TTL
+    ttl = _CACHE_FRESH_TTL if (requires_fresh_data(question) or local_business) else _CACHE_STABLE_TTL
     cached = _cache_get(key, ttl)
     if cached is not None:
         return cached
 
     language = "ru" if len(_CYR.findall(question or "")) >= 2 else "en"
     result = CleanWebResult(used=True)
-    try:
-        hits = await asyncio.wait_for(
-            discovery.search(question, count=5, country="RU", language=language),
-            timeout=2.6,
-        )
-    except (DiscoveryError, TimeoutError, asyncio.TimeoutError):
-        result.warning = "Поиск сейчас недоступен; актуальные факты не подтверждены."
+
+    if local_business:
+        search_queries = [
+            question,
+            f"{question} Яндекс Карты рейтинг отзывы адрес телефон сайт",
+            f"{question} 2ГИС рейтинг отзывы адрес телефон сайт",
+        ]
+        batches = await asyncio.gather(*(
+            _search(discovery, query, count=7, country="RU", language=language, timeout=3.2)
+            for query in search_queries
+        ))
+        hits = [hit for batch in batches for hit in batch]
+    else:
+        try:
+            hits = await asyncio.wait_for(
+                discovery.search(question, count=5, country="RU", language=language),
+                timeout=2.6,
+            )
+        except (DiscoveryError, TimeoutError, asyncio.TimeoutError):
+            result.warning = "Поиск сейчас недоступен; актуальные факты не подтверждены."
+            result.context_messages = [ChatMessage(
+                role="system",
+                content="Поиск актуальных данных не ответил. Не выдумывай текущий факт; кратко скажи, что не удалось проверить.",
+            )]
+            return result
+
+    if local_business and not hits:
+        result.warning = "Локальный поиск сейчас недоступен; рейтинг компаний не удалось подтвердить."
         result.context_messages = [ChatMessage(
             role="system",
-            content="Поиск актуальных данных не ответил. Не выдумывай текущий факт; кратко скажи, что не удалось проверить.",
+            content="Локальный поиск не ответил. Не придумывай компании, рейтинги, отзывы, адреса, телефоны или ссылки на карты.",
         )]
         return result
 
     unique = []
     seen: set[str] = set()
+    max_unique = 12 if local_business else 5
     for hit in hits:
         canonical = canonical_result_url(hit.url)
         if not canonical or canonical in seen:
             continue
         seen.add(canonical)
         unique.append(hit)
-        if len(unique) >= 5:
+        if len(unique) >= max_unique:
             break
     result.searched = len(unique)
 
     advice = bool(_ADVICE_WEB_RE.search(question or ""))
-    deep_read = bool(deep or _DEEP_WEB_RE.search(question or "") or _URL_RE.search(question or ""))
+    deep_read = bool(deep or local_business or _DEEP_WEB_RE.search(question or "") or _URL_RE.search(question or ""))
     blocks = ["WEB DATA. Бери факты только отсюда."]
-    if advice:
+
+    if local_business:
+        blocks.append(
+            "LOCAL BUSINESS RANKING MODE. Это запрос на подбор реальных организаций в конкретном месте. "
+            "Не отвечай одним-двумя названиями и не делай рейтинг по памяти модели. Сопоставь данные обычного веб-поиска, "
+            "Яндекс Карт, 2ГИС и официальных сайтов. При ранжировании учитывай одновременно среднюю оценку и количество отзывов: "
+            "оценка 5.0 по 3 отзывам не должна автоматически быть выше 4.8 по 800 отзывам. "
+            "Дай 5–8 вариантов, если источников достаточно. Для каждой организации укажи: название; рейтинг и число отзывов "
+            "в Яндекс Картах, если найдено; рейтинг и число отзывов в 2ГИС, если найдено; адрес; телефон; официальный сайт; "
+            "прямую ссылку на карточку Яндекс Карт; прямую ссылку на карточку 2ГИС. Если прямой карточки нет в источниках, "
+            "можно дать ссылку поиска по проверенному названию организации на соответствующей карте, явно подписав её «поиск на карте». "
+            "Не придумывай телефон, адрес, рейтинг, число отзывов или URL. Если поле не подтверждено, пиши «не найдено». "
+            "В начале кратко объясни критерий рейтинга, в конце дай 1–3 лучших выбора по совокупности оценки, числа отзывов и полноты данных."
+        )
+    elif advice:
         blocks.append("Вывод + 5–8 практических пунктов; не пересказывай сайты.")
 
-    # TOP-5 remains visible to the user, but only two compact snippets enter the
-    # interactive CPU prompt. This is the main TTFT guardrail.
+    snippet_limit = 280 if local_business else 82
+    visible_snippets = 10 if local_business else 2
     for index, hit in enumerate(unique, start=1):
-        snippet = _clean(hit.snippet, 82)
+        snippet = _clean(hit.snippet, snippet_limit)
         domain = _host(hit.url)
         result.sources.append({
             "title": _clean(hit.title, 180) or domain or "Источник",
@@ -221,37 +282,46 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
             "provider": hit.provider,
             "snippet": snippet,
         })
-        if index <= 2:
-            blocks.append(f"[{index}] {_clean(hit.title, 48)} | {domain}\n{snippet}")
+        if index <= visible_snippets:
+            blocks.append(f"[{index}] {_clean(hit.title, 100 if local_business else 48)} | {domain}\nURL: {hit.url}\n{snippet}")
 
-    # Advice gets at most one opportunistic tiny page excerpt; it may not delay
-    # the response by more than 0.65 s. Deep/research may read two fuller pages.
-    page_limit = 2 if deep_read else (1 if advice else 0)
+    page_limit = 5 if local_business else (2 if deep_read else (1 if advice else 0))
     if page_limit and unique:
-        page_timeout = 1.8 if deep_read else 0.65
-        excerpt_window = 240 if deep_read else 120
-        excerpt_limit = 340 if deep_read else 120
+        page_timeout = 2.2 if local_business else (1.8 if deep_read else 0.65)
+        excerpt_window = 420 if local_business else (240 if deep_read else 120)
+        excerpt_limit = 650 if local_business else (340 if deep_read else 120)
+
+        # Prefer maps and directory pages for local lookups, then fill with other sources.
+        fetch_candidates = unique
+        if local_business:
+            fetch_candidates = sorted(
+                unique,
+                key=lambda hit: 0 if any(part in _host(hit.url) for part in ("yandex.", "2gis.")) else 1,
+            )
 
         async def fetch_one(index: int, hit):
             try:
                 page = await asyncio.wait_for(fetcher.fetch(hit.url), timeout=page_timeout)
-                excerpts = lexical_excerpts(page.content, question, limit=1, window=excerpt_window)
+                excerpts = lexical_excerpts(page.content, question, limit=2 if local_business else 1, window=excerpt_window)
                 text = "\n".join(excerpt for excerpt, _score in excerpts)[:excerpt_limit]
                 return index, hit, text, None
             except (ResearchFetchError, TimeoutError, asyncio.TimeoutError) as exc:
                 return index, hit, "", exc
 
-        rows = await asyncio.gather(*(fetch_one(i, hit) for i, hit in enumerate(unique[:page_limit], start=1)))
+        rows = await asyncio.gather(*(
+            fetch_one(i, hit) for i, hit in enumerate(fetch_candidates[:page_limit], start=1)
+        ))
         for index, hit, text, error in rows:
             if error is not None or not text:
                 result.failed_fetches += 1
                 continue
             result.fetched += 1
-            blocks.append(f"[PAGE {index}] {_host(hit.url)}\n{text}")
+            blocks.append(f"[PAGE {index}] {_host(hit.url)}\nURL: {hit.url}\n{text}")
 
     if not unique:
         result.warning = "Поиск не вернул релевантных результатов; актуальные факты не подтверждены."
-    context_limit = 1600 if deep_read else 620
+
+    context_limit = 7600 if local_business else (1600 if deep_read else 620)
     result.context_messages = [ChatMessage(role="system", content="\n\n".join(blocks)[:context_limit])]
     _cache_put(key, result)
     return result
