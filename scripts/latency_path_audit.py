@@ -55,14 +55,18 @@ def audit() -> dict:
     if not is_atomic_knowledge_question(definition) or (atomic_output_cap(definition) or 999) > 180:
         errors.append("definition_not_compact_ai")
 
-    current_role = "Кто сейчас президент США?"
-    checks["current_role"] = {
-        "fresh": requires_fresh_data(current_role),
-        "atomic": is_atomic_knowledge_question(current_role),
-        "web": should_use_web(current_role, "auto"),
+    current_role = "Кто президент США?"
+    historical_role = "Кто был первым президентом США?"
+    checks["roles"] = {
+        "current_fresh": requires_fresh_data(current_role),
+        "current_web": should_use_web(current_role, "auto"),
+        "historical_fresh": requires_fresh_data(historical_role),
+        "historical_web": should_use_web(historical_role, "auto"),
     }
-    if not requires_fresh_data(current_role) or is_atomic_knowledge_question(current_role) or not should_use_web(current_role, "auto"):
+    if not requires_fresh_data(current_role) or not should_use_web(current_role, "auto"):
         errors.append("current_role_routing_invalid")
+    if requires_fresh_data(historical_role) or should_use_web(historical_role, "auto"):
+        errors.append("historical_role_unnecessarily_fresh")
 
     chess = "Что нужно знать чтобы часто побеждать в шахматах?"
     checks["chess_advice"] = {"web": should_use_web(chess, "auto")}
@@ -97,12 +101,22 @@ def audit() -> dict:
         "three_dots": "olya-thinking-dots" in recovery_source,
         "state_labels": all(value in recovery_source for value in ("Проверяю факт", "Ищу и проверяю источники", "Формирую ответ")),
         "old_square_disabled": "content:none!important" in recovery_source,
+        "stable_dom_move": "messages.lastElementChild!==thinking" in recovery_source,
     }
     if not all(checks["thinking_ui"].values()):
         errors.append("thinking_animation_invalid")
 
+    import scripts.warm_local_llm as warm
+    warm_source = inspect.getsource(warm.main_async)
+    checks["warm_prefix"] = {
+        "uses_fast_system_prompt": "_FAST_SYSTEM_PROMPT" in warm_source,
+        "tool_choice_none": '"tool_choice": "none"' in warm_source,
+    }
+    if not all(checks["warm_prefix"].values()):
+        errors.append("fast_prompt_warmup_missing")
+
     return {
-        "format": "olya-latency-path-audit-v1",
+        "format": "olya-latency-path-audit-v2",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "checks": checks,
