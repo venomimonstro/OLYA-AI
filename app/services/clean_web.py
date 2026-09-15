@@ -12,14 +12,13 @@ from app.services.response_strategy import requires_fresh_data
 
 
 _URL_RE = re.compile(r"https?://[^\s<>()\[\]{}]+", re.I)
+# Discovery intent only. Time-sensitive facts are classified exclusively by
+# response_strategy.requires_fresh_data(), avoiding duplicated regex decisions.
 _WEB_RE = re.compile(
-    r"(?:\bсейчас\b|\bсегодня\b|\bпоследн\w*\b|\bактуальн\w*\b|\bновост\w*\b|"
-    r"\bцена\w*\b|\bстоимост\w*\b|\bкурс\w*\b|\bпогод\w*\b|\bрасписан\w*\b|"
-    r"\bваканси\w*\b|\bотзыв\w*\b|\bрейтинг\w*\b|\bнайди\b|\bпоищи\b|"
+    r"(?:\bваканси\w*\b|\bотзыв\w*\b|\bрейтинг\w*\b|\bнайди\b|\bпоищи\b|"
     r"в интернете|в сети|проверь сайт|проанализируй сайт|\bлучши\w*\b|"
     r"\bчто\s+нужно\s+знать\s*,?\s+(?:чтобы|перед)\b|\bсовет\w*\b|\bрекомендац\w*\b|"
-    r"\bnow\b|\btoday\b|\blatest\b|\bcurrent\b|\bnews\b|\bprice\w*\b|"
-    r"\bweather\b|\bschedule\b|\breviews?\b|\brating\b|\bsearch\b|\bfind\b|\brecommend\w*\b)",
+    r"\breviews?\b|\brating\b|\bsearch\b|\bfind\b|\brecommend\w*\b)",
     re.I,
 )
 _DEEP_WEB_RE = re.compile(
@@ -65,7 +64,7 @@ def should_use_web(question: str, web_mode: str) -> bool:
     if web_mode == "always":
         return True
     text = " ".join(str(question or "").split())
-    return bool(text and (_URL_RE.search(text) or _WEB_RE.search(text) or requires_fresh_data(text)))
+    return bool(text and (_URL_RE.search(text) or requires_fresh_data(text) or _WEB_RE.search(text)))
 
 
 def _host(url: str) -> str:
