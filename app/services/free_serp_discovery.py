@@ -59,6 +59,21 @@ class _AnchorParser(HTMLParser):
         self._inside_a = False
 
 
+def _is_map_destination(value: str) -> bool:
+    parsed = urlsplit(value)
+    host = (parsed.hostname or "").casefold().removeprefix("www.")
+    path = (parsed.path or "").casefold()
+    if host == "yandex.ru" and path.startswith("/maps"):
+        return True
+    if host == "google.com" and path.startswith("/maps"):
+        return True
+    if host == "maps.google.com":
+        return True
+    if host.endswith("2gis.ru"):
+        return True
+    return False
+
+
 def _unwrap_search_href(engine: str, href: str) -> str:
     value = html.unescape(str(href or "").strip())
     if not value:
@@ -81,7 +96,11 @@ def _unwrap_search_href(engine: str, href: str) -> str:
     host = (urlsplit(value).hostname or "").casefold().removeprefix("www.")
     if not host:
         return ""
-    if host in {item.removeprefix("www.") for item in _SKIP_HOSTS}:
+
+    # Search-engine hosts are normally navigation noise, but concrete map card
+    # URLs are evidence and must survive. This is especially important for
+    # yandex.ru/maps/org/... and google.com/maps/place/....
+    if host in {item.removeprefix("www.") for item in _SKIP_HOSTS} and not _is_map_destination(value):
         return ""
     return value
 
