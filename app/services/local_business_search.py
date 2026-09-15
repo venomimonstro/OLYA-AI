@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from urllib.parse import quote, quote_plus, urlsplit
 
 from app.services.discovery import DiscoveryError, SearchHit, canonical_result_url
+from app.services.indexed_business_discovery import discover_indexed_businesses
 from app.services.public_maps_discovery import MapPlace
 from app.services.response_strategy import normalized_question
 from app.services.russian_maps_discovery import RussianMapsDiscovery
@@ -96,13 +97,9 @@ def is_local_business_question(question: str) -> bool:
     if not has_location:
         return False
 
-    # Selection/recommendation requests should always enter local discovery,
-    # regardless of whether the user writes "в Москве", "Москва" or "Москвы".
     if _SELECTION_RE.search(text):
         return True
 
-    # Also route compact commercial queries such as "автосервисы Москва" or
-    # "стоматологии Москвы отзывы" without requiring a recommendation word.
     return bool(_BUSINESS_GENERIC_RE.search(text) and (_CITY_MENTION_RE.search(text) or _LOCAL_ACTION_RE.search(text)))
 
 
@@ -272,25 +269,29 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
     city_slug = _city_slug(question)
     medical = bool(_MEDICAL_RE.search(normalized_question(question)))
 
-    # Independent Russian sources run concurrently. Yandex Medicine is only a
-    # medical specialization; Zoon and Yell are generic directories.
     queries = (
         question,
         f"site:yandex.ru/maps/org/ {question}",
         f"site:2gis.ru/{city_slug}/firm/ {question}",
     )
     maps_task = asyncio.create_task(_RU_MAPS.search(question))
+    indexed_task = asyncio.create_task(discover_indexed_businesses(question, discovery, limit=10))
     zoon_task = asyncio.create_task(discover_zoon(question, discovery, limit=8))
     yell_task = asyncio.create_task(discover_yell(question, limit=8))
     medicine_task = asyncio.create_task(discover_yandex_medicine(question, discovery, limit=8) if medical else _empty_places())
     serp_tasks = [asyncio.create_task(_search(discovery, q)) for q in queries]
-    public_rows, zoon_rows, yell_rows, medicine_rows, *serp_batches = await asyncio.gather(
-        maps_task, zoon_task, yell_task, medicine_task, *serp_tasks
+    public_rows, indexed_rows, zoon_rows, yell_rows, medicine_rows, *serp_batches = await asyncio.gather(
+        maps_task, indexed_task, zoon_task, yell_task, medicine_task, *serp_tasks
     )
 
     entities: dict[str, dict] = {}
     source_rows: list[dict] = []
 
+    # Indexed concrete directory cards bypass the generic SERP relevance filter.
+    # Their URL namespace itself confirms the provider and requested city.
+    for place in indexed_rows:
+        _merge_place(entities, place)
+        source_rows.append(place.public_source())
     for place in medicine_rows:
         _merge_place(entities, place)
         source_rows.append(place.public_source())
