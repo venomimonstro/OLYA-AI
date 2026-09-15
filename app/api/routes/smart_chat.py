@@ -20,6 +20,7 @@ from app.services.auth import get_current_user
 from app.services.chat_runtime import ActiveChatJob, ChatRunConflict, ChatRunSnapshot, chat_execution_manager
 from app.services.clean_web import build_clean_web_context
 from app.services.live_structured_facts import is_live_structured_question, resolve_live_structured_fact
+from app.services.local_business_search import is_local_business_question, resolve_local_business
 from app.services.long_term_memory import MemoryBundle, memory_context_message, retrieve_memories
 from app.services.response_strategy import is_atomic_knowledge_question, normalized_question, requires_memory_context
 from app.services.task_solver import reset_task_solver_context, set_task_solver_context
@@ -94,6 +95,20 @@ def _structured_metadata(execution) -> dict:
         "sources": sources,
         "warnings": [],
         "steps": list(getattr(plan, "public_steps", ()) or ("Получаю точные данные", "Возвращаю ответ")),
+    }
+
+
+def _local_business_metadata(execution) -> dict:
+    sources = list(getattr(execution, "sources", []) or [])[:10]
+    return {
+        "kind": "local_business",
+        "web_used": True,
+        "searched_results": int(getattr(execution, "searched", len(sources)) or len(sources)),
+        "fetched_sources": len(sources),
+        "failed_fetches": 0,
+        "sources": sources,
+        "warnings": [] if sources else ["Карточки компаний не удалось подтвердить"],
+        "steps": ["Ищу компании", "Проверяю Яндекс Карты, Google Maps и 2ГИС", "Возвращаю подтверждённые ссылки"],
     }
 
 
@@ -175,7 +190,7 @@ def _persist_fast_answer(
 
 
 async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id: str, job: ActiveChatJob) -> ChatResponse:
-    """Latency-aware path: exact utility -> live structured -> bounded web -> one GigaChat pass."""
+    """Latency-aware path: utility -> structured/local lookup -> bounded web -> one GigaChat pass."""
     with SessionLocal() as job_db:
         job_user = job_db.get(User, user_id)
         if job_user is None:
@@ -229,6 +244,28 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
                 await job.token(answer)
                 return result
 
+        if payload.web_mode != "off" and is_local_business_question(question):
+            job._publish_nowait("status", {
+                "state": "lookup",
+                "message": "Ищу реальные компании и карточки на картах…",
+                "task_kind": "local_business",
+            })
+            execution = await resolve_local_business(question, request.app.state.discovery)
+            if execution is not None:
+                result = _persist_fast_answer(
+                    db=job_db,
+                    request=request,
+                    user=job_user,
+                    payload=payload,
+                    job=job,
+                    text=execution.text,
+                    mode="local_business",
+                    started=started,
+                    task_execution=_local_business_metadata(execution),
+                )
+                await job.token(execution.text)
+                return result
+
         atomic_key = _cache_key(payload, question)
         cached = _atomic_cache_get(atomic_key)
         if cached is not None:
@@ -276,9 +313,6 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
             })
 
         context_messages = list(web.context_messages)
-        # On the first turn of a new chat ProjectContextBuilder intentionally has
-        # no Conversation object. For explicit memory questions, inject only the
-        # few relevant cross-chat memories here; ordinary new chats stay clean.
         if not payload.conversation_id and requires_memory_context(question):
             memories = retrieve_memories(
                 job_db,
