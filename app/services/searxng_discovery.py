@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from app.services.discovery import DiscoveryError, SearchHit, canonical_result_url
+from app.services.free_serp_discovery import FreeSerpDiscovery
 
 
 _SITE_FILTER = re.compile(r"(?:^|\s)site:([a-z0-9.-]+)", re.IGNORECASE)
@@ -13,9 +14,9 @@ _TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9+#._-]
 _STOPWORDS = {
     "кто", "что", "где", "когда", "какой", "какая", "какие", "какое", "сейчас", "сегодня",
     "текущий", "текущая", "текущие", "последний", "последняя", "последние", "найди", "покажи",
-    "это", "для", "или", "как", "его", "ее", "её", "при", "про", "из", "по",
+    "лучший", "лучшие", "рейтинг", "отзывы", "это", "для", "или", "как", "его", "ее", "её", "при", "про", "из", "по",
     "who", "what", "where", "when", "which", "current", "latest", "today", "now", "the", "of", "for",
-    "and", "is", "are", "show", "find", "site", "version",
+    "and", "is", "are", "show", "find", "site", "version", "best", "reviews", "rating",
 }
 
 
@@ -46,38 +47,29 @@ def _relevant(query: str, title: str, url: str, snippet: str) -> bool:
         return True
     haystack = " ".join((title, snippet, host, parsed.path)).casefold()
     matches = sum(1 for token in tokens if token in haystack)
-    return matches >= (1 if len(tokens) < 3 else 2)
-
-
-def _payload_marks_engine_unresponsive(payload: dict, engine: str) -> bool:
-    target = str(engine or "").casefold()
-    for row in payload.get("unresponsive_engines") or []:
-        if isinstance(row, str) and target in row.casefold():
-            return True
-        if isinstance(row, (list, tuple)) and row and target in str(row[0]).casefold():
-            return True
-        if isinstance(row, dict) and target in str(row.get("engine") or row.get("name") or "").casefold():
-            return True
-    return False
+    # Discovery is recall-oriented. Reranking/synthesis can reject weak rows later;
+    # dropping them here caused valid Russian local-business searches to become 0 sources.
+    return matches >= 1
 
 
 class SearxngDiscovery:
-    """One bounded SearXNG request, TOP-5 only.
+    """Self-hosted keyless metasearch with a direct free-SERP safety net.
 
-    Google/Yandex/DDG/Bing are queried by SearXNG in one request. If that returns
-    nothing, a second lightweight DDG/Bing request is allowed. There are no
-    engine-by-engine waves, recursive retries or page crawling in discovery.
+    SearXNG queries Google/Yandex/DDG/Bing. If the instance/engines are blocked,
+    empty or time out, a bounded keyless HTML fallback attempts the public SERPs
+    directly. CAPTCHA/anti-bot pages are never bypassed; another engine is used.
     """
 
     name = "searxng"
     primary_engines = ("google", "yandex", "duckduckgo", "bing")
     fallback_engines = ("duckduckgo", "bing")
     general_engines = primary_engines
-    max_results = 5
+    max_results = 12
 
     def __init__(self, base_url: str, *, timeout_seconds: float = 10.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self.free_fallback = FreeSerpDiscovery(timeout_seconds=min(self.timeout_seconds, 6.0))
 
     async def _request(self, client: httpx.AsyncClient, query: str, engines: tuple[str, ...], language: str | None) -> list[SearchHit]:
         params: dict[str, object] = {
@@ -93,9 +85,10 @@ class SearxngDiscovery:
         response = await client.get(f"{self.base_url}/search", params=params, headers={"Accept": "application/json"})
         response.raise_for_status()
         payload = response.json()
-        rows: list[SearchHit] = []
+        relevant_rows: list[SearchHit] = []
+        fallback_rows: list[SearchHit] = []
         seen: set[str] = set()
-        for index, row in enumerate(payload.get("results") or [], start=1):
+        for row in payload.get("results") or []:
             if not isinstance(row, dict):
                 continue
             url = str(row.get("url") or "").strip()
@@ -104,43 +97,81 @@ class SearxngDiscovery:
             key = canonical_result_url(url)
             if not key or key in seen:
                 continue
-            title = str(row.get("title") or "")[:320]
-            snippet = str(row.get("content") or row.get("snippet") or "")[:700]
-            if not _relevant(query, title, url, snippet):
-                continue
             seen.add(key)
+            title = str(row.get("title") or "")[:320]
+            snippet = str(row.get("content") or row.get("snippet") or "")[:1000]
             source_engines = row.get("engines") or row.get("engine") or []
             if isinstance(source_engines, str):
                 provider = source_engines
             elif isinstance(source_engines, list):
-                provider = ",".join(str(item) for item in source_engines[:3])
+                provider = ",".join(str(item) for item in source_engines[:4])
             else:
                 provider = ""
-            rows.append(SearchHit(
+            hit = SearchHit(
                 query=query,
                 title=title,
                 url=url,
                 snippet=snippet,
-                rank=len(rows) + 1,
+                rank=len(fallback_rows) + 1,
                 provider="searxng:" + (provider or "mixed"),
-            ))
-            if len(rows) >= self.max_results:
+            )
+            fallback_rows.append(hit)
+            if _relevant(query, title, url, snippet):
+                relevant_rows.append(hit)
+            if len(fallback_rows) >= self.max_results * 2:
                 break
-        return rows
 
-    async def search(self, query: str, *, count: int = 5, country: str | None = None, language: str | None = None) -> list[SearchHit]:
-        if not self.base_url:
-            raise DiscoveryError("SearXNG discovery is not configured")
+        # Prefer relevance-filtered rows, but never turn a populated SERP into
+        # an empty answer merely because snippets are sparse or morphology differs.
+        rows = relevant_rows or fallback_rows
+        return [
+            SearchHit(
+                query=item.query,
+                title=item.title,
+                url=item.url,
+                snippet=item.snippet,
+                rank=index,
+                provider=item.provider,
+            )
+            for index, item in enumerate(rows[: self.max_results], start=1)
+        ]
+
+    async def search(self, query: str, *, count: int = 10, country: str | None = None, language: str | None = None) -> list[SearchHit]:
         _ = country
         limit = min(max(int(count), 1), self.max_results)
-        timeout = min(self.timeout_seconds, 2.2)
-        try:
-            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-                rows = await self._request(client, query, self.primary_engines, language)
-                if not rows:
-                    rows = await self._request(client, query, self.fallback_engines, language)
-        except (httpx.HTTPError, ValueError, TypeError) as exc:
-            raise DiscoveryError("Self-hosted search is temporarily unavailable") from exc
+        rows: list[SearchHit] = []
+
+        if self.base_url:
+            # Local-business research legitimately needs more than the former
+            # 2.2s budget; the outer smart-search layer is still bounded.
+            timeout = min(self.timeout_seconds, 5.5)
+            try:
+                async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+                    rows = await self._request(client, query, self.primary_engines, language)
+                    if len(rows) < min(3, limit):
+                        fallback = await self._request(client, query, self.fallback_engines, language)
+                        known = {canonical_result_url(item.url) for item in rows}
+                        for item in fallback:
+                            key = canonical_result_url(item.url)
+                            if key and key not in known:
+                                known.add(key)
+                                rows.append(item)
+                            if len(rows) >= limit:
+                                break
+            except (httpx.HTTPError, ValueError, TypeError):
+                rows = []
+
         if not rows:
-            raise DiscoveryError("Self-hosted search returned no relevant results")
+            try:
+                rows = await self.free_fallback.search(
+                    query,
+                    count=limit,
+                    country=country,
+                    language=language,
+                )
+            except DiscoveryError as exc:
+                raise DiscoveryError("Self-hosted and free SERP search returned no usable results") from exc
+
+        if not rows:
+            raise DiscoveryError("Search returned no usable results")
         return rows[:limit]
