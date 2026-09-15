@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# By default the benchmark creates isolated temporary Free users inside the app,
+# distributes scenarios across them so daily quota does not distort results, and
+# deletes them afterwards. Explicit credentials remain available for targeted
+# single-account debugging only.
 if [ -n "${OLYA_BENCH_TOKEN:-}" ]; then
   docker compose exec -T \
     -e OLYA_BENCH_TOKEN="$OLYA_BENCH_TOKEN" \
@@ -11,24 +15,12 @@ if [ -n "${OLYA_BENCH_TOKEN:-}" ]; then
   exit $?
 fi
 
-email="${OLYA_BENCH_EMAIL:-}"
-password="${OLYA_BENCH_PASSWORD:-}"
-if [ -z "$email" ]; then
-  printf 'Email тестового пользователя OLYA: '
-  IFS= read -r email
-fi
-if [ -z "$password" ]; then
-  printf 'Пароль: '
-  IFS= read -r -s password
-  printf '\n'
+if [ -n "${OLYA_BENCH_EMAIL:-}" ] && [ -n "${OLYA_BENCH_PASSWORD:-}" ]; then
+  docker compose exec -T \
+    -e OLYA_BENCH_EMAIL="$OLYA_BENCH_EMAIL" \
+    -e OLYA_BENCH_PASSWORD="$OLYA_BENCH_PASSWORD" \
+    app python -m scripts.real_user_live_simulation_100 "$@"
+  exit $?
 fi
 
-if [ -z "$email" ] || [ -z "$password" ]; then
-  echo '[OLYA-BENCH] Email/password are required unless OLYA_BENCH_TOKEN is set.' >&2
-  exit 2
-fi
-
-docker compose exec -T \
-  -e OLYA_BENCH_EMAIL="$email" \
-  -e OLYA_BENCH_PASSWORD="$password" \
-  app python -m scripts.real_user_live_simulation_100 "$@"
+docker compose exec -T app python -m scripts.real_user_simulation_orchestrator "$@"
