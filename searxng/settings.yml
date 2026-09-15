@@ -16,9 +16,9 @@ search:
   formats:
     - json
 
-# One internal metasearch request only. Google/Yandex are retained for result
-# quality when the server IP can access them; DDG and Bing provide keyless
-# fallbacks. Application code takes at most TOP-5 results.
+# Internal keyless metasearch. Google/Yandex are primary quality sources;
+# DDG/Bing provide independent fallbacks. The app performs its own dedupe,
+# relevance ranking and page verification after discovery.
 engines:
   - name: google
     disabled: false
@@ -39,6 +39,8 @@ server:
 ui:
   static_use_hash: true
 
+# 1.4s was too aggressive for Yandex/Google from a VPS and caused false
+# zero-result searches. These limits remain bounded and only affect discovery.
 outgoing:
-  request_timeout: 1.4
-  max_request_timeout: 1.8
+  request_timeout: 3.5
+  max_request_timeout: 5.0
