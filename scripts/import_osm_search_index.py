@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from shutil import which
 
@@ -106,25 +108,40 @@ def feature_record(feature):
 
 
 def import_pbf(path: Path, limit: int = 0):
+    if not path.is_file(): raise FileNotFoundError(path)
+    if not which('osmium'): raise RuntimeError('osmium-tool is not installed')
     store = get_local_search_store(); written = rejected = 0
-    first = subprocess.Popen(['osmium','tags-filter',str(path),*FILTERS,'-f','pbf','-o','-'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    second = subprocess.Popen(['osmium','export','-F','pbf','-f','geojsonseq','-a','type,id','-'], stdin=first.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
-    assert first.stdout and second.stdout; first.stdout.close()
-    try:
-        for raw in second.stdout:
-            raw = raw.strip().lstrip('\x1e')
-            if not raw: continue
-            try: record = feature_record(json.loads(raw))
-            except Exception: record = None
-            if not record: rejected += 1; continue
-            try: store.upsert_business(record); written += 1
-            except Exception: rejected += 1
-            if written and written % 5000 == 0: print(f'indexed={written} rejected={rejected}', file=sys.stderr, flush=True)
-            if limit and written >= limit: break
-    finally:
-        if second.poll() is None: second.terminate()
-        if first.poll() is None: first.terminate()
-        second.communicate(timeout=20); first.communicate(timeout=20)
+    work_root = Path(os.getenv('X1_DATA_ROOT') or '/app/data') / 'search-import'; work_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='osm-owned-', dir=str(work_root)) as temp_dir:
+        temp = Path(temp_dir); filtered = temp / 'businesses.filtered.osm.pbf'; node_index = temp / 'nodes.idx'
+        filter_run = subprocess.run(['osmium','tags-filter',str(path),*FILTERS,'-o',str(filtered),'--overwrite'], capture_output=True, text=True)
+        if filter_run.returncode != 0:
+            raise RuntimeError('osmium tags-filter failed: ' + filter_run.stderr[-1500:])
+        process = subprocess.Popen(
+            ['osmium','export',str(filtered),'-f','geojsonseq','-a','type,id','-i',f'sparse_file_array,{node_index}','-o','-'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace', bufsize=1,
+        )
+        assert process.stdout is not None
+        try:
+            for raw in process.stdout:
+                raw = raw.strip().lstrip('\x1e')
+                if not raw: continue
+                try: record = feature_record(json.loads(raw))
+                except Exception: record = None
+                if not record: rejected += 1; continue
+                try: store.upsert_business(record); written += 1
+                except Exception: rejected += 1
+                if written and written % 5000 == 0: print(f'indexed={written} rejected={rejected}', file=sys.stderr, flush=True)
+                if limit and written >= limit:
+                    process.terminate(); break
+        finally:
+            process.stdout.close()
+            try:
+                _, stderr = process.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill(); _, stderr = process.communicate()
+        if process.returncode not in {0, -15} and not (limit and written >= limit):
+            raise RuntimeError(f'osmium export failed ({process.returncode}): {stderr[-1500:]}')
     return written, rejected
 
 
