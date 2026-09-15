@@ -62,8 +62,6 @@ incremental_import() {
   [[ -s "$outfile" ]] || return 0
   local import_log="$RESULTS/${base}.import.log"
   local lock_fd
-  # SQLite supports concurrent readers, but serialize the four bulk writers so
-  # the LLM/app never sees avoidable SQLITE_BUSY spikes during a turbo run.
   exec {lock_fd}>"$IMPORT_LOCK"
   flock "$lock_fd"
   if docker compose exec -T -e PYTHONPATH=/app app \
@@ -154,6 +152,11 @@ run_chunk() {
   local expected=${#urls[@]}
   if [[ $expected -eq 0 ]]; then
     return 0
+  fi
+
+  if [[ -s "$outfile" ]]; then
+    echo "[resume] $base has partial JSON; importing it before retry"
+    incremental_import "$outfile" "$base"
   fi
 
   echo "[parse] $base started ($expected rubrics)"
