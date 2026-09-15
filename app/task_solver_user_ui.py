@@ -50,7 +50,7 @@ def workspace(db: Session = Depends(get_db)) -> HTMLResponse:
     document = _replace_once(
         document,
         "if(item.event==='status'){if(d.conversation_id)conversationId=d.conversation_id;if(d.resumed)state.textContent='Соединение восстановлено. Продолжаю получать ответ…'}else if(item.event==='token')",
-        "if(item.event==='status'){if(d.conversation_id)conversationId=d.conversation_id;if(d.message)state.textContent=String(d.message);else if(d.resumed)state.textContent='Соединение восстановлено. Продолжаю получать ответ…';if(d.state==='researching')setProgress('researching');else if(d.state==='synthesizing')setProgress('thinking')}else if(item.event==='token')",
+        "if(item.event==='status'){if(d.conversation_id)conversationId=d.conversation_id;if(d.message)state.textContent=String(d.message);else if(d.resumed)state.textContent='Соединение восстановлено. Продолжаю получать ответ…';if(d.state==='researching'||d.state==='lookup')setProgress('researching');else if(d.state==='thinking'||d.state==='working'||d.state==='synthesizing')setProgress('thinking');else if(d.state==='instant')setProgress('generating')}else if(item.event==='token')",
         "task progress status",
     )
 
