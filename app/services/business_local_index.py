@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
 import os
 import re
-import tempfile
+import sqlite3
 import time
 from pathlib import Path
 from threading import RLock
@@ -12,9 +11,8 @@ from app.services.public_maps_discovery import MapPlace
 from app.services.response_strategy import normalized_question
 
 _DATA_ROOT = Path(os.getenv("X1_DATA_ROOT", "/app/data"))
-_INDEX_PATH = _DATA_ROOT / "business_index.json"
+_DB_PATH = _DATA_ROOT / "business_index.sqlite3"
 _LOCK = RLock()
-_MAX_ROWS = 20_000
 
 _CITY_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bмоскв\w*\b", re.I), "москва"),
@@ -62,29 +60,34 @@ def query_scope(question: str) -> tuple[str, str]:
     return city, category
 
 
-def _load() -> list[dict]:
-    try:
-        raw = json.loads(_INDEX_PATH.read_text(encoding="utf-8"))
-        return raw if isinstance(raw, list) else []
-    except (OSError, json.JSONDecodeError, TypeError):
-        return []
-
-
-def _save(rows: list[dict]) -> None:
-    _INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(rows[-_MAX_ROWS:], ensure_ascii=False, separators=(",", ":"))
-    fd, tmp = tempfile.mkstemp(prefix="business_index_", suffix=".json", dir=str(_INDEX_PATH.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, _INDEX_PATH)
-    finally:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+def _connect() -> sqlite3.Connection:
+    _DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(_DB_PATH, timeout=10.0)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
+    db.execute("PRAGMA temp_store=MEMORY")
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS business_places (
+            city TEXT NOT NULL,
+            category TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            name TEXT NOT NULL,
+            card_url TEXT NOT NULL,
+            address TEXT NOT NULL DEFAULT '',
+            phone TEXT NOT NULL DEFAULT '',
+            website TEXT NOT NULL DEFAULT '',
+            rating REAL,
+            reviews INTEGER,
+            source_url TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (city, category, provider, card_url)
+        )
+        """
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_business_scope ON business_places(city, category)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_business_rank ON business_places(city, category, rating DESC, reviews DESC)")
+    return db
 
 
 def store_places(question: str, places: list[MapPlace]) -> None:
@@ -94,29 +97,31 @@ def store_places(question: str, places: list[MapPlace]) -> None:
     if not category:
         return
     now = int(time.time())
+    payload = []
+    for place in places:
+        if not place.name or not place.card_url:
+            continue
+        payload.append((city, category, place.provider, place.name, place.card_url, place.address, place.phone, place.website, place.rating, place.reviews, place.source_url, now))
+    if not payload:
+        return
     with _LOCK:
-        rows = _load()
-        keyed = {(str(row.get("city")), str(row.get("category")), str(row.get("provider")), str(row.get("card_url"))): row for row in rows}
-        for place in places:
-            if not place.name or not place.card_url:
-                continue
-            key = (city, category, place.provider, place.card_url)
-            keyed[key] = {
-                "city": city,
-                "category": category,
-                "provider": place.provider,
-                "name": place.name,
-                "card_url": place.card_url,
-                "address": place.address,
-                "phone": place.phone,
-                "website": place.website,
-                "rating": place.rating,
-                "reviews": place.reviews,
-                "source_url": place.source_url,
-                "updated_at": now,
-            }
-        compact = sorted(keyed.values(), key=lambda row: int(row.get("updated_at") or 0))[-_MAX_ROWS:]
-        _save(compact)
+        with _connect() as db:
+            db.executemany(
+                """
+                INSERT INTO business_places(city,category,provider,name,card_url,address,phone,website,rating,reviews,source_url,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(city,category,provider,card_url) DO UPDATE SET
+                    name=excluded.name,
+                    address=CASE WHEN excluded.address<>'' THEN excluded.address ELSE business_places.address END,
+                    phone=CASE WHEN excluded.phone<>'' THEN excluded.phone ELSE business_places.phone END,
+                    website=CASE WHEN excluded.website<>'' THEN excluded.website ELSE business_places.website END,
+                    rating=COALESCE(excluded.rating,business_places.rating),
+                    reviews=COALESCE(excluded.reviews,business_places.reviews),
+                    source_url=CASE WHEN excluded.source_url<>'' THEN excluded.source_url ELSE business_places.source_url END,
+                    updated_at=excluded.updated_at
+                """,
+                payload,
+            )
 
 
 def load_places(question: str, *, limit: int = 20) -> list[MapPlace]:
@@ -124,27 +129,36 @@ def load_places(question: str, *, limit: int = 20) -> list[MapPlace]:
     if not category:
         return []
     with _LOCK:
-        rows = _load()
-    matches = [row for row in rows if row.get("city") == city and row.get("category") == category]
-    matches.sort(key=lambda row: (float(row.get("rating") or 0), int(row.get("reviews") or 0), int(row.get("updated_at") or 0)), reverse=True)
-    result: list[MapPlace] = []
-    for row in matches[: max(1, limit)]:
-        result.append(MapPlace(
-            provider=str(row.get("provider") or "cache"),
-            name=str(row.get("name") or ""),
-            card_url=str(row.get("card_url") or ""),
-            address=str(row.get("address") or ""),
-            phone=str(row.get("phone") or ""),
-            website=str(row.get("website") or ""),
-            rating=float(row["rating"]) if isinstance(row.get("rating"), (int, float)) else None,
-            reviews=int(row["reviews"]) if isinstance(row.get("reviews"), int) else None,
-            source_url=str(row.get("source_url") or row.get("card_url") or ""),
-        ))
-    return result
+        with _connect() as db:
+            rows = db.execute(
+                """
+                SELECT provider,name,card_url,address,phone,website,rating,reviews,source_url
+                FROM business_places
+                WHERE city=? AND category=?
+                ORDER BY (rating IS NOT NULL) DESC, rating DESC, COALESCE(reviews,0) DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (city, category, max(1, int(limit))),
+            ).fetchall()
+    return [
+        MapPlace(provider=row[0], name=row[1], card_url=row[2], address=row[3], phone=row[4], website=row[5], rating=row[6], reviews=row[7], source_url=row[8])
+        for row in rows
+    ]
 
 
 def index_stats() -> dict[str, int]:
     with _LOCK:
-        rows = _load()
-    scopes = {(str(row.get("city")), str(row.get("category"))) for row in rows}
-    return {"rows": len(rows), "scopes": len(scopes)}
+        with _connect() as db:
+            rows = int(db.execute("SELECT COUNT(*) FROM business_places").fetchone()[0])
+            scopes = int(db.execute("SELECT COUNT(*) FROM (SELECT DISTINCT city,category FROM business_places)").fetchone()[0])
+    return {"rows": rows, "scopes": scopes}
+
+
+def clear_scope(question: str) -> int:
+    city, category = query_scope(question)
+    if not category:
+        return 0
+    with _LOCK:
+        with _connect() as db:
+            cursor = db.execute("DELETE FROM business_places WHERE city=? AND category=?", (city, category))
+            return int(cursor.rowcount or 0)
