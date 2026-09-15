@@ -6,6 +6,7 @@ from collections import Counter
 from time import perf_counter
 
 from app.services.indexed_business_discovery import discover_indexed_businesses
+from app.services.osm_business_discovery import discover_osm_businesses
 from app.services.russian_maps_discovery import RussianMapsDiscovery
 from app.services.yell_discovery import discover_yell
 from app.services.zoon_discovery import discover_zoon
@@ -27,6 +28,7 @@ async def main() -> int:
     maps = RussianMapsDiscovery(timeout_seconds=4.0)
 
     results = await asyncio.gather(
+        timed("osm_overpass", discover_osm_businesses(query, limit=12, timeout_seconds=6.0)),
         timed("indexed_cards", discover_indexed_businesses(query, discovery, limit=10)),
         timed("yandex_2gis", maps.search(query)),
         timed("zoon", discover_zoon(query, discovery, limit=8)),
@@ -43,12 +45,13 @@ async def main() -> int:
         print("rows:", len(rows))
         print("error:", error or "none")
         print("kinds:", dict(Counter(getattr(row, "provider", "unknown") for row in rows)) or "none")
-        for index, row in enumerate(rows[:10], 1):
+        for index, row in enumerate(rows[:12], 1):
             print(f"{index}. {row.name}")
             print("   card:", row.card_url)
             print("   address:", row.address or "-")
             print("   rating:", row.rating if row.rating is not None else "-", "reviews:", row.reviews if row.reviews is not None else "-")
             print("   phone:", row.phone or "-")
+            print("   website:", row.website or "-")
             print("   source:", row.source_url or "-")
 
     print("\ntotal:", total)
