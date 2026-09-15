@@ -19,6 +19,12 @@ class UtilityReply:
 
 _CURRENT_UTILITY: ContextVar[UtilityReply | None] = ContextVar("x1_current_utility_reply", default=None)
 
+_UTILITY_PREFIX = re.compile(
+    r"^\s*(?:(?:подскажи(?:те)?|скажи(?:те)?|слушай(?:те)?|можешь\s+подсказать|можете\s+подсказать|"
+    r"пожалуйста|please|tell\s+me|can\s+you\s+tell\s+me)\s*(?:,|:|-)?\s*)+",
+    re.I,
+)
+_UTILITY_TRAIL = re.compile(r"\s*[🙏🙂😊👍]+\s*$")
 _GREETING_RU = re.compile(r"^\s*(?:привет|здравствуй|здравствуйте|доброе\s+утро|добрый\s+день|добрый\s+вечер|хай)\s*[!?.…]*\s*$", re.I)
 _GREETING_EN = re.compile(r"^\s*(?:hi|hello|hey)\s*[!?.…]*\s*$", re.I)
 _TIME_MARKERS = ("который час", "сколько времени", "какое время", "текущее время", "время сейчас", "сейчас время", "щас время")
@@ -70,6 +76,16 @@ _UNIT_ALIASES = {
     "мин": ("time", 60.0, "мин"), "min": ("time", 60.0, "min"),
     "час": ("time", 3600.0, "ч"), "часа": ("time", 3600.0, "ч"), "часов": ("time", 3600.0, "ч"), "h": ("time", 3600.0, "h"),
 }
+
+
+def _normalize_utility_input(text: str) -> str:
+    value = " ".join(str(text or "").strip().split())
+    value = _UTILITY_TRAIL.sub("", value).strip()
+    previous = None
+    while value and previous != value:
+        previous = value
+        value = _UTILITY_PREFIX.sub("", value, count=1).strip()
+    return value
 
 
 def _city(text: str) -> tuple[str, str] | None:
@@ -152,7 +168,7 @@ def _conversion_reply(text: str) -> UtilityReply | None:
 
 
 def utility_reply(user_text: str) -> UtilityReply | None:
-    text = " ".join((user_text or "").strip().split())
+    text = _normalize_utility_input(user_text)
     if not text: return None
     identity = creator_reply(text)
     if identity is not None: return UtilityReply(identity, "identity")
