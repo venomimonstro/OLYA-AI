@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -12,18 +13,19 @@ from app.services.discovery import DiscoveryError, SearchHit, canonical_result_u
 from app.services.public_maps_discovery import MapPlace
 
 
-_MEDICINE_URL_RE = re.compile(r"https?://(?:www\.)?yandex\.ru/medicine/clinic/[^\s?#\"']+", re.I)
 _OID_FROM_URL_RE = re.compile(r"_(\d{6,24})(?:/|$|[?#])")
 _PROFILE_RE = re.compile(r'https:\\/\\/yandex\.ru\\/profile\\/(\d{6,24})|https://yandex\.ru/profile/(\d{6,24})', re.I)
 _OID_RE = re.compile(r'"oid"\s*:\s*"?(\d{6,24})"?', re.I)
 _TITLE_RE = re.compile(r'<h1[^>]*>(.*?)</h1>', re.I | re.S)
-_RATING_RE = re.compile(r'"rating"\s*:\s*\{[^{}]{0,180}?"value"\s*:\s*([0-5](?:[.,]\d+)?)', re.I | re.S)
+_RATING_RE = re.compile(r'"rating"\s*:\s*\{[^{}]{0,220}?"value"\s*:\s*([0-5](?:[.,]\d+)?)', re.I | re.S)
 _REVIEWS_RE = re.compile(r'"reviewsCount"\s*:\s*(\d+)', re.I)
-_ADDRESS_RE = re.compile(r'"Address"\s*:\s*\{[^{}]{0,600}?"text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', re.I | re.S)
+_ADDRESS_RE = re.compile(r'"Address"\s*:\s*\{[^{}]{0,900}?"text"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', re.I | re.S)
 _PHONE_RE = re.compile(r'(?:\+7|8)[\s()\-\d]{9,18}')
-_SITE_URL_RE = re.compile(r'"url"\s*:\s*"(https?:\\?/\\?/[^"\\]+(?:\\.[^"\\]*)*)"[^{}]{0,160}?"text"\s*:\s*"(?:Сайт|Перейти на сайт)"', re.I | re.S)
+_SITE_URL_RE = re.compile(r'"url"\s*:\s*"(https?:\\?/\\?/[^"\\]+(?:\\.[^"\\]*)*)"[^{}]{0,220}?"text"\s*:\s*"(?:Сайт|Перейти на сайт)"', re.I | re.S)
 _TAG_RE = re.compile(r"<[^>]+>")
 _BLOCKED_RE = re.compile(r"captcha|smartcaptcha|проверка, что вы не робот|доступ временно ограничен", re.I)
+_HEARING_RE = re.compile(r"слухопротез|слухов\w*\s+аппарат|сурдолог|центр\w*\s+слух", re.I)
+_CITY_RE = re.compile(r"\b(москв\w*|санкт-петербург\w*|петербург\w*|спб|казан\w*|екатеринбург\w*|новосибирск\w*|самар\w*|челябинск\w*|красноярск\w*|тюмен\w*|уф\w*|перм\w*|сочи)\b", re.I)
 
 
 @dataclass(frozen=True)
@@ -39,10 +41,11 @@ def _clean(value: str, limit: int = 240) -> str:
 
 
 def _decode_json_string(value: str) -> str:
+    raw = str(value or "")
     try:
-        return bytes(value, "utf-8").decode("unicode_escape").replace("\\/", "/")
-    except UnicodeDecodeError:
-        return value.replace("\\/", "/")
+        return json.loads(f'"{raw}"')
+    except (json.JSONDecodeError, TypeError):
+        return raw.replace("\\/", "/").replace("\\u00a0", " ")
 
 
 def _host(url: str) -> str:
@@ -70,7 +73,7 @@ def _title(body: str) -> str:
     if match:
         return _clean(match.group(1), 140)
     for pattern in (
-        re.compile(r'"headerProps"\s*:\s*\{[^{}]{0,600}?"title"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', re.I | re.S),
+        re.compile(r'"headerProps"\s*:\s*\{[^{}]{0,700}?"title"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', re.I | re.S),
         re.compile(r'<title>(.*?)</title>', re.I | re.S),
     ):
         match = pattern.search(body)
@@ -99,7 +102,6 @@ def _address(body: str) -> str:
     match = _ADDRESS_RE.search(body)
     if match:
         return _clean(_decode_json_string(match.group(1)), 220)
-    # Server-rendered medicine pages also expose the visible Moscow address.
     match = re.search(r'(?:ул\.|улица|просп\.|проспект|ш\.|шоссе|пер\.|переулок|наб\.|набережная)[^<>\n]{3,120}', body, re.I)
     return _clean(match.group(0), 220) if match else ""
 
@@ -130,9 +132,6 @@ def parse_yandex_medicine_page(url: str, body: str) -> YandexMedicineCard | None
     place = MapPlace(
         provider="yandex_maps",
         name=name,
-        # Yandex Medicine exposes the organization profile by OID. This is a
-        # direct active Yandex organization card and is more stable than
-        # inventing a /maps/org/<slug>/<id> URL when the slug is unknown.
         card_url=f"https://yandex.ru/profile/{oid}?lang=ru",
         address=_address(body),
         phone=_phone(body),
@@ -153,35 +152,58 @@ async def _fetch_card(client: httpx.AsyncClient, url: str) -> YandexMedicineCard
     return parse_yandex_medicine_page(str(response.url), response.text[:8_000_000])
 
 
+def _query_variants(question: str) -> tuple[str, ...]:
+    city_match = _CITY_RE.search(question)
+    city = city_match.group(1) if city_match else "Москва"
+    variants = [f"site:yandex.ru/medicine/clinic {question}"]
+    if _HEARING_RE.search(question):
+        variants.extend((
+            f"site:yandex.ru/medicine/clinic слуховые аппараты {city}",
+            f"site:yandex.ru/medicine/clinic сурдолог слуховые аппараты {city}",
+        ))
+    deduped: list[str] = []
+    for value in variants:
+        normalized = " ".join(value.split())
+        if normalized not in deduped:
+            deduped.append(normalized)
+    return tuple(deduped)
+
+
 async def discover_yandex_medicine(question: str, discovery, *, limit: int = 8) -> list[MapPlace]:
     """Discover Yandex organization cards through indexed Medicine pages.
 
-    Direct Maps search is often JS-heavy or blocked on VPS IPs. Yandex Medicine
-    pages are server-rendered and expose the same organization OID plus rating,
-    reviews, address and contacts. Discovery remains keyless: ordinary search
-    finds indexed medicine pages, then this parser reads only public HTML.
+    Queries are issued in parallel so hearing-center searches are not dependent
+    on one exact wording. Indexed medicine pages are then fetched directly and
+    parsed for the Yandex organization OID, rating, reviews, address and contacts.
     """
-    query = f"site:yandex.ru/medicine/clinic {question}"
-    try:
-        hits = await asyncio.wait_for(
-            discovery.search(query, count=max(8, limit), country="RU", language="ru"),
-            timeout=4.0,
-        )
-    except (DiscoveryError, TimeoutError, asyncio.TimeoutError):
-        return []
+    queries = _query_variants(question)
+
+    async def search_one(query: str) -> list[SearchHit]:
+        try:
+            return await asyncio.wait_for(
+                discovery.search(query, count=max(10, limit), country="RU", language="ru"),
+                timeout=4.0,
+            )
+        except (DiscoveryError, TimeoutError, asyncio.TimeoutError):
+            return []
+
+    batches = await asyncio.gather(*(search_one(query) for query in queries))
 
     urls: list[str] = []
     seen: set[str] = set()
-    for hit in hits:
-        url = str(hit.url or "")
-        if not is_yandex_medicine_url(url):
-            continue
-        key = canonical_result_url(url)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        urls.append(url)
-        if len(urls) >= limit:
+    for batch in batches:
+        for hit in batch:
+            url = str(hit.url or "")
+            if not is_yandex_medicine_url(url):
+                continue
+            key = canonical_result_url(url)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            urls.append(url)
+            if len(urls) >= limit * 2:
+                break
+        if len(urls) >= limit * 2:
             break
     if not urls:
         return []
@@ -193,7 +215,7 @@ async def discover_yandex_medicine(question: str, discovery, *, limit: int = 8) 
     }
     timeout = httpx.Timeout(3.0, connect=1.0)
     async with httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=True, headers=headers) as client:
-        cards = await asyncio.gather(*(_fetch_card(client, url) for url in urls))
+        cards = await asyncio.gather(*(_fetch_card(client, url) for url in urls[: limit * 2]))
 
     rows: list[MapPlace] = []
     seen_oids: set[str] = set()
