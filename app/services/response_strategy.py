@@ -5,9 +5,15 @@ import re
 _URL_RE = re.compile(r"https?://|www\.", re.I)
 _FRESH_RE = re.compile(
     r"(?:\bсейчас\b|\bсегодня\b|\bвчера\b|\bзавтра\b|\bпоследн\w*\b|\bактуальн\w*\b|"
-    r"\bновост\w*\b|\bтекущ\w*\b|\bкурс\w*\b|\bцен[аы]\b|\bстоимост\w*\b|\bпогод\w*\b|"
-    r"\bрасписан\w*\b|\bпрезидент\w*\b|\bдиректор\w*\b|\bceo\b|\bnow\b|\btoday\b|"
-    r"\blatest\b|\bcurrent\b|\bnews\b|\bprice\b|\bweather\b)",
+    r"\bновост\w*\b|\bтекущ\w*\b|\bнынешн\w*\b|\bкурс\w*\b|\bцен[аы]\b|\bстоимост\w*\b|"
+    r"\bпогод\w*\b|\bрасписан\w*\b|\bnow\b|\btoday\b|\blatest\b|\bcurrent\b|\bnews\b|"
+    r"\bprice\b|\bweather\b)",
+    re.I,
+)
+_CURRENT_ROLE_RE = re.compile(
+    r"(?:^|[?.!\s])(?:кто\s+(?:же\s+)?(?:президент|премьер(?:-министр)?|губернатор|мэр|"
+    r"генеральный\s+директор|директор|ceo|cto)\b|"
+    r"who\s+is\s+(?:the\s+)?(?:president|prime\s+minister|governor|mayor|ceo|cto)\b)",
     re.I,
 )
 _CONTEXT_RE = re.compile(
@@ -48,7 +54,7 @@ def normalized_question(text: str) -> str:
 
 def requires_fresh_data(text: str) -> bool:
     value = normalized_question(text)
-    return bool(value and (_URL_RE.search(value) or _FRESH_RE.search(value)))
+    return bool(value and (_URL_RE.search(value) or _FRESH_RE.search(value) or _CURRENT_ROLE_RE.search(value)))
 
 
 def requires_conversation_context(text: str) -> bool:
