@@ -13,6 +13,7 @@ python3 -m py_compile \
   app/api/routes/memory.py \
   app/api/routes/admin_chat_observer.py \
   app/api/routes/smart_chat.py \
+  app/api/routes/health.py \
   app/services/clean_web.py \
   app/services/structured_facts.py \
   app/services/live_structured_facts.py \
@@ -23,8 +24,10 @@ python3 -m py_compile \
   app/inference/router.py \
   app/utility_chat.py \
   app/workspace_client_v4.py \
+  app/workspace_reliability_v5.py \
   app/workspace_recovery_controls.py \
   app/workspace_chat_library_v1.py \
+  app/workspace_crash_recovery_v1.py \
   app/task_solver_user_ui.py \
   app/admin_ui.py \
   app/admin_users_ui.py \
@@ -34,6 +37,7 @@ python3 -m py_compile \
   scripts/latency_path_audit.py \
   scripts/exact_fastpath_audit.py \
   scripts/workspace_stability_audit.py \
+  scripts/crash_recovery_audit.py \
   scripts/web_prompt_budget_audit.py \
   scripts/answer_quality_lint.py \
   scripts/real_user_scenarios.py \
@@ -56,9 +60,12 @@ info "Waiting for application health"
 ready=0
 for _ in $(seq 1 75); do
   if docker compose exec -T app python - <<'PY' >/dev/null 2>&1
-import urllib.request
+import json, urllib.request
 with urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2) as response:
     assert response.status == 200
+    body = json.load(response)
+    assert body.get('status') == 'ok'
+    assert body.get('instance_id')
 PY
   then ready=1; break; fi
   sleep 1
@@ -67,6 +74,9 @@ if [ "$ready" -ne 1 ]; then
   docker compose logs --tail=220 app >&2 || true
   fail "Application did not become healthy"
 fi
+
+info "Running crash-recovery regression"
+docker compose exec -T app python -m scripts.crash_recovery_audit
 
 info "Running workspace browser-stability regression"
 docker compose exec -T app python -m scripts.workspace_stability_audit
@@ -95,4 +105,4 @@ docker compose exec -T app python -m scripts.client_product_audit
 info "Running broad product route/UI audit"
 docker compose exec -T app python -m scripts.product_surface_audit
 
-info "PASSED: workspace stability, compact web evidence, exact fast paths, 10,000-user routing, memory and owner surfaces are registered"
+info "PASSED: crash recovery, workspace stability, compact web evidence, exact fast paths, 10,000-user routing, memory and owner surfaces are registered"
