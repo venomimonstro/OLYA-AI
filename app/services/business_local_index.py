@@ -38,12 +38,12 @@ _CATEGORY_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"автосервис|авторемонт|ремонт\w*\s+(?:авто|машин)|\bсто\b", re.I), "автосервис"),
     (re.compile(r"слухопротез|слухов\w*\s+аппарат|сурдолог|аудиолог", re.I), "слухопротезирование"),
     (re.compile(r"стоматолог", re.I), "стоматология"),
-    (re.compile(r"клиник|медицин\w*\s+центр|диагност\w*\s+центр", re.I), "медицина"),
+    (re.compile(r"\bмедицина\b|клиник|медицин\w*\s+центр|диагност\w*\s+центр", re.I), "медицина"),
     (re.compile(r"юрист|адвокат|юридичес", re.I), "юристы"),
     (re.compile(r"ресторан", re.I), "рестораны"),
     (re.compile(r"кафе|кофейн", re.I), "кафе"),
     (re.compile(r"фитнес|спортзал|тренаж", re.I), "фитнес"),
-    (re.compile(r"салон\w*\s+красот|косметолог|маникюр|педикюр", re.I), "красота"),
+    (re.compile(r"\bкрасота\b|салон\w*\s+красот|косметолог|маникюр|педикюр", re.I), "красота"),
     (re.compile(r"парикмах|барбершоп", re.I), "парикмахерские"),
     (re.compile(r"аптек", re.I), "аптеки"),
     (re.compile(r"ветеринар|ветклиник", re.I), "ветеринария"),
@@ -91,6 +91,8 @@ def store_places(question: str, places: list[MapPlace]) -> None:
     if not places:
         return
     city, category = query_scope(question)
+    if not category:
+        return
     now = int(time.time())
     with _LOCK:
         rows = _load()
