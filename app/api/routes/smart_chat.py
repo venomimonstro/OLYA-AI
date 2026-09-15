@@ -21,6 +21,7 @@ from app.schemas.chat import ChatRequest, ChatResponse, ChatRunStatus, ChatUsage
 from app.services.auth import get_current_user
 from app.services.chat_runtime import ActiveChatJob, ChatRunConflict, ChatRunSnapshot, chat_execution_manager
 from app.services.clean_web import build_clean_web_context
+from app.services.deep_intelligence import DeepIntelligencePlan, deep_synthesis_messages, plan_context_message, planning_messages
 from app.services.live_structured_facts import is_live_structured_question, resolve_live_structured_fact
 from app.services.local_business_search import is_local_business_question, resolve_local_business
 from app.services.long_term_memory import MemoryBundle, memory_context_message, retrieve_memories
@@ -122,12 +123,15 @@ def _replace_persisted_assistant(db: Session, conversation_id: str | None, text:
 def _repair_is_better(question: str, original: str, candidate: str) -> bool:
     candidate = str(candidate or "").strip()
     original = str(original or "").strip()
-    if not candidate or len(candidate) <= len(original):
+    if not candidate:
         return False
-    if not needs_expansion(question, candidate):
+    candidate_bad = needs_expansion(question, candidate)
+    original_bad = needs_expansion(question, original)
+    if not candidate_bad and original_bad:
         return True
-    minimum_growth = max(180, int(len(original) * 0.45))
-    return len(candidate) - len(original) >= minimum_growth and len(candidate) >= 420
+    if candidate_bad:
+        return False
+    return len(candidate) >= max(320, int(len(original) * 0.72))
 
 
 def _effective_verification(requested: str, route_mode: str) -> str:
@@ -136,6 +140,33 @@ def _effective_verification(requested: str, route_mode: str) -> str:
     if route_mode == "deep" and requested == "auto":
         return "strict"
     return requested
+
+
+async def _build_deep_plan(request: Request, question: str, context_messages: list, job: ActiveChatJob) -> DeepIntelligencePlan | None:
+    job._publish_nowait("status", {"state": "thinking", "message": "Разбираю задачу на подзадачи и сравниваю варианты…", "task_kind": "deep_planning"})
+    try:
+        brief = (await request.app.state.llama.chat(
+            planning_messages(question, context_messages),
+            max_tokens=950,
+            reasoning=True,
+        )).strip()
+    except Exception:
+        return None
+    if len(brief) < 120:
+        return None
+    return DeepIntelligencePlan(brief=brief, max_tokens=950)
+
+
+async def _deep_synthesis(request: Request, question: str, draft: str, context_messages: list, job: ActiveChatJob) -> str:
+    job._publish_nowait("status", {"state": "verifying", "message": "Сверяю логику, альтернативы и собираю финальный ответ…", "task_kind": "deep_synthesis"})
+    try:
+        return (await request.app.state.llama.chat(
+            deep_synthesis_messages(question, draft, context_messages),
+            max_tokens=3200,
+            reasoning=True,
+        )).strip()
+    except Exception:
+        return ""
 
 
 async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id: str, job: ActiveChatJob) -> ChatResponse:
@@ -192,6 +223,14 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
             memory_message = memory_context_message(MemoryBundle(summary="", memories=memories))
             if memory_message is not None: context_messages.append(memory_message)
 
+        planner_used = False
+        synthesis_used = False
+        if deep:
+            plan = await _build_deep_plan(request, question, context_messages, job)
+            if plan is not None:
+                context_messages.append(plan_context_message(plan))
+                planner_used = True
+
         context_token = set_task_solver_context(context_messages) if context_messages else None
         managed_payload = payload.model_copy(update={
             "client_request_id": job.client_request_id,
@@ -201,6 +240,7 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
         })
         try:
             result = await legacy_chat._chat_impl(managed_payload, request, job_user, job_db, on_token=job.token, on_replace=job.replace)
+
             if needs_expansion(question, result.text):
                 job._publish_nowait("status", {"state": "verifying", "message": "Проверяю полноту и улучшаю ответ…", "task_kind": "quality_repair"})
                 repair = expansion_messages(question, result.text)
@@ -215,6 +255,14 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
                     result.text = expanded
                     _replace_persisted_assistant(job_db, result.conversation_id, expanded)
                     await job.replace(expanded)
+
+            if deep:
+                synthesized = await _deep_synthesis(request, question, result.text, context_messages, job)
+                if _repair_is_better(question, result.text, synthesized):
+                    result.text = synthesized
+                    synthesis_used = True
+                    _replace_persisted_assistant(job_db, result.conversation_id, synthesized)
+                    await job.replace(synthesized)
         finally:
             if context_token is not None: reset_task_solver_context(context_token)
 
@@ -223,6 +271,9 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
         metadata["answer_mode"] = route.mode
         metadata["complexity_score"] = route.complexity_score
         metadata["verification"] = verification
+        metadata["deep_intelligence"] = deep
+        metadata["planner_used"] = planner_used
+        metadata["synthesis_used"] = synthesis_used
         result.run_id = job.run_id; result.client_request_id = job.client_request_id; result.task_execution = metadata
         return result
 
