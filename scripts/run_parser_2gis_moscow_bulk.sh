@@ -42,6 +42,9 @@ out.write_text("".join(f"{code}\t{label}\n" for _, code, label in rows), encodin
 print(f"leaf_rubrics={len(rows)}")
 '
 
+# Rebuild URL manifests each run. Results are keyed by chunk size as well as
+# chunk number, so switching between safe/turbo modes can never skip rubrics
+# because of an old .done marker from a differently partitioned manifest.
 rm -f "$CHUNKS"/*.urls 2>/dev/null || true
 python3 - "$RUBRICS" "$CHUNKS" "$CHUNK_SIZE" <<'PY'
 import sys
@@ -57,13 +60,13 @@ for line in rubrics.read_text(encoding="utf-8").splitlines():
     rows.append((code.strip(), label.strip()))
 for start in range(0, len(rows), size):
     batch = rows[start:start + size]
-    path = chunks / f"chunk_{start // size:04d}.urls"
+    path = chunks / f"chunk_s{size:03d}_{start // size:04d}.urls"
     urls = [
         f"https://2gis.ru/moscow/search/{quote(label, safe='')}/rubricId/{code}/filters/sort=name"
         for code, label in batch
     ]
     path.write_text("\n".join(urls) + "\n", encoding="utf-8")
-print(f"rubrics={len(rows)} chunks={(len(rows)+size-1)//size}")
+print(f"rubrics={len(rows)} chunks={(len(rows)+size-1)//size} chunk_size={size}")
 PY
 
 run_chunk() {
@@ -86,8 +89,9 @@ run_chunk() {
 
   echo "[parse] $base (${#urls[@]} rubrics)"
   rm -f "$outfile" "$donefile"
-  set +e
-  X1_2GIS_PARSER_MEMORY_LIMIT_MB="$CONTAINER_MEMORY" \
+
+  local rc=0
+  if X1_2GIS_PARSER_MEMORY_LIMIT_MB="$CONTAINER_MEMORY" \
     docker compose -f docker-compose.2gis.yml --profile 2gis run --rm parser-2gis \
       -i "${urls[@]}" \
       -o "/data/moscow_bulk/results/${base}.json" \
@@ -101,9 +105,11 @@ run_chunk() {
       --parser.gc-pages-interval 20 \
       --parser.max-records "$MAX_RECORDS" \
       --parser.delay_between_clicks "$DELAY_MS" \
-      --writer.verbose no >"$logfile" 2>&1
-  local rc=$?
-  set -e
+      --writer.verbose no >"$logfile" 2>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
 
   if [[ $rc -eq 0 && -s "$outfile" ]]; then
     touch "$donefile"
@@ -116,11 +122,9 @@ run_chunk() {
   return 0
 }
 
-export ROOT CHUNKS RESULTS WORKERS CHUNK_SIZE MAX_RECORDS CHROME_MEMORY CONTAINER_MEMORY DELAY_MS
-
 echo "[3/5] Parsing Moscow with $WORKERS parallel Chrome workers..."
 running=0
-for urlfile in "$CHUNKS"/*.urls; do
+for urlfile in "$CHUNKS"/chunk_s"$(printf '%03d' "$CHUNK_SIZE")"_*.urls; do
   [[ -e "$urlfile" ]] || continue
   run_chunk "$urlfile" &
   running=$((running + 1))
@@ -141,4 +145,4 @@ echo "[5/5] Coverage report..."
 docker compose exec -T -e PYTHONPATH=/app app \
   python /app/scripts/check_2gis_moscow_coverage.py
 
-echo "Bulk run finished. Re-running this command resumes completed chunks instead of downloading them again."
+echo "Bulk run finished. Re-running the same command resumes completed chunks instead of downloading them again."
