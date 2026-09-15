@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from app.schemas.chat import ChatMessage
 from app.services.discovery import DiscoveryError, canonical_result_url
 from app.services.research import ResearchFetchError, lexical_excerpts
+from app.services.response_strategy import requires_fresh_data
 
 
 _URL_RE = re.compile(r"https?://[^\s<>()\[\]{}]+", re.I)
@@ -58,7 +59,7 @@ def should_use_web(question: str, web_mode: str) -> bool:
     if web_mode == "always":
         return True
     text = " ".join(str(question or "").split())
-    return bool(text and (_URL_RE.search(text) or _WEB_RE.search(text)))
+    return bool(text and (_URL_RE.search(text) or _WEB_RE.search(text) or requires_fresh_data(text)))
 
 
 def _host(url: str) -> str:
@@ -111,9 +112,7 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
     for index, hit in enumerate(unique, start=1):
         snippet = _clean(hit.snippet, 260)
         domain = _host(hit.url)
-        blocks.append(
-            f"[{index}] {_clean(hit.title, 120)} | {domain}\n{snippet}"
-        )
+        blocks.append(f"[{index}] {_clean(hit.title, 120)} | {domain}\n{snippet}")
         result.sources.append({
             "title": _clean(hit.title, 180) or domain or "Источник",
             "url": hit.url,
@@ -122,9 +121,6 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
             "snippet": snippet,
         })
 
-    # Simple current questions use search snippets only. Analysis/deep requests
-    # may read up to three pages in parallel, but only compact lexical excerpts
-    # enter the model prompt; raw HTML and full pages never do.
     need_pages = bool(deep or _DEEP_WEB_RE.search(question or "") or _URL_RE.search(question or ""))
     if need_pages and unique:
         async def fetch_one(index: int, hit):
