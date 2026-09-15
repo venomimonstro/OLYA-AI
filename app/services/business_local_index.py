@@ -90,6 +90,16 @@ def _connect() -> sqlite3.Connection:
     return db
 
 
+def _mirror_unified(question: str, places: list[MapPlace]) -> None:
+    try:
+        from app.services.local_business_index import persist_places
+        persist_places(question, places)
+    except Exception:
+        # Compatibility cache writes must remain non-fatal even if the newer
+        # unified search store is unavailable/corrupt during an upgrade.
+        return
+
+
 def store_places(question: str, places: list[MapPlace]) -> None:
     if not places:
         return
@@ -122,6 +132,7 @@ def store_places(question: str, places: list[MapPlace]) -> None:
                 """,
                 payload,
             )
+    _mirror_unified(question, places)
 
 
 def load_places(question: str, *, limit: int = 20) -> list[MapPlace]:
