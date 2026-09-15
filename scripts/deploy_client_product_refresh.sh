@@ -12,17 +12,23 @@ python3 -m py_compile \
   app/api/routes/conversations.py \
   app/api/routes/memory.py \
   app/api/routes/admin_chat_observer.py \
+  app/api/routes/smart_chat.py \
+  app/services/clean_web.py \
+  app/services/live_structured_facts.py \
   app/services/long_term_memory.py \
   app/services/memory_write_through.py \
   app/services/project_context.py \
+  app/services/response_strategy.py \
   app/inference/router.py \
+  app/utility_chat.py \
   app/workspace_recovery_controls.py \
   app/workspace_chat_library_v1.py \
   app/task_solver_user_ui.py \
   app/admin_ui.py \
   app/admin_users_ui.py \
   app/admin_chats_ui.py \
-  scripts/client_product_audit.py
+  scripts/client_product_audit.py \
+  scripts/latency_path_audit.py
 bash -n scripts/start_app.sh
 docker compose config --quiet
 
@@ -45,10 +51,13 @@ if [ "$ready" -ne 1 ]; then
   fail "Application did not become healthy"
 fi
 
+info "Running latency-aware answer path audit"
+docker compose exec -T app python -m scripts.latency_path_audit
+
 info "Running focused client/admin/memory audit"
 docker compose exec -T app python -m scripts.client_product_audit
 
 info "Running broad product route/UI audit"
 docker compose exec -T app python -m scripts.product_surface_audit
 
-info "PASSED: client workspace, chat management, memory, long-form routing and owner surfaces are registered"
+info "PASSED: fast answers, search routing, workspace, memory and owner surfaces are registered"
