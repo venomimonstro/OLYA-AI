@@ -16,7 +16,7 @@ from app.services.task_solver import TaskExecution, TaskSolvePlan
 _CBR_XML_URL = "https://www.cbr.ru/scripts/XML_daily.asp"
 _CBR_HTML_URL = "https://www.cbr.ru/currency_base/daily/"
 _CYR = re.compile(r"[А-Яа-яЁё]")
-_RUBLE = re.compile(r"\b(?:rub|руб(?:л(?:ь|я|ей|ю|ем)|\.?|ля|лей)?|₽)\b", re.I)
+_RUBLE = re.compile(r"\b(?:rub|руб(?:л(?:ь|я|ей|ю|ем|и|ях|ями)|\.?|ля|лей)?|₽)\b", re.I)
 _RATE = re.compile(r"\b(?:курс|сколько\s+стоит|цена|exchange\s+rate|rate|стоимост)\w*", re.I)
 _ROW = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.I | re.S)
 _CELL = re.compile(r"<td\b[^>]*>(.*?)</td>", re.I | re.S)
@@ -25,7 +25,7 @@ _TAG = re.compile(r"<[^>]+>")
 _CURRENCY_PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
     ("USD", "доллар США", re.compile(r"\b(?:usd|доллар(?:а|ов|у|ом|ы)?|долл(?:ар)?\.?)\b", re.I)),
     ("EUR", "евро", re.compile(r"\b(?:eur|евро)\b", re.I)),
-    ("CNY", "китайский юань", re.compile(r"\b(?:cny|юан(?:ь|я|ей|ю|ем))\b", re.I)),
+    ("CNY", "китайский юань", re.compile(r"\b(?:cny|юан(?:ь|я|ей|ю|ем|и)?)\b", re.I)),
     ("GBP", "британский фунт", re.compile(r"\b(?:gbp|фунт(?:а|ов|у|ом|ы)?)\b", re.I)),
     ("JPY", "японская иена", re.compile(r"\b(?:jpy|иен(?:а|ы|у|ой|е))\b", re.I)),
     ("CHF", "швейцарский франк", re.compile(r"\b(?:chf|франк(?:а|ов|у|ом|и)?)\b", re.I)),
@@ -62,6 +62,30 @@ def _decimal(text: str) -> Decimal:
     return Decimal(str(text or "").strip().replace("\xa0", "").replace(" ", "").replace(",", "."))
 
 
+def _amount_before(text: str, pattern: re.Pattern[str]) -> Decimal | None:
+    match = pattern.search(text)
+    if match is None:
+        return None
+    prefix = text[:match.start()]
+    number = re.search(r"([+-]?\d[\d\s]*(?:[.,]\d+)?)\s*$", prefix)
+    if number is None:
+        return None
+    try:
+        value = _decimal(number.group(1))
+    except InvalidOperation:
+        return None
+    return value if value > 0 else None
+
+
+def _currency_amounts(question: str) -> tuple[dict[str, Decimal], Decimal | None]:
+    foreign: dict[str, Decimal] = {}
+    for code, _name, pattern in _CURRENCY_PATTERNS:
+        amount = _amount_before(question, pattern)
+        if amount is not None:
+            foreign[code] = amount
+    return foreign, _amount_before(question, _RUBLE)
+
+
 def _date_ru(value: str) -> str:
     match = re.fullmatch(r"(\d{1,2})[./](\d{1,2})[./](\d{4})", str(value or "").strip())
     if not match:
@@ -74,6 +98,52 @@ def _date_ru(value: str) -> str:
 
 def _format_rate(value: Decimal) -> str:
     return f"{value.quantize(Decimal('0.0001')):f}".replace(".", ",")
+
+
+def _format_amount(value: Decimal) -> str:
+    text = f"{value.quantize(Decimal('0.01')):f}".rstrip("0").rstrip(".")
+    return text.replace(".", ",")
+
+
+def _answer(question: str, date_value: str, values: list[CurrencyValue]) -> str:
+    russian = len(_CYR.findall(question)) >= 2
+    foreign_amounts, ruble_amount = _currency_amounts(question)
+    conversions: list[str] = []
+    for item in values:
+        amount = foreign_amounts.get(item.code)
+        if amount is not None:
+            converted = amount * item.unit_rate
+            conversions.append(
+                f"{_format_amount(amount)} {item.code} = {_format_amount(converted)} ₽"
+                if russian else f"{_format_amount(amount)} {item.code} = {_format_amount(converted)} RUB"
+            )
+        elif ruble_amount is not None and item.unit_rate > 0:
+            converted = ruble_amount / item.unit_rate
+            conversions.append(
+                f"{_format_amount(ruble_amount)} ₽ = {_format_amount(converted)} {item.code}"
+                if russian else f"{_format_amount(ruble_amount)} RUB = {_format_amount(converted)} {item.code}"
+            )
+
+    if russian:
+        rates = [f"1 {item.code} = {_format_rate(item.unit_rate)} ₽" for item in values]
+        date_text = _date_ru(date_value) if date_value else "последнюю опубликованную дату"
+        if conversions:
+            return (
+                f"По официальному курсу Банка России на {date_text}: {'; '.join(conversions)}. "
+                f"Расчёт по курсу {'; '.join(rates)}. Курс банка или биржи может отличаться."
+            )
+        return (
+            f"Официальный курс Банка России на {date_text}: {'; '.join(rates)}. "
+            "Это официальный курс ЦБ. Биржевой курс и курс покупки/продажи конкретного банка могут отличаться."
+        )
+
+    rates = [f"1 {item.code} = {item.unit_rate.quantize(Decimal('0.0001'))} RUB" for item in values]
+    if conversions:
+        return (
+            f"Bank of Russia official rate for {date_value or 'the latest published date'}: {'; '.join(conversions)}. "
+            f"Calculated from {'; '.join(rates)}. Bank and market quotes may differ."
+        )
+    return f"Bank of Russia official rate for {date_value or 'the latest published date'}: {'; '.join(rates)}. Bank and market quotes may differ."
 
 
 def _parse_cbr_xml(xml_bytes: bytes, wanted: list[tuple[str, str]]) -> tuple[str, list[CurrencyValue]]:
@@ -121,19 +191,6 @@ def _parse_cbr_html(text: str, wanted: list[tuple[str, str]]) -> tuple[str, list
         except (InvalidOperation, ArithmeticError):
             continue
     return date_value, values
-
-
-def _answer(question: str, date_value: str, values: list[CurrencyValue]) -> str:
-    russian = len(_CYR.findall(question)) >= 2
-    if russian:
-        parts = [f"1 {item.code} = {_format_rate(item.unit_rate)} ₽" for item in values]
-        date_text = _date_ru(date_value) if date_value else "последнюю опубликованную дату"
-        return (
-            f"Официальный курс Банка России на {date_text}: {'; '.join(parts)}. "
-            "Это официальный курс ЦБ. Биржевой курс и курс покупки/продажи конкретного банка могут отличаться."
-        )
-    parts = [f"1 {item.code} = {item.unit_rate.quantize(Decimal('0.0001'))} RUB" for item in values]
-    return f"Bank of Russia official rate for {date_value or 'the latest published date'}: {'; '.join(parts)}. Bank and market quotes may differ."
 
 
 async def _fetch_official_currency(wanted: list[tuple[str, str]]) -> tuple[str, list[CurrencyValue], str] | None:
