@@ -175,7 +175,10 @@ def main() -> int:
     args = parser.parse_args()
 
     path = Path(args.path)
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    # parser-2gis may emit a UTF-8 BOM. utf-8-sig transparently accepts both
+    # BOM-prefixed and ordinary UTF-8 files, so imports do not depend on the
+    # writer/platform used by the parser container.
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(payload, list):
         raise SystemExit("2GIS JSON must contain a list")
 
