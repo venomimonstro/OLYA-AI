@@ -69,9 +69,16 @@ def audit() -> dict:
         errors.append("historical_role_unnecessarily_fresh")
 
     chess = "Что нужно знать чтобы часто побеждать в шахматах?"
-    checks["chess_advice"] = {"web": should_use_web(chess, "auto")}
+    import app.services.clean_web as clean_web
+    advice_reads_pages = bool(clean_web._ADVICE_WEB_RE.search(chess))
+    checks["chess_advice"] = {
+        "web": should_use_web(chess, "auto"),
+        "reads_pages": advice_reads_pages,
+    }
     if not should_use_web(chess, "auto"):
         errors.append("advice_search_not_enabled")
+    if not advice_reads_pages:
+        errors.append("advice_page_reading_not_enabled")
 
     import app.api.routes.smart_chat as smart_chat
     smart_source = inspect.getsource(smart_chat._smart_managed_runner)
