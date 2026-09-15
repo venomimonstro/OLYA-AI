@@ -17,6 +17,7 @@ from app.services.public_maps_discovery import (
     _yandex_from_json,
     _yandex_from_links,
 )
+from app.services.twogis_ssr_discovery import discover_twogis_ssr
 
 
 _CACHE: dict[str, tuple[float, list[MapPlace]]] = {}
@@ -50,6 +51,13 @@ class RussianMapsDiscovery:
             ("2gis", f"https://2gis.ru/{city_slug}/search/{encoded_path}"),
         )
 
+        # The independent 2GIS SSR parser runs concurrently. It covers current
+        # server-rendered pages where firm IDs live in escaped SSR state rather
+        # than the legacy JSON/link shapes handled below.
+        twogis_ssr_task = asyncio.create_task(
+            discover_twogis_ssr(question, timeout_seconds=self.timeout_seconds, limit=12)
+        )
+
         headers = {
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -71,6 +79,7 @@ class RussianMapsDiscovery:
             responses = await asyncio.gather(*(fetch(provider, url) for provider, url in urls))
 
         rows: list[MapPlace] = []
+        legacy_twogis_found = False
         for provider, url, body in responses:
             if not body:
                 continue
@@ -79,7 +88,18 @@ class RussianMapsDiscovery:
                 found = _yandex_from_json(payloads, url) or _yandex_from_links(body, url)
             else:
                 found = _twogis_from_json(payloads, city_slug, url) or _twogis_from_links(body, city_slug, url)
+                legacy_twogis_found = legacy_twogis_found or bool(found)
             rows.extend(found)
+
+        try:
+            ssr_rows = await twogis_ssr_task
+        except Exception:
+            ssr_rows = []
+
+        # Merge both representations. Even when the legacy parser found a few
+        # rows, SSR can contribute current firm URLs/rating metadata.
+        if ssr_rows:
+            rows.extend(ssr_rows)
 
         deduped: list[MapPlace] = []
         seen: set[tuple[str, str]] = set()
@@ -89,7 +109,7 @@ class RussianMapsDiscovery:
                 continue
             seen.add(marker)
             deduped.append(row)
-            if len(deduped) >= 20:
+            if len(deduped) >= 24:
                 break
         _CACHE[key] = (now, list(deduped))
         return deduped
