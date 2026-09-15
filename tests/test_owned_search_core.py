@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import app.services.local_search_store as store_module
 from app.services.local_business_index import discover_local_businesses
+from app.services.local_business_search import resolve_local_business
 from app.services.local_search_discovery import LocalSearchDiscovery
 from app.services.local_search_store import LocalSearchStore
 from app.services.response_completeness import needs_expansion
@@ -23,7 +26,7 @@ class OwnedSearchCoreTests(unittest.IsolatedAsyncioTestCase):
         store_module._STORE = self.previous_store
         self.temp.cleanup()
 
-    async def test_moscow_car_repair_is_found_without_network(self) -> None:
+    def _insert_moscow_car_repair(self) -> None:
         self.store.upsert_business({
             "source_key": "osm:node:1001",
             "source": "osm",
@@ -39,10 +42,26 @@ class OwnedSearchCoreTests(unittest.IsolatedAsyncioTestCase):
             "website": "https://example.test/",
             "confidence": 0.9,
         })
+
+    async def test_moscow_car_repair_is_found_without_network(self) -> None:
+        self._insert_moscow_car_repair()
         rows = discover_local_businesses("лучшие автосервисы в москве", limit=10)
         self.assertTrue(rows)
         self.assertEqual(rows[0].name, "Тест Авто")
         self.assertEqual(rows[0].provider, "osm")
+
+    async def test_full_local_business_resolver_works_offline(self) -> None:
+        self._insert_moscow_car_repair()
+        result = await resolve_local_business(
+            "лучшие автосервисы в москве",
+            object(),
+            allow_external=False,
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertGreater(result.searched, 0)
+        self.assertIn("Тест Авто", result.text)
+        self.assertTrue(any(row.get("provider") == "osm" for row in result.sources))
 
     async def test_owned_page_index_is_a_search_provider(self) -> None:
         self.store.upsert_page(
@@ -54,8 +73,25 @@ class OwnedSearchCoreTests(unittest.IsolatedAsyncioTestCase):
         discovery = LocalSearchDiscovery()
         rows = await discovery.search("ремонт автомобилей москва", count=5, language="ru")
         self.assertTrue(rows)
-        self.assertEqual(rows[0].provider, "olya_local")
+        self.assertEqual(rows[0].provider, "olya_local_index")
         self.assertEqual(rows[0].url, "https://example.test/service")
+
+    async def test_stale_page_does_not_mask_fresh_external_fallback(self) -> None:
+        self.store.upsert_page(
+            url="https://example.test/news",
+            title="Последние новости рынка",
+            description="Последние данные рынка",
+            content="Последние новости рынка и актуальные данные.",
+        )
+        old = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        connection = sqlite3.connect(str(self.store.path))
+        try:
+            connection.execute("UPDATE pages SET fetched_at=? WHERE url=?", (old, "https://example.test/news"))
+            connection.commit()
+        finally:
+            connection.close()
+        rows = await LocalSearchDiscovery().search("последние новости рынка", count=5, language="ru")
+        self.assertEqual(rows, [])
 
     async def test_complex_one_line_answer_fails_completeness_gate(self) -> None:
         question = "Проведи подробный аудит архитектуры проекта, найди слабые места и предложи план улучшений"
