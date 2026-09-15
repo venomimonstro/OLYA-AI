@@ -9,11 +9,13 @@ from app.gigachat31_runtime_patch import install_gigachat31_runtime_patch
 from app.testing_unlimited_usage_patch import install_testing_unlimited_usage_patch
 from app.admin_surface_patch import install_admin_surface_patch
 from app.tester_access_patch import install_tester_access_patch
+from app.temporal_freshness_patch import install_temporal_freshness_patch
 
 install_gigachat31_runtime_patch()
 install_testing_unlimited_usage_patch()
 install_admin_surface_patch()
 install_tester_access_patch()
+install_temporal_freshness_patch()
 
 from app import public_ui as _public_ui
 from app.admin_login_ui import router as _admin_login_router
