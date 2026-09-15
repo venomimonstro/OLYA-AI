@@ -102,6 +102,12 @@ def search_text_from_question(question: str) -> str:
     return " ".join(text.split()).strip()
 
 
+def _city_match(hit: BusinessHit, city: str) -> bool:
+    if not city:
+        return True
+    return hit.city.casefold().replace("ё", "е") == city.casefold().replace("ё", "е")
+
+
 def _hit_to_place(hit: BusinessHit) -> MapPlace:
     source = hit.source if hit.source in {"osm", "yandex_maps", "2gis", "zoon", "yell"} else "local_index"
     card = hit.source_url or hit.website
@@ -121,21 +127,27 @@ def _hit_to_place(hit: BusinessHit) -> MapPlace:
 def discover_local_businesses(question: str, *, limit: int = 12) -> list[MapPlace]:
     store = get_local_search_store()
     city = city_from_question(question)
-    category, category_label = category_from_question(question)
+    category, _category_label = category_from_question(question)
     query = search_text_from_question(question)
+    fetch_limit = max(50, limit * 8)
 
-    # Category is the strongest signal for known verticals; FTS provides fuzzy
-    # name/description matching for unknown wording. Try both paths so queries
-    # such as "лучшие автосервисы Москва" do not depend on exact morphology.
-    hits = store.search_businesses(query, city=city, category=category, limit=limit)
-    if len(hits) < min(5, limit) and category:
-        extra = store.search_businesses(category_label or category, city=city, category=category, limit=limit)
+    # Known verticals are selected by canonical category first. This prevents
+    # morphology from breaking queries such as "лучшие автосервисы Москвы":
+    # the index stores canonical `car_repair`, not every Russian inflection.
+    if category:
+        candidates = store.search_businesses("", category=category, limit=fetch_limit)
+    else:
+        candidates = store.search_businesses(query, limit=fetch_limit)
+    hits = [hit for hit in candidates if _city_match(hit, city)]
+
+    # For unknown categories/named businesses use FTS and then enforce the city
+    # in Python, avoiding SQLite's ASCII-only lower()/NOCASE behaviour for Cyrillic.
+    if len(hits) < min(5, limit) and query:
+        extra = store.search_businesses(query, limit=fetch_limit)
         seen = {item.id for item in hits}
-        hits.extend(item for item in extra if item.id not in seen)
-    if len(hits) < min(5, limit) and city:
-        extra = store.search_businesses(query or category_label, city=city, limit=limit)
-        seen = {item.id for item in hits}
-        hits.extend(item for item in extra if item.id not in seen)
+        hits.extend(item for item in extra if item.id not in seen and _city_match(item, city))
+
+    hits.sort(key=lambda item: (-item.confidence, item.score, item.name.casefold()))
     return [_hit_to_place(hit) for hit in hits[:limit]]
 
 
