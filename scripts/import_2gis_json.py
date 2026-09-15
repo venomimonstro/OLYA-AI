@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,14 @@ _CATEGORY_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 
+@dataclass(frozen=True)
+class LoadReport:
+    items: list[dict[str, Any]]
+    recovered: bool
+    error_offset: int | None
+    trailing_chars: int
+
+
 def _clean(value: Any) -> str:
     return " ".join(str(value or "").split()).strip()
 
@@ -45,6 +54,66 @@ def _first(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _load_recoverable_array(path: Path) -> LoadReport:
+    """Load parser-2gis JSON, salvaging complete records from a truncated tail.
+
+    parser-2gis writes a JSON array incrementally. If Chrome/parser crashes while
+    writing the last card, the whole file becomes invalid even though all earlier
+    objects are complete. We first try strict JSON and, on failure, decode array
+    elements one-by-one and stop only at the first incomplete/corrupt tail.
+    """
+    text = path.read_text(encoding="utf-8-sig")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as strict_error:
+        decoder = json.JSONDecoder()
+        length = len(text)
+        index = 0
+        while index < length and text[index].isspace():
+            index += 1
+        if index >= length or text[index] != "[":
+            raise SystemExit(f"2GIS JSON must start with '['; parse error at char {strict_error.pos}") from strict_error
+        index += 1
+        items: list[dict[str, Any]] = []
+        error_offset: int | None = None
+
+        while index < length:
+            while index < length and (text[index].isspace() or text[index] == ","):
+                index += 1
+            if index >= length or text[index] == "]":
+                break
+            try:
+                value, end = decoder.raw_decode(text, index)
+            except json.JSONDecodeError as exc:
+                error_offset = exc.pos
+                break
+            if isinstance(value, dict):
+                items.append(value)
+            index = end
+
+        if not items:
+            raise SystemExit(
+                f"2GIS JSON is corrupted and no complete records could be recovered; "
+                f"parse error at char {strict_error.pos}"
+            ) from strict_error
+        stop = error_offset if error_offset is not None else index
+        return LoadReport(
+            items=items,
+            recovered=True,
+            error_offset=error_offset if error_offset is not None else strict_error.pos,
+            trailing_chars=max(0, length - stop),
+        )
+
+    if not isinstance(payload, list):
+        raise SystemExit("2GIS JSON must contain a list")
+    return LoadReport(
+        items=[item for item in payload if isinstance(item, dict)],
+        recovered=False,
+        error_offset=None,
+        trailing_chars=0,
+    )
 
 
 def _contacts(item: dict[str, Any]) -> tuple[str, str, str]:
@@ -175,20 +244,12 @@ def main() -> int:
     args = parser.parse_args()
 
     path = Path(args.path)
-    # parser-2gis may emit a UTF-8 BOM. utf-8-sig transparently accepts both
-    # BOM-prefixed and ordinary UTF-8 files, so imports do not depend on the
-    # writer/platform used by the parser container.
-    payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    if not isinstance(payload, list):
-        raise SystemExit("2GIS JSON must contain a list")
+    report = _load_recoverable_array(path)
 
     store = get_local_search_store()
     written = skipped = 0
     category_counts: dict[str, int] = {}
-    for item in payload:
-        if not isinstance(item, dict):
-            skipped += 1
-            continue
+    for item in report.items:
         record = _record(item, city=args.city, category_override=args.category)
         if not record:
             skipped += 1
@@ -204,6 +265,10 @@ def main() -> int:
 
     print(json.dumps({
         "source": str(path),
+        "input_records": len(report.items),
+        "recovered_truncated_json": report.recovered,
+        "json_error_offset": report.error_offset,
+        "trailing_chars_ignored": report.trailing_chars,
         "written": written,
         "skipped": skipped,
         "categories": category_counts,
