@@ -84,7 +84,7 @@ def _structured_metadata(execution) -> dict:
 
 def _local_business_metadata(execution) -> dict:
     sources = list(getattr(execution, "sources", []) or [])[:10]
-    return {"kind": "local_business", "web_used": True, "searched_results": int(getattr(execution, "searched", len(sources)) or len(sources)), "fetched_sources": len(sources), "failed_fetches": 0, "sources": sources, "warnings": [] if sources else ["Карточки компаний не удалось подтвердить"], "steps": ["Проверяю локальный индекс OLYA", "При необходимости проверяю OpenStreetMap, Яндекс, 2ГИС, Zoon и Yell", "Возвращаю подтверждённые организации"]}
+    return {"kind": "local_business", "web_used": False, "searched_results": int(getattr(execution, "searched", len(sources)) or len(sources)), "fetched_sources": len(sources), "failed_fetches": 0, "sources": sources, "warnings": [] if sources else ["Локальный каталог пока не содержит подходящих организаций"], "steps": ["Проверяю собственный индекс OLYA", "При необходимости использую внешнее обогащение", "Возвращаю подтверждённые организации"]}
 
 
 def _instant_metadata(kind: str, *, cached: bool = False) -> dict:
@@ -125,8 +125,6 @@ def _repair_is_better(question: str, original: str, candidate: str) -> bool:
         return False
     if not needs_expansion(question, candidate):
         return True
-    # Small local models can miss one mechanical threshold by a few characters.
-    # Accept only a material improvement, never a cosmetic sentence append.
     minimum_growth = max(180, int(len(original) * 0.60))
     return len(candidate) - len(original) >= minimum_growth and len(candidate) >= 360
 
@@ -152,9 +150,15 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
                 result = _persist_fast_answer(db=job_db, request=request, user=job_user, payload=payload, job=job, text=answer, mode="structured_fact", started=started, task_execution=_structured_metadata(execution))
                 await job.token(answer); return result
 
-        if payload.web_mode != "off" and is_local_business_question(question):
-            job._publish_nowait("status", {"state": "lookup", "message": "Проверяю локальный индекс и источники компаний…", "task_kind": "local_business"})
-            execution = await resolve_local_business(question, request.app.state.discovery)
+        # Owned geo search is local storage, not "the web". Keep it available
+        # even when the user disables external internet access.
+        if is_local_business_question(question):
+            job._publish_nowait("status", {"state": "lookup", "message": "Ищу в локальном каталоге OLYA…", "task_kind": "local_business"})
+            execution = await resolve_local_business(
+                question,
+                request.app.state.discovery,
+                allow_external=payload.web_mode != "off",
+            )
             if execution is not None:
                 result = _persist_fast_answer(db=job_db, request=request, user=job_user, payload=payload, job=job, text=execution.text, mode="local_business", started=started, task_execution=_local_business_metadata(execution))
                 await job.token(execution.text); return result
