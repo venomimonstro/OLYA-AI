@@ -24,7 +24,6 @@ def enhance_recovery_controls(document: str) -> str:
 .olya-stop-button{width:36px;height:36px;min-width:36px;border:0;border-radius:50%;background:#efefef;color:#222;display:none;place-items:center;font:14px/1 system-ui;cursor:pointer;margin-left:5px}
 .olya-stop-button.show{display:grid}.olya-stop-button:hover{background:#e4e4e5}.olya-stop-button:active{transform:scale(.94)}
 #send.stop,#send.olya-current-running{pointer-events:none!important;background:#18181b!important;color:#fff!important}
-/* Disable the old premium blinking rectangle. */
 .assistant.olya-premium-live .bubble:after{display:none!important;content:none!important}
 .olya-thinking-row{max-width:760px;margin:0 auto 22px;display:none;align-items:center;gap:10px;color:#62626b;animation:olyaThinkIn .16s ease-out}
 .olya-thinking-row.show{display:flex}.olya-thinking-orb{width:26px;height:26px;min-width:26px;border-radius:50%;position:relative;background:#f0f0f2;display:grid;place-items:center;overflow:hidden}
@@ -55,7 +54,7 @@ def enhance_recovery_controls(document: str) -> str:
   function labelForState(){const t=((state&&state.textContent)||'').toLowerCase();if(/очеред|слот|ресурс/.test(t))return 'Жду вычислительный слот';if(/источник|ищу|поиск|актуальн|данн/.test(t))return 'Ищу и проверяю источники';if(/факт|проверяю/.test(t))return 'Проверяю факт';if(/собран|формир|готовлю/.test(t))return 'Формирую ответ';return 'Думаю над ответом'}
   function startTimer(){if(timer)return;thinkingStarted=performance.now();timer=setInterval(()=>{const sec=Math.max(0,(performance.now()-thinkingStarted)/1000);elapsed.textContent=sec.toFixed(1).replace('.',',')+' с'},100)}
   function stopTimer(){if(timer){clearInterval(timer);timer=0}elapsed.textContent='0,0 с'}
-  function moveThinkingToEnd(){if(thinking.parentNode===messages)messages.append(thinking)}
+  function moveThinkingToEnd(){if(thinking.parentNode!==messages||messages.lastElementChild!==thinking)messages.append(thinking)}
   function syncThinking(){const show=running()&&!liveHasText();label.textContent=labelForState();thinking.classList.toggle('show',show);if(show){moveThinkingToEnd();startTimer()}else stopTimer()}
   function syncStop(){const on=running();stop.classList.toggle('show',on);send.title=on?'Ответ формируется':'Отправить';send.setAttribute('aria-label',on?'Ответ формируется':'Отправить');send.textContent='↑';syncThinking()}
   stop.onclick=()=>{if(!running())return;bypass=true;send.style.pointerEvents='auto';try{send.click()}finally{bypass=false;send.style.pointerEvents=''}};
