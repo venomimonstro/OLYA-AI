@@ -13,12 +13,11 @@ _DECISION = re.compile(r"\b(?:что\s+лучше|что\s+выбрать|сто
 _TECHNICAL = re.compile(r"\b(?:архитектур|сервер|база\s+данных|api\b|индекс|поиск|llm\b|нейросет|код|разработ|реализ|интеграц|оптимизац|безопасност|масштаб)\b", re.I)
 _RESEARCH = re.compile(r"\b(?:исслед|рынок|конкурент|тренд|актуальн|сейчас|сегодня|последн|рейтинг|отзыв|цена|стоимост|характеристик)\b", re.I)
 _LIST_MARKER = re.compile(r"(?:^|\n)\s*(?:[-*•]|\d+[.)])\s+", re.M)
-_HEADING = re.compile(r"(?:^|\n)\s*(?:#{1,4}\s+|[^\n:]{3,80}:\s*$)", re.M)
 _GENERIC_FILLER = re.compile(r"\b(?:конечно|безусловно|важно\s+отметить|стоит\s+отметить|в\s+целом|следует\s+отметить|как\s+мы\s+видим|на\s+самом\s+деле)\b", re.I)
 _REASON_WORDS = re.compile(r"\b(?:потому\s+что|поскольку|причин|это\s+да[её]т|за\s+сч[её]т|означает|поэтому|следовательно|почему)\b", re.I)
 _LIMIT_WORDS = re.compile(r"\b(?:огранич|риск|минус|недостат|но\b|однако|зависит|исключени|оговорк|компромисс|trade[- ]?off)\b", re.I)
-_ACTION_WORDS = re.compile(r"\b(?:следующ|сделать|проверь|начать|использ|настро|выбрать|рекоменд|шаг|действ|попроб|сравнить)\b", re.I)
-_SPECIFICITY = re.compile(r"(?:\d|\bнапример\b|\bесли\b|\bкритери|\bметрик|\bпорог|\bвариант|\bсценар|\bархитектур|\bкомпонент|\bэтап)", re.I)
+_ACTION_WORDS = re.compile(r"\b(?:следующ|сделать|проверь|начать|использ|настро|выбрать|рекоменд|шаг|действ|попроб|сравнить|измер)\b", re.I)
+_SPECIFICITY = re.compile(r"(?:\d|\bнапример\b|\bесли\b|\bкритери|\bметрик|\bпорог|\bвариант|\bсценар|\bархитектур|\bкомпонент|\bэтап|\bendpoint|\bttl\b|\bredis\b)", re.I)
 
 
 @dataclass(frozen=True)
@@ -26,7 +25,6 @@ class AnswerContract:
     min_chars: int
     min_sentences: int = 1
     min_list_items: int = 0
-    min_sections: int = 0
     require_conclusion: bool = False
     require_reasoning: bool = False
     require_limitations: bool = False
@@ -46,26 +44,26 @@ def contract_for(question: str) -> AnswerContract:
 
     if complex_request and (technical or decision or research or len(q) >= 140):
         return AnswerContract(
-            1050, min_sentences=7, min_sections=2, require_conclusion=True,
+            900, min_sentences=7, require_conclusion=True,
             require_reasoning=True, require_limitations=True, require_action=True, require_specificity=True,
         )
     if complex_request:
         return AnswerContract(
-            760, min_sentences=5, min_sections=1, require_conclusion=decision,
+            700, min_sentences=5, require_conclusion=decision,
             require_reasoning=True, require_action=True, require_specificity=True,
         )
     if list_request:
-        return AnswerContract(620, min_sentences=4, min_list_items=4, require_specificity=True)
+        return AnswerContract(560, min_sentences=4, min_list_items=4, require_specificity=True)
     if decision:
         return AnswerContract(
-            700, min_sentences=5, require_conclusion=True,
+            650, min_sentences=5, require_conclusion=True,
             require_reasoning=True, require_limitations=True, require_action=True,
         )
     if len(q) >= 220:
-        return AnswerContract(600, min_sentences=4, require_reasoning=True, require_specificity=True)
+        return AnswerContract(560, min_sentences=4, require_reasoning=True, require_specificity=True)
     if _ATOMIC.search(q) and len(q) <= 90:
         return AnswerContract(80)
-    return AnswerContract(340, min_sentences=3, require_specificity=True)
+    return AnswerContract(320, min_sentences=3, require_specificity=True)
 
 
 def minimum_chars(question: str) -> int:
@@ -77,7 +75,6 @@ def guidance_message(question: str) -> ChatMessage | None:
     contract = contract_for(q)
     if contract.min_chars <= 80 or _EXPLICIT_SHORT.search(q):
         return None
-
     parts = [
         "Начни с прямого ответа/вывода. Не трать первые абзацы на приветствие, пересказ вопроса или общие слова.",
         "Работай как сильный профильный специалист: сначала пойми практическую цель пользователя, затем отвечай именно на неё.",
@@ -85,7 +82,7 @@ def guidance_message(question: str) -> ChatMessage | None:
         "Давай конкретику: критерии, числа из проверенных данных, сценарии, примеры, архитектуру или последовательность действий — в зависимости от задачи.",
         "Отделяй подтверждённый факт от вывода и предположения. Не придумывай факты, цифры, источники или проверки ради убедительности.",
         "Если в WEB EVIDENCE есть актуальные данные, синтезируй их в собственный ответ, а не пересказывай выдачу.",
-        "Пиши естественно и плотно. Не имитируй канцелярский отчёт и не используй шаблонные фразы генеративной модели.",
+        "Пиши естественно и плотно. Заголовки используй только когда они реально улучшают читаемость; хороший связный ответ без заголовков тоже допустим.",
     ]
     if _COMPLEX.search(q):
         parts.append("Для анализа раскрой минимум три независимых содержательных аспекта, затем свяжи их в единый практический вывод.")
@@ -97,13 +94,7 @@ def guidance_message(question: str) -> ChatMessage | None:
         parts.append("Для технической задачи дай рабочую схему: компоненты, поток данных/алгоритм, отказоустойчивость или ограничения и способ проверить результат.")
     if _RESEARCH.search(q):
         parts.append("Для актуальной/исследовательской задачи используй найденные данные для проверки тезисов и явно не выдавай устаревшее знание за текущий факт.")
-    return ChatMessage(
-        role="system",
-        content=(
-            "OLYA QUALITY CONTRACT: " + " ".join(parts)
-            + f" Для этого запроса ожидается содержательный ответ порядка {contract.min_chars}+ символов, если пользователь не просил краткость."
-        ),
-    )
+    return ChatMessage(role="system", content="OLYA QUALITY CONTRACT: " + " ".join(parts))
 
 
 def _sentence_count(text: str) -> int:
@@ -126,17 +117,13 @@ def needs_expansion(question: str, answer: str) -> bool:
         return True
     if contract.min_chars <= 80 and (re.fullmatch(r"[\d\s.,%+\-—–₽$€]+", flat) or flat.casefold() in {"да", "нет", "yes", "no"}):
         return False
-
     sentences = _sentence_count(text)
     list_items = len(_LIST_MARKER.findall(text))
-    sections = len(_HEADING.findall(text))
     if len(flat) < contract.min_chars:
         return True
     if sentences < contract.min_sentences:
         return True
     if contract.min_list_items and list_items < contract.min_list_items and sentences < contract.min_list_items + 2:
-        return True
-    if contract.min_sections and sections < contract.min_sections and sentences < contract.min_sentences + 2:
         return True
     if contract.require_conclusion and not _has_conclusion(text):
         return True
@@ -148,11 +135,8 @@ def needs_expansion(question: str, answer: str) -> bool:
         return True
     if contract.require_specificity and not _SPECIFICITY.search(flat):
         return True
-
-    if _COMPLEX.search(q):
-        opening = flat[:420]
-        if len(_GENERIC_FILLER.findall(opening)) >= 2:
-            return True
+    if _COMPLEX.search(q) and len(_GENERIC_FILLER.findall(flat[:420])) >= 2:
+        return True
     return False
 
 
@@ -173,17 +157,16 @@ def expansion_messages(question: str, answer: str) -> list[ChatMessage]:
         requirements.append("конкретный следующий шаг")
     if contract.require_specificity:
         requirements.append("конкретика: критерий, пример, сценарий, число из источников или техническая деталь")
-
     return [
         ChatMessage(
             role="system",
             content=(
                 "Ты финальный редактор OLYA AI. Текущий текст — черновик. Верни только улучшенный готовый ответ на языке пользователя. "
-                "Сохрани все подтверждённые факты и полезную конкретику черновика и WEB EVIDENCE, но исправь поверхностность, пропуски и слабую структуру. "
-                "Сначала ответь на реальную задачу пользователя одним ясным выводом. Затем объясни почему: покажи причинно-следственные связи, критерии и существенные альтернативы. "
+                "Сохрани подтверждённые факты и полезную конкретику черновика и WEB EVIDENCE, но исправь поверхностность, пропуски и слабую структуру. "
+                "Сначала ответь на реальную задачу пользователя ясным выводом. Затем объясни почему: покажи причинно-следственные связи, критерии и существенные альтернативы. "
                 "Добавь конкретные примеры/сценарии/шаги там, где они помогают применить ответ. Для решений укажи риски и компромиссы. "
-                "Если данных для уверенного утверждения нет, честно отдели известное от предположения; ничего не выдумывай. "
-                "Не используй пустые вступления, саморекламу, фразы «как ИИ», шаблонный тон, повторение вопроса или одинаковые выводы в каждом разделе. "
+                "Если данных для уверенного утверждения нет, отдели известное от предположения; ничего не выдумывай. "
+                "Не используй пустые вступления, саморекламу, шаблонный тон или повторение вопроса. "
                 "Требования: " + "; ".join(requirements) + "."
             ),
         ),
