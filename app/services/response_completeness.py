@@ -13,6 +13,10 @@ _DECISION = re.compile(r"\b(?:что\s+лучше|что\s+выбрать|сто
 _TECHNICAL = re.compile(r"\b(?:архитектур|сервер|база\s+данных|api\b|индекс|поиск|llm\b|нейросет|код|разработ|реализ|интеграц|оптимизац|безопасност|масштаб)\b", re.I)
 _LIST_MARKER = re.compile(r"(?:^|\n)\s*(?:[-*•]|\d+[.)])\s+", re.M)
 _HEADING = re.compile(r"(?:^|\n)\s*(?:#{1,4}\s+|[^\n:]{3,80}:\s*$)", re.M)
+_GENERIC_FILLER = re.compile(
+    r"\b(?:конечно|безусловно|важно\s+отметить|стоит\s+отметить|в\s+целом|следует\s+отметить|как\s+мы\s+видим)\b",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -33,21 +37,19 @@ def contract_for(question: str) -> AnswerContract:
     decision = bool(_DECISION.search(q))
     technical = bool(_TECHNICAL.search(q))
 
-    # Multi-part / professional questions should never collapse to a one-line
-    # answer even if the model itself decides to be terse.
     if complex_request and (technical or decision or len(q) >= 140):
-        return AnswerContract(700, min_sentences=5, min_list_items=0, min_sections=2, require_conclusion=True)
+        return AnswerContract(900, min_sentences=6, min_sections=2, require_conclusion=True)
     if complex_request:
-        return AnswerContract(560, min_sentences=4, min_sections=1, require_conclusion=decision)
+        return AnswerContract(650, min_sentences=5, min_sections=1, require_conclusion=decision)
     if list_request:
-        return AnswerContract(480, min_sentences=4, min_list_items=4)
+        return AnswerContract(550, min_sentences=4, min_list_items=4)
     if decision:
-        return AnswerContract(500, min_sentences=4, require_conclusion=True)
+        return AnswerContract(600, min_sentences=4, require_conclusion=True)
     if len(q) >= 220:
-        return AnswerContract(460, min_sentences=3)
+        return AnswerContract(520, min_sentences=4)
     if _ATOMIC.search(q) and len(q) <= 90:
         return AnswerContract(80)
-    return AnswerContract(240, min_sentences=2)
+    return AnswerContract(280, min_sentences=2)
 
 
 def minimum_chars(question: str) -> int:
@@ -59,17 +61,30 @@ def guidance_message(question: str) -> ChatMessage | None:
     contract = contract_for(q)
     if contract.min_chars <= 80 or _EXPLICIT_SHORT.search(q):
         return None
-    parts: list[str] = []
+
+    parts = [
+        "Начни с прямого ответа или вывода, а не с приветствия, пересказа вопроса или фразы «Конечно».",
+        "Пиши как сильный профильный специалист: естественно, конкретно и без шаблонного нейросетевого тона.",
+        "Каждый крупный тезис должен либо объяснять почему, либо давать полезную конкретику, критерий, пример, ограничение или следующий шаг.",
+        "Не растягивай текст повторениями и вводными фразами. Структуру используй только там, где она делает ответ понятнее.",
+    ]
     if _COMPLEX.search(q):
-        parts.append("Для анализа, совета или сравнения раскрой минимум три содержательных аспекта и дай практический вывод.")
+        parts.append("Для анализа, совета или сравнения раскрой минимум три содержательных аспекта и свяжи их с практическим выводом.")
     if _LIST_REQUEST.search(q):
-        parts.append("Если запрошены варианты, топ, примеры или шаги, дай несколько действительно разных пунктов.")
+        parts.append("Если запрошены варианты, топ, примеры или шаги, дай несколько действительно разных пунктов и поясни различия между ними.")
     if _DECISION.search(q):
-        parts.append("Если пользователь принимает решение, назови рекомендуемый вариант и объясни критерии выбора, риски и следующий шаг.")
+        parts.append("Если пользователь принимает решение, назови рекомендуемый вариант, критерии выбора, существенные риски и следующий шаг.")
     if _TECHNICAL.search(q):
-        parts.append("Для технического запроса покажи решение, ключевые компоненты/шаги и ограничения, а не только общий тезис.")
-    parts.append("Не отвечай одной строкой на многосоставной запрос. Пиши плотно, без воды и повторов, не выдумывай факты ради объёма.")
-    return ChatMessage(role="system", content="RESPONSE COMPLETENESS: " + " ".join(parts) + f" Ориентир содержательности: около {contract.min_chars}+ символов, если вопрос требует раскрытия.")
+        parts.append("Для технического запроса дай рабочую архитектуру/алгоритм, ключевые компоненты, ограничения и способ проверки результата.")
+    parts.append("Не выдумывай факты, цифры или проверки ради убедительности. Если данных недостаточно, отдели факт от предположения.")
+    return ChatMessage(
+        role="system",
+        content=(
+            "OLYA RESPONSE QUALITY: "
+            + " ".join(parts)
+            + f" Ориентир содержательности: около {contract.min_chars}+ символов, если вопрос действительно требует раскрытия."
+        ),
+    )
 
 
 def _sentence_count(text: str) -> int:
@@ -86,12 +101,13 @@ def needs_expansion(question: str, answer: str) -> bool:
     contract = contract_for(q)
     if contract.min_chars <= 0:
         return False
-    text = str(answer or '').strip()
+    text = str(answer or "").strip()
     flat = " ".join(text.split())
     if not flat:
         return True
     if contract.min_chars <= 80 and (re.fullmatch(r"[\d\s.,%+\-—–₽$€]+", flat) or flat.casefold() in {"да", "нет", "yes", "no"}):
         return False
+
     sentences = _sentence_count(text)
     list_items = len(_LIST_MARKER.findall(text))
     sections = len(_HEADING.findall(text))
@@ -105,6 +121,14 @@ def needs_expansion(question: str, answer: str) -> bool:
         return True
     if contract.require_conclusion and not _has_conclusion(text):
         return True
+
+    # A long answer can still be low quality if most of its opening is generic
+    # filler. Trigger one editorial repair for complex requests in that case.
+    if _COMPLEX.search(q):
+        opening = flat[:360]
+        filler_hits = len(_GENERIC_FILLER.findall(opening))
+        if filler_hits >= 3:
+            return True
     return False
 
 
@@ -117,14 +141,19 @@ def expansion_messages(question: str, answer: str) -> list[ChatMessage]:
         requirements.append(f"не менее {contract.min_list_items} вариантов/пунктов, если это соответствует запросу")
     if contract.require_conclusion:
         requirements.append("явный практический вывод или рекомендация")
+
     return [
-        ChatMessage(role="system", content=(
-            "Ты финальный редактор OLYA AI. Текущий ответ недостаточно полный или структурный для запроса. "
-            "Верни только улучшенный готовый ответ на языке пользователя. Сохрани правильные факты текущего ответа, "
-            "не добавляй выдуманные факты, числа, ссылки или проверки. Дай прямой вывод и достаточное объяснение. "
-            "Если запрос предполагает анализ, сравнение или рекомендацию, раскрой минимум 3 содержательных аспекта. "
-            "Если запрос технический, дай конкретное решение/архитектуру/шаги и ограничения. "
-            "Требования качества: " + "; ".join(requirements) + ". Без воды и искусственного растягивания."
-        )),
+        ChatMessage(
+            role="system",
+            content=(
+                "Ты финальный редактор OLYA AI. Перепиши ответ так, чтобы он выглядел как работа сильного профильного специалиста, а не шаблон генеративной модели. "
+                "Верни только готовый ответ на языке пользователя. Сохрани правильные факты исходного ответа и не добавляй выдуманные цифры, ссылки или проверки. "
+                "Начни с сути. Затем объясни причины и критерии. Добавь конкретный пример, сравнение, ограничение или следующий шаг там, где это реально помогает. "
+                "Не используй пустые вступления вроде «Конечно», «Важно отметить», «В целом». Не повторяй одну мысль разными словами. "
+                "Если запрос предполагает анализ, сравнение или рекомендацию, раскрой минимум три содержательных аспекта и закончи практическим выводом. "
+                "Если запрос технический, дай рабочее решение/архитектуру/шаги, ограничения и способ проверки. "
+                "Требования качества: " + "; ".join(requirements) + ". Пиши плотно, естественно и по делу."
+            ),
+        ),
         ChatMessage(role="user", content=f"ЗАПРОС:\n{question[:2600]}\n\nНЕДОСТАТОЧНЫЙ ОТВЕТ:\n{answer[:5500]}"),
     ]
