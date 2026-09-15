@@ -32,7 +32,8 @@ python3 -m py_compile \
   scripts/latency_path_audit.py \
   scripts/real_user_scenarios.py \
   scripts/real_user_routing_audit.py \
-  scripts/real_user_live_simulation_100.py
+  scripts/real_user_live_simulation_100.py \
+  scripts/real_user_simulation_orchestrator.py
 bash -n scripts/start_app.sh
 bash -n scripts/run_real_user_simulation_100.sh
 docker compose config --quiet
