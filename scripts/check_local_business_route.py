@@ -1,23 +1,26 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
-import sys
 from time import perf_counter
 
 from app.core.config import get_settings
-from app.services.discovery import BraveSearchDiscovery, DisabledDiscovery, ProviderPoolDiscovery
+from app.services.discovery import BraveSearchDiscovery, ProviderPoolDiscovery
 from app.services.local_business_search import is_local_business_question, resolve_local_business
+from app.services.local_search_discovery import LocalSearchDiscovery
 from app.services.searxng_discovery import SearxngDiscovery
 
 
-def _discovery():
+def _discovery(*, offline: bool):
+    providers: list[object] = [LocalSearchDiscovery()]
+    if offline:
+        return ProviderPoolDiscovery(providers)
     settings = get_settings()
     configured = [
         item.strip().lower()
         for item in (settings.search_providers or settings.search_provider).split(",")
         if item.strip()
     ]
-    providers = []
     for name in configured:
         if name == "searxng":
             providers.append(
@@ -33,12 +36,17 @@ def _discovery():
                     timeout_seconds=settings.search_timeout_seconds,
                 )
             )
-    return ProviderPoolDiscovery(providers) if providers else DisabledDiscovery()
+    return ProviderPoolDiscovery(providers)
 
 
 async def main() -> int:
-    query = " ".join(sys.argv[1:]).strip() or "лучший сервис москвы"
+    parser = argparse.ArgumentParser(description="Check the exact OLYA local-business resolver path.")
+    parser.add_argument("query", nargs="*", default=[])
+    parser.add_argument("--offline", action="store_true", help="Use only OLYA's owned local index; no external providers")
+    args = parser.parse_args()
+    query = " ".join(args.query).strip() or "лучшие автосервисы в москве"
     print("query:", query)
+    print("offline:", args.offline)
     intent = is_local_business_question(query)
     print("local_business_intent:", intent)
     if not intent:
@@ -46,9 +54,13 @@ async def main() -> int:
         return 3
 
     started = perf_counter()
-    result = await resolve_local_business(query, _discovery())
+    result = await resolve_local_business(
+        query,
+        _discovery(offline=args.offline),
+        allow_external=not args.offline,
+    )
     elapsed = perf_counter() - started
-    print(f"elapsed: {elapsed:.2f}s")
+    print(f"elapsed: {elapsed:.3f}s")
     if result is None:
         print("ERROR: resolver returned None")
         return 4
