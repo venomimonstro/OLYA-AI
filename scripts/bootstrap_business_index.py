@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import argparse
 import gzip
-import io
 import sys
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from pathlib import Path
 
 from app.services.business_local_index import index_stats, store_places
 from app.services.public_maps_discovery import MapPlace
@@ -75,7 +75,7 @@ def _place(element_type: str, element_id: int, tags: dict[str, str]) -> MapPlace
     return MapPlace(provider="osm", name=name, card_url=card, address=_address(tags), phone=phone, website=website, source_url=card)
 
 
-def _parse_stream(stream, city: str) -> dict[str, list[MapPlace]]:
+def _parse_stream(stream) -> dict[str, list[MapPlace]]:
     grouped: dict[str, list[MapPlace]] = defaultdict(list)
     seen: set[tuple[str, str]] = set()
     for _event, elem in ET.iterparse(stream, events=("end",)):
@@ -99,17 +99,36 @@ def _parse_stream(stream, city: str) -> dict[str, list[MapPlace]]:
     return grouped
 
 
-def bootstrap(city: str) -> int:
-    url = CITY_EXTRACTS.get(city)
-    if not url:
-        print(f"unsupported city: {city}")
-        return 2
+def _parse_local(path: Path) -> dict[str, list[MapPlace]]:
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if path.suffix.casefold() == ".gz":
+        with gzip.open(path, "rb") as stream:
+            return _parse_stream(stream)
+    with path.open("rb") as stream:
+        return _parse_stream(stream)
+
+
+def _parse_remote(url: str) -> dict[str, list[MapPlace]]:
     request = urllib.request.Request(url, headers={"User-Agent": "OLYA-AI/1.0 OSM offline index bootstrap"})
-    print("download:", url)
+    with urllib.request.urlopen(request, timeout=60) as response:
+        with gzip.GzipFile(fileobj=response) as stream:
+            return _parse_stream(stream)
+
+
+def bootstrap(city: str, local_file: str = "") -> int:
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            with gzip.GzipFile(fileobj=response) as gz:
-                grouped = _parse_stream(gz, city)
+        if local_file:
+            path = Path(local_file).expanduser().resolve()
+            print("source-file:", path)
+            grouped = _parse_local(path)
+        else:
+            url = CITY_EXTRACTS.get(city)
+            if not url:
+                print(f"unsupported city: {city}")
+                return 2
+            print("download:", url)
+            grouped = _parse_remote(url)
     except Exception as exc:
         print(f"bootstrap failed: {type(exc).__name__}: {exc}")
         return 3
@@ -127,8 +146,9 @@ def bootstrap(city: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--city", default="москва")
+    parser.add_argument("--file", default="", help="Local .osm or .osm.gz file; skips network download")
     args = parser.parse_args()
-    return bootstrap(args.city.casefold().strip())
+    return bootstrap(args.city.casefold().strip(), args.file.strip())
 
 
 if __name__ == "__main__":
