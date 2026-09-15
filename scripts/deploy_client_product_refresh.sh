@@ -37,9 +37,6 @@ bash -n scripts/start_app.sh
 bash -n scripts/run_real_user_simulation_100.sh
 docker compose config --quiet
 
-info "Running static 100-user routing simulation before restart"
-python3 -m scripts.real_user_routing_audit
-
 info "Rebuilding application only; llama.cpp/search/database stay running"
 docker compose up -d --build --force-recreate app
 
