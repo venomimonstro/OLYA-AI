@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import quote, quote_plus, urlsplit
 
+from app.services.business_local_index import load_places, store_places
 from app.services.discovery import DiscoveryError, SearchHit, canonical_result_url
 from app.services.indexed_business_discovery import discover_indexed_businesses
 from app.services.osm_business_discovery import discover_osm_businesses
@@ -16,59 +17,17 @@ from app.services.yandex_medicine_discovery import discover_yandex_medicine, is_
 from app.services.yell_discovery import discover_yell
 from app.services.zoon_discovery import discover_zoon
 
-
-_SELECTION_RE = re.compile(
-    r"\b(?:лучши\w*|топ|рейтинг\w*|найди\w*|найти|подбер\w*|посовет\w*|порекоменду\w*|"
-    r"рекоменду\w*|покажи\w*|выбер\w*|выбрать)\b",
-    re.I,
-)
-_LOCATION_RE = re.compile(
-    r"\b(?:в|во|рядом|поблизости|около)\s+[а-яёa-z][а-яёa-z-]{2,}(?:\s+[а-яёa-z][а-яёa-z-]{2,}){0,2}\b",
-    re.I,
-)
-_CITY_MENTION_RE = re.compile(
-    r"\b(?:москв\w*|санкт[-\s]?петербург\w*|петербург\w*|спб|казан\w*|екатеринбург\w*|"
-    r"новосибирск\w*|самар\w*|челябинск\w*|красноярск\w*|тюмен\w*|уф\w*|перм\w*|сочи|"
-    r"калининград\w*|воронеж\w*|краснодар\w*|омск\w*|нижн\w*\s+новгород\w*|ростов\w*(?:-на-дону)?)\b",
-    re.I,
-)
-_LOCAL_ACTION_RE = re.compile(
-    r"\b(?:отзыв\w*|цен\w*|стоимост\w*|адрес\w*|телефон\w*|контакт\w*|рядом|недорог\w*|"
-    r"где\s+(?:найти|купить|заказать|обратиться)|куда\s+обратиться)\b",
-    re.I,
-)
-_BUSINESS_GENERIC_RE = re.compile(
-    r"\b(?:компани\w*|фирм\w*|сервис\w*|автосервис\w*|центр\w*|клиник\w*|магазин\w*|салон\w*|"
-    r"студи\w*|агентств\w*|школ\w*|курс\w*|ресторан\w*|кафе|бар\w*|отел\w*|гостиниц\w*|"
-    r"юрист\w*|адвокат\w*|нотариус\w*|фитнес\w*|спортзал\w*|ремонт\w*|мастер\w*|доставк\w*|"
-    r"пекар\w*|цветоч\w*|мебел\w*|стоматолог\w*|аптек\w*|лаборатор\w*|ветеринар\w*|"
-    r"страхов\w*|банк\w*|риелтор\w*|риэлтор\w*|строител\w*|типограф\w*|ателье\w*|"
-    r"химчист\w*|шиномонтаж\w*|автомойк\w*|детейлинг\w*|слухопротезирован\w*)\b",
-    re.I,
-)
-_NON_BUSINESS_LOCAL_RE = re.compile(
-    r"\b(?:погод\w*|район\w*|улиц\w*|проспект\w*|метро\b|маршрут\w*|населени\w*|"
-    r"мэр\w*|губернатор\w*|новост\w*|истори\w*|экономик\w*|достопримечательност\w*|"
-    r"что\s+посмотреть|куда\s+сходить|прогул\w*)\b",
-    re.I,
-)
-_MEDICAL_RE = re.compile(
-    r"\b(?:медицин\w*|клиник\w*|стоматолог\w*|врач\w*|доктор\w*|сурдолог\w*|"
-    r"слухопротезирован\w*|слухов\w+\s+аппарат\w*|лаборатор\w*|диагност\w*)\b",
-    re.I,
-)
-_GENERIC_TITLE = re.compile(
-    r"\b(?:яндекс\s*карты|yandex\s*maps|яндекс\s*медицина|2гис|2gis|zoon|зун|yell|"
-    r"openstreetmap|osm|карты|maps|официальный\s*сайт|отзывы|адрес|телефон|москва|moscow)\b",
-    re.I,
-)
+_SELECTION_RE = re.compile(r"\b(?:лучши\w*|топ|рейтинг\w*|найди\w*|найти|подбер\w*|посовет\w*|порекоменду\w*|рекоменду\w*|покажи\w*|выбер\w*|выбрать)\b", re.I)
+_LOCATION_RE = re.compile(r"\b(?:в|во|рядом|поблизости|около)\s+[а-яёa-z][а-яёa-z-]{2,}(?:\s+[а-яёa-z][а-яёa-z-]{2,}){0,2}\b", re.I)
+_CITY_MENTION_RE = re.compile(r"\b(?:москв\w*|санкт[-\s]?петербург\w*|петербург\w*|спб|казан\w*|екатеринбург\w*|новосибирск\w*|самар\w*|челябинск\w*|красноярск\w*|тюмен\w*|уф\w*|перм\w*|сочи|калининград\w*|воронеж\w*|краснодар\w*|омск\w*|нижн\w*\s+новгород\w*|ростов\w*(?:-на-дону)?)\b", re.I)
+_LOCAL_ACTION_RE = re.compile(r"\b(?:отзыв\w*|цен\w*|стоимост\w*|адрес\w*|телефон\w*|контакт\w*|рядом|недорог\w*|где\s+(?:найти|купить|заказать|обратиться)|куда\s+обратиться)\b", re.I)
+_BUSINESS_GENERIC_RE = re.compile(r"\b(?:компани\w*|фирм\w*|сервис\w*|автосервис\w*|центр\w*|клиник\w*|магазин\w*|салон\w*|студи\w*|агентств\w*|школ\w*|курс\w*|ресторан\w*|кафе|бар\w*|отел\w*|гостиниц\w*|юрист\w*|адвокат\w*|нотариус\w*|фитнес\w*|спортзал\w*|ремонт\w*|мастер\w*|доставк\w*|пекар\w*|цветоч\w*|мебел\w*|стоматолог\w*|аптек\w*|лаборатор\w*|ветеринар\w*|страхов\w*|банк\w*|риелтор\w*|риэлтор\w*|строител\w*|типограф\w*|ателье\w*|химчист\w*|шиномонтаж\w*|автомойк\w*|детейлинг\w*|слухопротезирован\w*)\b", re.I)
+_NON_BUSINESS_LOCAL_RE = re.compile(r"\b(?:погод\w*|район\w*|улиц\w*|проспект\w*|метро\b|маршрут\w*|населени\w*|мэр\w*|губернатор\w*|новост\w*|истори\w*|экономик\w*|достопримечательност\w*|что\s+посмотреть|куда\s+сходить|прогул\w*)\b", re.I)
+_MEDICAL_RE = re.compile(r"\b(?:медицин\w*|клиник\w*|стоматолог\w*|врач\w*|доктор\w*|сурдолог\w*|слухопротезирован\w*|слухов\w+\s+аппарат\w*|лаборатор\w*|диагност\w*)\b", re.I)
+_GENERIC_TITLE = re.compile(r"\b(?:яндекс\s*карты|yandex\s*maps|яндекс\s*медицина|2гис|2gis|zoon|зун|yell|openstreetmap|osm|карты|maps|официальный\s*сайт|отзывы|адрес|телефон|москва|moscow)\b", re.I)
 _WORD = re.compile(r"[a-zа-яё0-9]+", re.I)
 _SPACE = re.compile(r"\s+")
-_STOP = {
-    "лучшие", "лучший", "лучших", "топ", "рейтинг", "найди", "найти", "подбери", "посоветуй", "порекомендуй", "покажи",
-    "компания", "компании", "компаний", "центр", "центры", "центров", "клиника", "клиники",
-    "в", "во", "на", "рядом", "поблизости", "около", "москва", "москве", "москвы",
-}
+_STOP = {"лучшие", "лучший", "лучших", "топ", "рейтинг", "найди", "найти", "подбери", "посоветуй", "порекомендуй", "покажи", "компания", "компании", "компаний", "центр", "центры", "центров", "клиника", "клиники", "в", "во", "на", "рядом", "поблизости", "около", "москва", "москве", "москвы"}
 _CITY_SLUGS = {
     "москва": "moscow", "москве": "moscow", "москвы": "moscow",
     "санкт-петербург": "spb", "санкт-петербурге": "spb", "петербург": "spb", "спб": "spb",
@@ -82,7 +41,6 @@ _CITY_SLUGS = {
 }
 _RU_MAPS = RussianMapsDiscovery(timeout_seconds=3.8)
 
-
 @dataclass(frozen=True)
 class LocalBusinessResult:
     text: str
@@ -94,8 +52,7 @@ def is_local_business_question(question: str) -> bool:
     text = normalized_question(question)
     if not text or _NON_BUSINESS_LOCAL_RE.search(text):
         return False
-    has_location = bool(_CITY_MENTION_RE.search(text) or _LOCATION_RE.search(text))
-    if not has_location:
+    if not (_CITY_MENTION_RE.search(text) or _LOCATION_RE.search(text)):
         return False
     if _SELECTION_RE.search(text):
         return True
@@ -110,18 +67,12 @@ def _kind(url: str) -> str:
     parsed = urlsplit(str(url or ""))
     host = (parsed.hostname or "").casefold().removeprefix("www.")
     path = (parsed.path or "").casefold()
-    if host.endswith(("yandex.ru", "yandex.com")) and (
-        path.startswith("/maps") or path.startswith("/profile/") or path.startswith("/medicine/clinic/")
-    ):
+    if host.endswith(("yandex.ru", "yandex.com")) and (path.startswith("/maps") or path.startswith("/profile/") or path.startswith("/medicine/clinic/")):
         return "yandex_maps"
-    if host.endswith("2gis.ru"):
-        return "2gis"
-    if host == "zoon.ru":
-        return "zoon"
-    if host == "yell.ru":
-        return "yell"
-    if host.endswith("openstreetmap.org"):
-        return "osm"
+    if host.endswith("2gis.ru"): return "2gis"
+    if host == "zoon.ru": return "zoon"
+    if host == "yell.ru": return "yell"
+    if host.endswith("openstreetmap.org"): return "osm"
     return "web"
 
 
@@ -131,87 +82,65 @@ def _clean_title(value: str) -> str:
         if sep in text:
             left, right = text.split(sep, 1)
             if len(left.strip()) >= 3 and _GENERIC_TITLE.search(right):
-                text = left.strip()
-                break
+                text = left.strip(); break
     text = _GENERIC_TITLE.sub(" ", text)
     return _SPACE.sub(" ", text).strip(" -–—|·:,.\t\n")[:140]
 
 
 def _stem(value: str) -> str:
-    value = value.casefold()
-    return value[:7] if len(value) >= 7 else value
+    value = value.casefold(); return value[:7] if len(value) >= 7 else value
 
 
 def _query_terms(question: str) -> tuple[str, ...]:
     terms: list[str] = []
     for token in _WORD.findall(normalized_question(question)):
-        if len(token) < 4 or token in _STOP or token.isdigit():
-            continue
+        if len(token) < 4 or token in _STOP or token.isdigit(): continue
         stem = _stem(token)
-        if stem not in terms:
-            terms.append(stem)
+        if stem not in terms: terms.append(stem)
     return tuple(terms[:6])
 
 
 def _relevant(hit: SearchHit, question: str) -> bool:
     terms = _query_terms(question)
-    if not terms:
-        return True
+    if not terms: return True
     haystack = " ".join((str(hit.title or ""), str(hit.snippet or ""), str(hit.url or ""))).casefold()
     matches = sum(1 for term in terms if term in haystack)
     return matches >= (1 if _kind(hit.url) != "web" else min(2, len(terms)))
 
 
 def _entity_key(title: str) -> str:
-    value = _clean_title(title).casefold()
-    value = re.sub(r"[^a-zа-яё0-9]+", " ", value)
-    tokens = [token for token in value.split() if len(token) >= 2]
-    return " ".join(tokens[:8])
+    value = re.sub(r"[^a-zа-яё0-9]+", " ", _clean_title(title).casefold())
+    return " ".join(token for token in value.split() if len(token) >= 2)[:180]
 
 
 def _city_slug(question: str) -> str:
     text = normalized_question(question)
     for alias, slug in _CITY_SLUGS.items():
-        if alias in text:
-            return slug
+        if alias in text: return slug
     return "moscow"
 
 
 def _map_search_links(name: str, *, city_slug: str, address: str = "") -> dict[str, str]:
     query = " ".join(part for part in (name, address) if part).strip()
-    return {
-        "yandex": f"https://yandex.ru/maps/?text={quote_plus(query)}",
-        "2gis": f"https://2gis.ru/{city_slug}/search/{quote(query, safe='')}",
-    }
+    return {"yandex": f"https://yandex.ru/maps/?text={quote_plus(query)}", "2gis": f"https://2gis.ru/{city_slug}/search/{quote(query, safe='')}"}
 
 
 def _source_row(hit: SearchHit) -> dict:
-    return {
-        "title": _clean_title(hit.title) or hit.title or _host(hit.url),
-        "url": hit.url,
-        "domain": _host(hit.url),
-        "provider": hit.provider,
-        "snippet": str(hit.snippet or "")[:300],
-    }
+    return {"title": _clean_title(hit.title) or hit.title or _host(hit.url), "url": hit.url, "domain": _host(hit.url), "provider": hit.provider, "snippet": str(hit.snippet or "")[:300]}
 
 
 def _md(label: str, url: str) -> str:
-    safe = str(url or "").replace(")", "%29")
-    return f"[{label}]({safe})"
+    return f"[{label}]({str(url or '').replace(')', '%29')})"
 
 
 async def _search(discovery, query: str, *, timeout: float = 3.4) -> list[SearchHit]:
     try:
-        return await asyncio.wait_for(
-            discovery.search(query, count=10, country="RU", language="ru"),
-            timeout=timeout,
-        )
+        return await asyncio.wait_for(discovery.search(query, count=10, country="RU", language="ru"), timeout=timeout)
     except (DiscoveryError, TimeoutError, asyncio.TimeoutError):
         return []
 
 
-async def _empty_places() -> list[MapPlace]:
-    return []
+async def _empty_places() -> list[MapPlace]: return []
 
 
 def _entity_score(row: dict) -> float:
@@ -219,79 +148,41 @@ def _entity_score(row: dict) -> float:
     directory_evidence = sum(bool(row.get(key)) for key in ("zoon", "yell"))
     osm_evidence = 1 if row.get("osm") else 0
     independent = map_evidence + directory_evidence + osm_evidence + (1 if row.get("web") else 0)
-    best_rating = max((value for value in row.get("ratings", {}).values() if isinstance(value, (int, float))), default=0.0)
-    best_reviews = max((value for value in row.get("reviews", {}).values() if isinstance(value, int)), default=0)
+    best_rating = max((v for v in row.get("ratings", {}).values() if isinstance(v, (int, float))), default=0.0)
+    best_reviews = max((v for v in row.get("reviews", {}).values() if isinstance(v, int)), default=0)
     review_confidence = min(math.log1p(best_reviews) / math.log(1001), 1.0) if best_reviews > 0 else 0.0
     rating_quality = max(0.0, min((best_rating - 3.5) / 1.5, 1.0)) if best_rating else 0.0
     completeness = sum(bool(row.get(key)) for key in ("address", "phone", "website", "web")) / 4.0
-    return (
-        map_evidence * 2.2
-        + directory_evidence * 1.3
-        + osm_evidence * 1.4
-        + min(independent, 5) * 0.3
-        + rating_quality * 1.5
-        + review_confidence
-        + completeness * 0.7
-    )
+    return map_evidence * 2.2 + directory_evidence * 1.3 + osm_evidence * 1.4 + min(independent, 5) * 0.3 + rating_quality * 1.5 + review_confidence + completeness * 0.7
 
 
 def _empty_entity(name: str) -> dict:
-    return {
-        "name": name,
-        "address": "",
-        "phone": "",
-        "website": "",
-        "web": "",
-        "yandex_maps": "",
-        "2gis": "",
-        "zoon": "",
-        "yell": "",
-        "osm": "",
-        "ratings": {},
-        "reviews": {},
-    }
+    return {"name": name, "address": "", "phone": "", "website": "", "web": "", "yandex_maps": "", "2gis": "", "zoon": "", "yell": "", "osm": "", "ratings": {}, "reviews": {}}
 
 
 def _merge_place(entities: dict[str, dict], place: MapPlace) -> None:
-    name = _clean_title(place.name)
-    key = _entity_key(name)
-    if not key:
-        return
+    name = _clean_title(place.name); key = _entity_key(name)
+    if not key: return
     row = entities.setdefault(key, _empty_entity(name))
-    if place.address and not row["address"]:
-        row["address"] = place.address
-    if place.phone and not row["phone"]:
-        row["phone"] = place.phone
-    if place.website and not row["website"]:
-        row["website"] = place.website
-    if place.provider in {"yandex_maps", "2gis", "zoon", "yell", "osm"}:
-        row[place.provider] = row[place.provider] or place.card_url
-    if place.rating is not None:
-        row["ratings"][place.provider] = place.rating
-    if place.reviews is not None:
-        row["reviews"][place.provider] = place.reviews
+    if place.address and not row["address"]: row["address"] = place.address
+    if place.phone and not row["phone"]: row["phone"] = place.phone
+    if place.website and not row["website"]: row["website"] = place.website
+    if place.provider in {"yandex_maps", "2gis", "zoon", "yell", "osm"}: row[place.provider] = row[place.provider] or place.card_url
+    if place.rating is not None: row["ratings"][place.provider] = place.rating
+    if place.reviews is not None: row["reviews"][place.provider] = place.reviews
 
 
-def _places(value) -> list[MapPlace]:
-    return value if isinstance(value, list) else []
-
-
-def _hits(value) -> list[SearchHit]:
-    return value if isinstance(value, list) else []
+def _places(value) -> list[MapPlace]: return value if isinstance(value, list) else []
+def _hits(value) -> list[SearchHit]: return value if isinstance(value, list) else []
 
 
 async def resolve_local_business(question: str, discovery) -> LocalBusinessResult | None:
-    if not is_local_business_question(question):
-        return None
+    if not is_local_business_question(question): return None
 
     city_slug = _city_slug(question)
     medical = bool(_MEDICAL_RE.search(normalized_question(question)))
-    queries = (
-        question,
-        f"site:yandex.ru/maps/org/ {question}",
-        f"site:2gis.ru/{city_slug}/firm/ {question}",
-        f"site:yell.ru/{city_slug}/com/ {question}",
-    )
+    cached_rows = load_places(question, limit=30)
+    queries = (question, f"site:yandex.ru/maps/org/ {question}", f"site:2gis.ru/{city_slug}/firm/ {question}", f"site:yell.ru/{city_slug}/com/ {question}")
 
     provider_tasks = (
         asyncio.create_task(_RU_MAPS.search(question)),
@@ -304,20 +195,17 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
     serp_tasks = tuple(asyncio.create_task(_search(discovery, query)) for query in queries)
     gathered = await asyncio.gather(*provider_tasks, *serp_tasks, return_exceptions=True)
 
-    public_rows = _places(gathered[0])
-    indexed_rows = _places(gathered[1])
-    osm_rows = _places(gathered[2])
-    zoon_rows = _places(gathered[3])
-    yell_rows = _places(gathered[4])
-    medicine_rows = _places(gathered[5])
+    public_rows, indexed_rows, osm_rows, zoon_rows, yell_rows, medicine_rows = (_places(gathered[i]) for i in range(6))
+    live_batches = [osm_rows, indexed_rows, medicine_rows, public_rows, zoon_rows, yell_rows]
+    for batch in live_batches:
+        if batch:
+            store_places(question, batch)
     serp_batches = [_hits(value) for value in gathered[6:]]
 
     entities: dict[str, dict] = {}
     source_rows: list[dict] = []
-
-    # OSM is the independent no-key baseline. Other providers enrich the same
-    # entities with ratings/reviews/direct directory cards whenever available.
-    for batch in (osm_rows, indexed_rows, medicine_rows, public_rows, zoon_rows, yell_rows):
+    # Persistent verified cache is always available first; live sources enrich it.
+    for batch in [cached_rows, *live_batches]:
         for place in batch:
             _merge_place(entities, place)
             source_rows.append(place.public_source())
@@ -325,87 +213,41 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
     seen_urls = {canonical_result_url(row["url"]) for row in source_rows if row.get("url")}
     for batch in serp_batches:
         for hit in batch:
-            if not _relevant(hit, question):
-                continue
+            if not _relevant(hit, question): continue
             canonical = canonical_result_url(hit.url)
-            if not canonical or canonical in seen_urls:
-                continue
-            seen_urls.add(canonical)
-            source_rows.append(_source_row(hit))
-            name = _clean_title(hit.title)
-            key = _entity_key(name)
-            if not key:
-                continue
-            row = entities.setdefault(key, _empty_entity(name))
-            kind = _kind(hit.url)
-            if kind in {"yandex_maps", "2gis", "zoon", "yell", "osm"}:
-                row[kind] = row[kind] or hit.url
-            elif not row["web"]:
-                row["web"] = hit.url
-            if is_yandex_medicine_url(hit.url) and not row["yandex_maps"]:
-                row["yandex_maps"] = hit.url
+            if not canonical or canonical in seen_urls: continue
+            seen_urls.add(canonical); source_rows.append(_source_row(hit))
+            name = _clean_title(hit.title); key = _entity_key(name)
+            if not key: continue
+            row = entities.setdefault(key, _empty_entity(name)); kind = _kind(hit.url)
+            if kind in {"yandex_maps", "2gis", "zoon", "yell", "osm"}: row[kind] = row[kind] or hit.url
+            elif not row["web"]: row["web"] = hit.url
+            if is_yandex_medicine_url(hit.url) and not row["yandex_maps"]: row["yandex_maps"] = hit.url
 
-    rows = [
-        row for row in entities.values()
-        if any(row.get(key) for key in ("yandex_maps", "2gis", "zoon", "yell", "osm", "web"))
-    ]
-    rows.sort(key=_entity_score, reverse=True)
-    rows = rows[:7]
-
+    rows = [row for row in entities.values() if any(row.get(key) for key in ("yandex_maps", "2gis", "zoon", "yell", "osm", "web"))]
+    rows.sort(key=_entity_score, reverse=True); rows = rows[:7]
     if not rows:
-        return LocalBusinessResult(
-            text=(
-                "Не удалось получить подтверждённые организации из OpenStreetMap, Яндекса, 2ГИС, Zoon, Yell "
-                "или поисковой выдачи. Я не буду придумывать компании."
-            ),
-            sources=[],
-            searched=0,
-        )
+        return LocalBusinessResult(text="Локальный индекс пока пуст для этой категории, а внешние источники сейчас недоступны. Я не буду придумывать компании. После первого успешного обновления результаты будут сохраняться локально и останутся доступны даже при сбое внешнего поиска.", sources=[], searched=0)
 
+    using_cache_only = bool(cached_rows) and not any(live_batches)
     out = [
-        "Подобрал подтверждённые организации из OpenStreetMap, Яндекса, 2ГИС, Zoon, Yell и открытой выдачи. "
-        "Рейтинги показываю только когда источник реально их публикует; OpenStreetMap используется как независимая база организаций и контактов."
+        ("Внешние каталоги сейчас недоступны, поэтому использую последние проверенные данные из локального индекса OLYA." if using_cache_only else "Подобрал подтверждённые организации из локального индекса и доступных внешних источников.")
+        + " Рейтинги показываю только когда источник реально их публикует."
     ]
-
     for index, row in enumerate(rows, start=1):
-        name = row["name"]
-        fallback = _map_search_links(name, city_slug=city_slug, address=row.get("address", ""))
+        name = row["name"]; fallback = _map_search_links(name, city_slug=city_slug, address=row.get("address", ""))
         out.append(f"\n{index}. **{name}**")
-        if row.get("address"):
-            out.append(f"Адрес: {row['address']}")
-        if row.get("phone"):
-            out.append(f"Телефон: {row['phone']}")
+        if row.get("address"): out.append(f"Адрес: {row['address']}")
+        if row.get("phone"): out.append(f"Телефон: {row['phone']}")
         website = row.get("website") or row.get("web")
-        if website:
-            out.append("Сайт/источник: " + _md("открыть", website))
+        if website: out.append("Сайт/источник: " + _md("открыть", website))
+        for label, provider in (("Яндекс", "yandex_maps"), ("2ГИС", "2gis"), ("Zoon", "zoon"), ("Yell", "yell")):
+            rating = row["ratings"].get(provider); reviews = row["reviews"].get(provider)
+            if rating is not None: out.append(f"{label}: {rating:g}" + (f" · {reviews} отзывов/оценок" if reviews is not None else ""))
+        if row.get("osm"): out.append("OpenStreetMap: " + _md("карточка", row["osm"]))
+        out.append("Яндекс: " + _md("карточка" if row["yandex_maps"] else "поиск на карте", row["yandex_maps"] or fallback["yandex"]))
+        out.append("2ГИС: " + _md("карточка" if row["2gis"] else "поиск на карте", row["2gis"] or fallback["2gis"]))
+        if row.get("zoon"): out.append("Zoon: " + _md("карточка", row["zoon"]))
+        if row.get("yell"): out.append("Yell: " + _md("карточка", row["yell"]))
 
-        labels = (
-            ("Яндекс", "yandex_maps"),
-            ("2ГИС", "2gis"),
-            ("Zoon", "zoon"),
-            ("Yell", "yell"),
-        )
-        for label, provider in labels:
-            rating = row["ratings"].get(provider)
-            reviews = row["reviews"].get(provider)
-            if rating is not None:
-                out.append(f"{label}: {rating:g}" + (f" · {reviews} отзывов/оценок" if reviews is not None else ""))
-
-        if row.get("osm"):
-            out.append("OpenStreetMap: " + _md("карточка", row["osm"]))
-        out.append(
-            "Яндекс: " + _md("карточка" if row["yandex_maps"] else "поиск на карте", row["yandex_maps"] or fallback["yandex"])
-        )
-        out.append(
-            "2ГИС: " + _md("карточка" if row["2gis"] else "поиск на карте", row["2gis"] or fallback["2gis"])
-        )
-        if row.get("zoon"):
-            out.append("Zoon: " + _md("карточка", row["zoon"]))
-        if row.get("yell"):
-            out.append("Yell: " + _md("карточка", row["yell"]))
-
-    return LocalBusinessResult(
-        text="\n".join(out),
-        sources=source_rows[:20],
-        searched=len(source_rows),
-    )
+    return LocalBusinessResult(text="\n".join(out), sources=source_rows[:20], searched=len(source_rows))
