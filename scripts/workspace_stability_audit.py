@@ -14,6 +14,7 @@ def audit() -> dict:
     errors: list[str] = []
     recovery = (ROOT / "app" / "workspace_recovery_controls.py").read_text("utf-8")
     library = (ROOT / "app" / "workspace_chat_library_v1.py").read_text("utf-8")
+    client = (ROOT / "app" / "workspace_client_v4.py").read_text("utf-8")
     route = (ROOT / "app" / "task_solver_user_ui.py").read_text("utf-8")
 
     try:
@@ -29,8 +30,11 @@ def audit() -> dict:
         "workspace_renders": not render_error and bool(html),
         "recovery_v6": "OLYA_RECOVERY_CONTROLS_V6" in html,
         "thinking_outside_messages": "olya-thinking-host" in html and "composerWrap.parentNode.insertBefore(host,composerWrap)" in html,
+        "single_waiting_owner": "olya-waiting-row" not in html and "olya-waiting-row" not in client,
         "message_observer_child_only": "observe(messages,{childList:true})" in html,
         "no_message_characterdata_loop": "observe(messages,{childList:true,subtree:true,characterData:true})" not in html,
+        "no_client_characterdata_scan": "messagesObserver.observe(messages,{childList:true,subtree:true,characterData:true})" not in html,
+        "source_observer_filtered": "nodeContainsSources" in html,
         "stream_markdown_throttled": "now-run.lastPaint>=90" in html and "now-run.lastPaint>=28" not in html,
         "finish_paint_bounded": "performance.now()-started<90" in html and "performance.now()-started<260" not in html,
         "metrika_message_observer_direct_only": "observe(x1messages,{childList:true,subtree:true})" not in html,
@@ -50,7 +54,7 @@ def audit() -> dict:
     if render_error:
         errors.append("workspace_render_error:" + render_error)
     return {
-        "format": "olya-workspace-stability-audit-v3",
+        "format": "olya-workspace-stability-audit-v4",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "checks": checks,
