@@ -7,7 +7,11 @@ from app.services.file_context import FileContextBuilder
 from app.services.development import compact_project_development_context
 from app.services.long_term_memory import build_memory_bundle, memory_context_message, remember_user_turn
 import app.services.memory_write_through  # noqa: F401 - persist memory on every user message
-from app.services.response_strategy import requires_conversation_context, mentions_workspace_context
+from app.services.response_strategy import (
+    is_independent_fast_question,
+    mentions_workspace_context,
+    requires_conversation_context,
+)
 from app.services.task_solver import current_task_solver_context
 
 
@@ -127,24 +131,26 @@ class ProjectContextBuilder:
         return ChatMessage(role="system", content="\n\n".join(trusted))
 
     def build(self, db: Session, *, project: Project | None, conversation: Conversation | None,
-              task: Task | None = None, incoming: list[ChatMessage], mode: str = "work") -> list[ChatMessage]:
+              task: Task | None = None, incoming: list[ChatMessage], mode: str = "auto") -> list[ChatMessage]:
         query = next((message.content for message in reversed(incoming) if message.role == "user"), "")
+        effective_mode = mode
+        if effective_mode == "auto":
+            effective_mode = "fast" if is_independent_fast_question(query) else "work"
         context_needed = bool(
-            mode != "fast"
+            effective_mode != "fast"
             or requires_conversation_context(query)
             or mentions_workspace_context(query)
             or task is not None
         )
         result: list[ChatMessage] = [
-            ChatMessage(role="system", content=_FAST_SYSTEM_PROMPT if mode == "fast" else _SYSTEM_PROMPT)
+            ChatMessage(role="system", content=_FAST_SYSTEM_PROMPT if effective_mode == "fast" else _SYSTEM_PROMPT)
         ]
 
-        # Web/structured evidence is injected by the central orchestrator and is
-        # always relevant to the current request. Keep it even on the fast path.
+        # Web/structured evidence from the central orchestrator is always relevant.
         result.extend(current_task_solver_context())
 
-        # Independent Fast questions intentionally skip project state, memory and
-        # old dialogue. This is the main TTFT optimization on the CPU-only node.
+        # Independent simple questions intentionally skip project state, memory
+        # and old dialogue. This is the main TTFT optimization on the CPU node.
         if not context_needed:
             result.extend(self._latest_user(incoming))
             return result
@@ -160,7 +166,7 @@ class ProjectContextBuilder:
                     ))
 
         if conversation is not None:
-            history_limit = 4 if mode == "fast" else (8 if mode == "deep" else 6)
+            history_limit = 4 if effective_mode == "fast" else (8 if effective_mode == "deep" else 6)
             rows = list(db.scalars(
                 select(Message)
                 .where(Message.conversation_id == conversation.id)
@@ -185,7 +191,7 @@ class ProjectContextBuilder:
                 query=query,
                 hot_messages=history_limit,
                 user_id=conversation.owner_id,
-                include_summary=bool(mode != "fast" and requires_conversation_context(query)),
+                include_summary=bool(effective_mode != "fast" and requires_conversation_context(query)),
             )
             memory_message = memory_context_message(bundle)
             if memory_message is not None:
