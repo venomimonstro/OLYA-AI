@@ -8,6 +8,7 @@ from urllib.parse import quote, quote_plus, urlsplit
 
 from app.services.discovery import DiscoveryError, SearchHit, canonical_result_url
 from app.services.indexed_business_discovery import discover_indexed_businesses
+from app.services.osm_business_discovery import discover_osm_businesses
 from app.services.public_maps_discovery import MapPlace
 from app.services.response_strategy import normalized_question
 from app.services.russian_maps_discovery import RussianMapsDiscovery
@@ -17,7 +18,8 @@ from app.services.zoon_discovery import discover_zoon
 
 
 _SELECTION_RE = re.compile(
-    r"\b(?:лучши\w*|топ|рейтинг\w*|найди\w*|найти|подбер\w*|посовет\w*|порекоменду\w*|рекоменду\w*|покажи\w*|выбер\w*|выбрать)\b",
+    r"\b(?:лучши\w*|топ|рейтинг\w*|найди\w*|найти|подбер\w*|посовет\w*|порекоменду\w*|"
+    r"рекоменду\w*|покажи\w*|выбер\w*|выбрать)\b",
     re.I,
 )
 _LOCATION_RE = re.compile(
@@ -56,8 +58,8 @@ _MEDICAL_RE = re.compile(
     re.I,
 )
 _GENERIC_TITLE = re.compile(
-    r"\b(?:яндекс\s*карты|yandex\s*maps|яндекс\s*медицина|2гис|2gis|zoon|зун|yell|карты|maps|"
-    r"официальный\s*сайт|отзывы|адрес|телефон|москва|moscow)\b",
+    r"\b(?:яндекс\s*карты|yandex\s*maps|яндекс\s*медицина|2гис|2gis|zoon|зун|yell|"
+    r"openstreetmap|osm|карты|maps|официальный\s*сайт|отзывы|адрес|телефон|москва|moscow)\b",
     re.I,
 )
 _WORD = re.compile(r"[a-zа-яё0-9]+", re.I)
@@ -92,14 +94,11 @@ def is_local_business_question(question: str) -> bool:
     text = normalized_question(question)
     if not text or _NON_BUSINESS_LOCAL_RE.search(text):
         return False
-
     has_location = bool(_CITY_MENTION_RE.search(text) or _LOCATION_RE.search(text))
     if not has_location:
         return False
-
     if _SELECTION_RE.search(text):
         return True
-
     return bool(_BUSINESS_GENERIC_RE.search(text) and (_CITY_MENTION_RE.search(text) or _LOCAL_ACTION_RE.search(text)))
 
 
@@ -121,11 +120,13 @@ def _kind(url: str) -> str:
         return "zoon"
     if host == "yell.ru":
         return "yell"
+    if host.endswith("openstreetmap.org"):
+        return "osm"
     return "web"
 
 
 def _clean_title(value: str) -> str:
-    text = _SPACE.sub(" ", str(value or "")).strip(" -–—|·:,.	\n")
+    text = _SPACE.sub(" ", str(value or "")).strip(" -–—|·:,.\t\n")
     for sep in (" — ", " | ", " - ", " · "):
         if sep in text:
             left, right = text.split(sep, 1)
@@ -133,8 +134,7 @@ def _clean_title(value: str) -> str:
                 text = left.strip()
                 break
     text = _GENERIC_TITLE.sub(" ", text)
-    text = _SPACE.sub(" ", text).strip(" -–—|·:,.	\n")
-    return text[:140]
+    return _SPACE.sub(" ", text).strip(" -–—|·:,.\t\n")[:140]
 
 
 def _stem(value: str) -> str:
@@ -165,7 +165,7 @@ def _relevant(hit: SearchHit, question: str) -> bool:
 def _entity_key(title: str) -> str:
     value = _clean_title(title).casefold()
     value = re.sub(r"[^a-zа-яё0-9]+", " ", value)
-    tokens = [t for t in value.split() if len(t) >= 2]
+    tokens = [token for token in value.split() if len(token) >= 2]
     return " ".join(tokens[:8])
 
 
@@ -215,15 +215,24 @@ async def _empty_places() -> list[MapPlace]:
 
 
 def _entity_score(row: dict) -> float:
-    map_evidence = sum(bool(row.get(k)) for k in ("yandex_maps", "2gis"))
-    directory_evidence = sum(bool(row.get(k)) for k in ("zoon", "yell"))
-    independent = map_evidence + directory_evidence + (1 if row.get("web") else 0)
+    map_evidence = sum(bool(row.get(key)) for key in ("yandex_maps", "2gis"))
+    directory_evidence = sum(bool(row.get(key)) for key in ("zoon", "yell"))
+    osm_evidence = 1 if row.get("osm") else 0
+    independent = map_evidence + directory_evidence + osm_evidence + (1 if row.get("web") else 0)
     best_rating = max((value for value in row.get("ratings", {}).values() if isinstance(value, (int, float))), default=0.0)
     best_reviews = max((value for value in row.get("reviews", {}).values() if isinstance(value, int)), default=0)
     review_confidence = min(math.log1p(best_reviews) / math.log(1001), 1.0) if best_reviews > 0 else 0.0
     rating_quality = max(0.0, min((best_rating - 3.5) / 1.5, 1.0)) if best_rating else 0.0
-    completeness = sum(bool(row.get(k)) for k in ("address", "phone", "website", "web")) / 4.0
-    return map_evidence * 2.2 + directory_evidence * 1.3 + min(independent, 4) * 0.3 + rating_quality * 1.5 + review_confidence + completeness * 0.5
+    completeness = sum(bool(row.get(key)) for key in ("address", "phone", "website", "web")) / 4.0
+    return (
+        map_evidence * 2.2
+        + directory_evidence * 1.3
+        + osm_evidence * 1.4
+        + min(independent, 5) * 0.3
+        + rating_quality * 1.5
+        + review_confidence
+        + completeness * 0.7
+    )
 
 
 def _empty_entity(name: str) -> dict:
@@ -237,6 +246,7 @@ def _empty_entity(name: str) -> dict:
         "2gis": "",
         "zoon": "",
         "yell": "",
+        "osm": "",
         "ratings": {},
         "reviews": {},
     }
@@ -254,12 +264,20 @@ def _merge_place(entities: dict[str, dict], place: MapPlace) -> None:
         row["phone"] = place.phone
     if place.website and not row["website"]:
         row["website"] = place.website
-    if place.provider in {"yandex_maps", "2gis", "zoon", "yell"}:
+    if place.provider in {"yandex_maps", "2gis", "zoon", "yell", "osm"}:
         row[place.provider] = row[place.provider] or place.card_url
     if place.rating is not None:
         row["ratings"][place.provider] = place.rating
     if place.reviews is not None:
         row["reviews"][place.provider] = place.reviews
+
+
+def _places(value) -> list[MapPlace]:
+    return value if isinstance(value, list) else []
+
+
+def _hits(value) -> list[SearchHit]:
+    return value if isinstance(value, list) else []
 
 
 async def resolve_local_business(question: str, discovery) -> LocalBusinessResult | None:
@@ -268,42 +286,41 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
 
     city_slug = _city_slug(question)
     medical = bool(_MEDICAL_RE.search(normalized_question(question)))
-
     queries = (
         question,
         f"site:yandex.ru/maps/org/ {question}",
         f"site:2gis.ru/{city_slug}/firm/ {question}",
+        f"site:yell.ru/{city_slug}/com/ {question}",
     )
-    maps_task = asyncio.create_task(_RU_MAPS.search(question))
-    indexed_task = asyncio.create_task(discover_indexed_businesses(question, discovery, limit=10))
-    zoon_task = asyncio.create_task(discover_zoon(question, discovery, limit=8))
-    yell_task = asyncio.create_task(discover_yell(question, limit=8))
-    medicine_task = asyncio.create_task(discover_yandex_medicine(question, discovery, limit=8) if medical else _empty_places())
-    serp_tasks = [asyncio.create_task(_search(discovery, q)) for q in queries]
-    public_rows, indexed_rows, zoon_rows, yell_rows, medicine_rows, *serp_batches = await asyncio.gather(
-        maps_task, indexed_task, zoon_task, yell_task, medicine_task, *serp_tasks
+
+    provider_tasks = (
+        asyncio.create_task(_RU_MAPS.search(question)),
+        asyncio.create_task(discover_indexed_businesses(question, discovery, limit=10)),
+        asyncio.create_task(discover_osm_businesses(question, limit=12, timeout_seconds=5.5)),
+        asyncio.create_task(discover_zoon(question, discovery, limit=8)),
+        asyncio.create_task(discover_yell(question, limit=8)),
+        asyncio.create_task(discover_yandex_medicine(question, discovery, limit=8) if medical else _empty_places()),
     )
+    serp_tasks = tuple(asyncio.create_task(_search(discovery, query)) for query in queries)
+    gathered = await asyncio.gather(*provider_tasks, *serp_tasks, return_exceptions=True)
+
+    public_rows = _places(gathered[0])
+    indexed_rows = _places(gathered[1])
+    osm_rows = _places(gathered[2])
+    zoon_rows = _places(gathered[3])
+    yell_rows = _places(gathered[4])
+    medicine_rows = _places(gathered[5])
+    serp_batches = [_hits(value) for value in gathered[6:]]
 
     entities: dict[str, dict] = {}
     source_rows: list[dict] = []
 
-    # Indexed concrete directory cards bypass the generic SERP relevance filter.
-    # Their URL namespace itself confirms the provider and requested city.
-    for place in indexed_rows:
-        _merge_place(entities, place)
-        source_rows.append(place.public_source())
-    for place in medicine_rows:
-        _merge_place(entities, place)
-        source_rows.append(place.public_source())
-    for place in public_rows:
-        _merge_place(entities, place)
-        source_rows.append(place.public_source())
-    for place in zoon_rows:
-        _merge_place(entities, place)
-        source_rows.append(place.public_source())
-    for place in yell_rows:
-        _merge_place(entities, place)
-        source_rows.append(place.public_source())
+    # OSM is the independent no-key baseline. Other providers enrich the same
+    # entities with ratings/reviews/direct directory cards whenever available.
+    for batch in (osm_rows, indexed_rows, medicine_rows, public_rows, zoon_rows, yell_rows):
+        for place in batch:
+            _merge_place(entities, place)
+            source_rows.append(place.public_source())
 
     seen_urls = {canonical_result_url(row["url"]) for row in source_rows if row.get("url")}
     for batch in serp_batches:
@@ -321,32 +338,33 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
                 continue
             row = entities.setdefault(key, _empty_entity(name))
             kind = _kind(hit.url)
-            if kind in {"yandex_maps", "2gis", "zoon", "yell"}:
+            if kind in {"yandex_maps", "2gis", "zoon", "yell", "osm"}:
                 row[kind] = row[kind] or hit.url
             elif not row["web"]:
                 row["web"] = hit.url
-
             if is_yandex_medicine_url(hit.url) and not row["yandex_maps"]:
                 row["yandex_maps"] = hit.url
 
-    rows = list(entities.values())
-    rows = [row for row in rows if row.get("yandex_maps") or row.get("2gis") or row.get("zoon") or row.get("yell") or row.get("web")]
+    rows = [
+        row for row in entities.values()
+        if any(row.get(key) for key in ("yandex_maps", "2gis", "zoon", "yell", "osm", "web"))
+    ]
     rows.sort(key=_entity_score, reverse=True)
     rows = rows[:7]
 
     if not rows:
         return LocalBusinessResult(
             text=(
-                "Не удалось получить подтверждённые организации из Яндекса, 2ГИС, Zoon, Yell или поисковой выдачи. "
-                "Я не буду придумывать компании."
+                "Не удалось получить подтверждённые организации из OpenStreetMap, Яндекса, 2ГИС, Zoon, Yell "
+                "или поисковой выдачи. Я не буду придумывать компании."
             ),
             sources=[],
             searched=0,
         )
 
     out = [
-        "Подобрал подтверждённые варианты по Яндексу, 2ГИС, Zoon, Yell и открытой поисковой выдаче. "
-        "Прямые карточки показываю только когда они реально найдены; иначе даю поиск на карте по подтверждённому названию."
+        "Подобрал подтверждённые организации из OpenStreetMap, Яндекса, 2ГИС, Zoon, Yell и открытой выдачи. "
+        "Рейтинги показываю только когда источник реально их публикует; OpenStreetMap используется как независимая база организаций и контактов."
     ]
 
     for index, row in enumerate(rows, start=1):
@@ -361,23 +379,20 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
         if website:
             out.append("Сайт/источник: " + _md("открыть", website))
 
-        yr = row["ratings"].get("yandex_maps")
-        yrc = row["reviews"].get("yandex_maps")
-        dr = row["ratings"].get("2gis")
-        drc = row["reviews"].get("2gis")
-        zr = row["ratings"].get("zoon")
-        zrc = row["reviews"].get("zoon")
-        ylr = row["ratings"].get("yell")
-        ylrc = row["reviews"].get("yell")
-        if yr is not None:
-            out.append(f"Яндекс: {yr:g}" + (f" · {yrc} отзывов" if yrc is not None else ""))
-        if dr is not None:
-            out.append(f"2ГИС: {dr:g}" + (f" · {drc} отзывов" if drc is not None else ""))
-        if zr is not None:
-            out.append(f"Zoon: {zr:g}" + (f" · {zrc} отзывов/оценок" if zrc is not None else ""))
-        if ylr is not None:
-            out.append(f"Yell: {ylr:g}" + (f" · {ylrc} отзывов" if ylrc is not None else ""))
+        labels = (
+            ("Яндекс", "yandex_maps"),
+            ("2ГИС", "2gis"),
+            ("Zoon", "zoon"),
+            ("Yell", "yell"),
+        )
+        for label, provider in labels:
+            rating = row["ratings"].get(provider)
+            reviews = row["reviews"].get(provider)
+            if rating is not None:
+                out.append(f"{label}: {rating:g}" + (f" · {reviews} отзывов/оценок" if reviews is not None else ""))
 
+        if row.get("osm"):
+            out.append("OpenStreetMap: " + _md("карточка", row["osm"]))
         out.append(
             "Яндекс: " + _md("карточка" if row["yandex_maps"] else "поиск на карте", row["yandex_maps"] or fallback["yandex"])
         )
@@ -391,6 +406,6 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
 
     return LocalBusinessResult(
         text="\n".join(out),
-        sources=source_rows[:18],
+        sources=source_rows[:20],
         searched=len(source_rows),
     )
