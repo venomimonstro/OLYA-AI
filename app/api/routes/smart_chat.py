@@ -20,7 +20,8 @@ from app.services.auth import get_current_user
 from app.services.chat_runtime import ActiveChatJob, ChatRunConflict, ChatRunSnapshot, chat_execution_manager
 from app.services.clean_web import build_clean_web_context
 from app.services.live_structured_facts import is_live_structured_question, resolve_live_structured_fact
-from app.services.response_strategy import is_atomic_knowledge_question, normalized_question
+from app.services.long_term_memory import MemoryBundle, memory_context_message, retrieve_memories
+from app.services.response_strategy import is_atomic_knowledge_question, normalized_question, requires_memory_context
 from app.services.task_solver import reset_task_solver_context, set_task_solver_context
 from app.utility_chat import utility_reply
 from app.task_solver_user_ui import router as _task_solver_user_ui_router
@@ -184,7 +185,6 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
         question = _latest_user_text(payload)
         started = perf_counter()
 
-        # Deterministic local facts must never wait for SearXNG or the LLM queue.
         instant = utility_reply(question)
         if instant is not None:
             job._publish_nowait("status", {
@@ -206,8 +206,6 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
             await job.token(instant.text)
             return result
 
-        # Current values with reliable structured providers are faster and more
-        # accurate than generic search + synthesis. Respect explicit web=off.
         if payload.web_mode != "off" and is_live_structured_question(question):
             job._publish_nowait("status", {
                 "state": "lookup",
@@ -277,7 +275,23 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
                 "search_results": web.searched,
             })
 
-        context_token = set_task_solver_context(web.context_messages) if web.context_messages else None
+        context_messages = list(web.context_messages)
+        # On the first turn of a new chat ProjectContextBuilder intentionally has
+        # no Conversation object. For explicit memory questions, inject only the
+        # few relevant cross-chat memories here; ordinary new chats stay clean.
+        if not payload.conversation_id and requires_memory_context(question):
+            memories = retrieve_memories(
+                job_db,
+                conversation_id="",
+                query=question,
+                limit=5,
+                user_id=job_user.id,
+            )
+            memory_message = memory_context_message(MemoryBundle(summary="", memories=memories))
+            if memory_message is not None:
+                context_messages.append(memory_message)
+
+        context_token = set_task_solver_context(context_messages) if context_messages else None
         managed_payload = payload.model_copy(update={
             "client_request_id": job.client_request_id,
             "verification": "off",
