@@ -12,6 +12,7 @@ class Import2GISJSONTests(unittest.TestCase):
             "name": "Тест Моторс, автосервис",
             "name_ex": {"primary": "Тест Моторс", "extension": "автосервис"},
             "address_name": "Ленинградское шоссе, 1",
+            "city_alias": "moscow",
             "adm_div": [
                 {"type": "country", "name": "Россия"},
                 {"type": "region", "name": "Москва"},
@@ -24,6 +25,8 @@ class Import2GISJSONTests(unittest.TestCase):
                 {"type": "website", "url": "https://example.ru/", "value": "https://example.ru/"},
             ]}],
             "schedule": {"Mon": {"working_hours": [{"from": "09:00", "to": "18:00"}]}},
+            "reviews": {"general_rating": 4.8, "general_review_count": 327},
+            "dates": {"updated_at": "2026-09-14T12:00:00.000Z"},
         }
         row = _record(item, city="Москва", category_override="")
         self.assertIsNotNone(row)
@@ -35,6 +38,10 @@ class Import2GISJSONTests(unittest.TestCase):
         self.assertEqual(row["phone"], "+74950000000")
         self.assertEqual(row["website"], "https://example.ru/")
         self.assertIn("Ленинградское шоссе", row["address"])
+        self.assertEqual(row["rating"], 4.8)
+        self.assertEqual(row["review_count"], 327)
+        self.assertEqual(row["source_updated_at"], "2026-09-14T12:00:00.000Z")
+        self.assertEqual(row["source_url"], "https://2gis.ru/moscow/firm/70000001012345678")
 
 
 if __name__ == "__main__":
