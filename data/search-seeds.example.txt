@@ -1,0 +1,7 @@
+# One public domain or HTTPS URL per line.
+# Copy this file to /app/data/search-seeds.txt on the server.
+# The crawler reads robots.txt and sitemap.xml first and indexes text only.
+# Add only sources you are allowed to crawl/index.
+#
+# Example:
+# https://example.org
