@@ -27,6 +27,7 @@ python3 -m py_compile \
   app/admin_ui.py \
   app/admin_users_ui.py \
   app/admin_chats_ui.py \
+  scripts/warm_local_llm.py \
   scripts/client_product_audit.py \
   scripts/latency_path_audit.py
 bash -n scripts/start_app.sh
@@ -51,6 +52,9 @@ if [ "$ready" -ne 1 ]; then
   fail "Application did not become healthy"
 fi
 
+info "Warming the exact fast-chat prompt prefix"
+docker compose exec -T app python -m scripts.warm_local_llm
+
 info "Running latency-aware answer path audit"
 docker compose exec -T app python -m scripts.latency_path_audit
 
@@ -60,4 +64,4 @@ docker compose exec -T app python -m scripts.client_product_audit
 info "Running broad product route/UI audit"
 docker compose exec -T app python -m scripts.product_surface_audit
 
-info "PASSED: fast answers, search routing, workspace, memory and owner surfaces are registered"
+info "PASSED: fast answers, search routing, prompt warmup, workspace, memory and owner surfaces are registered"
