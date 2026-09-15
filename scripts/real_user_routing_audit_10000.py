@@ -43,7 +43,10 @@ def _actual_prompt_path(prompt: str) -> tuple[str, dict]:
 _EDGE_CASES: tuple[tuple[str, str, str | None], ...] = (
     ("Подскажи, пожалуйста, сколько будет 17 * 23? 🙏", "instant", "calculator"),
     ("Где поесть рядом?", "instant", "location_clarification"),
+    ("Куда сходить сегодня?", "instant", "location_clarification"),
+    ("Что посмотреть рядом?", "instant", "location_clarification"),
     ("Где поесть рядом с Красной площадью в Москве?", "web", None),
+    ("Куда сходить сегодня в Москве?", "web", None),
     ("Как работает УСН?", "web", None),
     ("Какие налоги платит самозанятый в России?", "web", None),
     ("Какие основные требования трудового законодательства к дистанционной работе?", "web", None),
@@ -106,7 +109,7 @@ def audit() -> dict:
     failed = sum(persona_fail.values())
     passed = len(POPULATION) - failed
     return {
-        "format": "olya-real-user-routing-10000-v2",
+        "format": "olya-real-user-routing-10000-v3",
         "status": "passed" if failed == 0 and edge_failed == 0 else "failed",
         "population": len(POPULATION),
         "passed": passed,
