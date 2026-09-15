@@ -49,9 +49,12 @@ from app.core.config import get_settings
 from app.db import init_db
 from app.inference.client import LlamaClient
 from app.services.context import ContextCompiler
-from app.services.discovery import BraveSearchDiscovery, DisabledDiscovery, ProviderPoolDiscovery
+from app.services.discovery import BraveSearchDiscovery, ProviderPoolDiscovery
 from app.services.documents import configure_render_gate
 from app.services.http_limits import RequestBodyLimitMiddleware
+from app.services.local_search_discovery import LocalSearchDiscovery
+from app.services.local_search_runtime import owned_search_maintenance_loop
+from app.services.local_search_store import get_local_search_store
 from app.services.overload import FairOverloadLane, OverloadRejected, principal_from_authorization
 from app.services.resource_governor import ResourceBusyError, ResourceGovernor
 from app.services.user_resource_governor import UserResourceGovernor
@@ -82,7 +85,7 @@ def _production_configuration_errors(settings) -> list[str]:
     if str(settings.document_render_backend).lower() == "remote":
         token = str(settings.document_render_worker_token or "")
         if not token or token == "change-me-document-worker":
-            errors.append("document_render_worker_token_is_default")
+            errors.append("document_worker_token_is_default")
         if not str(settings.document_render_worker_url or "").startswith("http://"):
             errors.append("document_render_worker_url_invalid")
 
@@ -145,18 +148,25 @@ async def lifespan(app: FastAPI):
     }
     configure_render_gate(settings.document_max_concurrent_renders, settings.document_render_queue_timeout_seconds)
     app.state.research = ResearchFetcher(timeout_seconds=settings.research_timeout_seconds, max_bytes=settings.research_max_bytes, max_chars=settings.research_max_chars, max_redirects=settings.research_max_redirects)
+
+    # OLYA's own SQLite FTS5/RTree index is always the first discovery source.
+    # External engines are only fallbacks when the owned index has no answer.
+    local_store = get_local_search_store()
+    local_store.ensure_schema()
     configured = [item.strip().lower() for item in (settings.search_providers or settings.search_provider).split(",") if item.strip()]
-    providers = []
+    providers: list[object] = [LocalSearchDiscovery()]
     for name in configured:
         if name == "searxng":
             providers.append(SearxngDiscovery(settings.searxng_base_url, timeout_seconds=settings.search_timeout_seconds))
         elif name == "brave":
             providers.append(BraveSearchDiscovery(settings.brave_search_api_key, timeout_seconds=settings.search_timeout_seconds))
-    app.state.discovery = ProviderPoolDiscovery(providers) if providers else DisabledDiscovery()
+    app.state.discovery = ProviderPoolDiscovery(providers)
 
     beta_scheduler_task = None
     public_launch_task = None
     maintenance_task = None
+    owned_search_task = asyncio.create_task(owned_search_maintenance_loop(), name="olya-owned-search-maintenance")
+    app.state.owned_search_task = owned_search_task
     if is_production and settings.beta_operations_scheduler_enabled:
         from app.services.beta_scheduler import beta_operations_loop
         beta_scheduler_task = asyncio.create_task(beta_operations_loop(settings), name="x1-beta-operations")
@@ -174,7 +184,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        for task in (maintenance_task, public_launch_task, beta_scheduler_task):
+        for task in (owned_search_task, maintenance_task, public_launch_task, beta_scheduler_task):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
