@@ -80,12 +80,13 @@ run_chunk() {
   fi
 
   mapfile -t urls < "$urlfile"
-  if [[ ${#urls[@]} -eq 0 ]]; then
+  local expected=${#urls[@]}
+  if [[ $expected -eq 0 ]]; then
     return 0
   fi
 
-  echo "[parse] $base (${#urls[@]} rubrics)"
-  rm -f "$outfile" "$donefile"
+  echo "[parse] $base ($expected rubrics)"
+  rm -f "$outfile" "$donefile" "$logfile"
 
   local rc=0
   if X1_2GIS_PARSER_MEMORY_LIMIT_MB="$CONTAINER_MEMORY" \
@@ -109,13 +110,20 @@ run_chunk() {
     rc=$?
   fi
 
-  if [[ $rc -eq 0 && -s "$outfile" ]]; then
+  local completed=0
+  local errors=0
+  if [[ -f "$logfile" ]]; then
+    completed=$(grep -c "Парсинг ссылки завершён" "$logfile" 2>/dev/null || true)
+    errors=$(grep -c "Ошибка во время работы парсера" "$logfile" 2>/dev/null || true)
+  fi
+
+  if [[ $rc -eq 0 && -s "$outfile" && $completed -ge $expected && $errors -eq 0 ]]; then
     touch "$donefile"
-    echo "[done] $base"
+    echo "[done] $base ($completed/$expected)"
   elif [[ -s "$outfile" ]]; then
-    echo "[partial] $base rc=$rc; partial JSON kept and will still be imported"
+    echo "[partial] $base rc=$rc completed=$completed/$expected errors=$errors; partial JSON kept and will be imported"
   else
-    echo "[failed] $base rc=$rc; see $logfile"
+    echo "[failed] $base rc=$rc completed=$completed/$expected errors=$errors; see $logfile"
   fi
   return 0
 }
