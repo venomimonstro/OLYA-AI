@@ -14,6 +14,7 @@ python3 -m py_compile \
   app/api/routes/admin_chat_observer.py \
   app/api/routes/smart_chat.py \
   app/services/clean_web.py \
+  app/services/structured_facts.py \
   app/services/live_structured_facts.py \
   app/services/long_term_memory.py \
   app/services/memory_write_through.py \
@@ -30,6 +31,7 @@ python3 -m py_compile \
   scripts/warm_local_llm.py \
   scripts/client_product_audit.py \
   scripts/latency_path_audit.py \
+  scripts/exact_fastpath_audit.py \
   scripts/answer_quality_lint.py \
   scripts/real_user_scenarios.py \
   scripts/real_user_routing_audit.py \
@@ -66,6 +68,9 @@ fi
 info "Warming the exact fast-chat prompt prefix"
 docker compose exec -T app python -m scripts.warm_local_llm
 
+info "Running exact deterministic fast-path audit"
+docker compose exec -T app python -m scripts.exact_fastpath_audit
+
 info "Running latency-aware answer path audit"
 docker compose exec -T app python -m scripts.latency_path_audit
 
@@ -81,4 +86,4 @@ docker compose exec -T app python -m scripts.client_product_audit
 info "Running broad product route/UI audit"
 docker compose exec -T app python -m scripts.product_surface_audit
 
-info "PASSED: 10,000-user routing, fast answers, search, prompt warmup, workspace, memory and owner surfaces are registered"
+info "PASSED: exact fast paths, 10,000-user routing, fast answers, search, prompt warmup, workspace, memory and owner surfaces are registered"
