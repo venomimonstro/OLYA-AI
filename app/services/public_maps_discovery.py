@@ -30,34 +30,39 @@ _GOOGLE_LINK_RE = re.compile(
 )
 _PHONE_RE = re.compile(r"(?:\+7|8)[\s()\-\d]{9,18}")
 _NUMERIC_ID_RE = re.compile(r"^\d{6,24}$")
+_RANKING_WORDS_RE = re.compile(
+    r"\b(?:лучши\w*|топ|рейтинг\w*|найди\w*|подбер\w*|посовет\w*|покажи\w*|"
+    r"отзыв\w*|рекомендац\w*)\b",
+    re.I,
+)
 
 _CITY_PROFILES = {
-    "москва": ("moscow", "213"),
-    "москве": ("moscow", "213"),
-    "москвы": ("moscow", "213"),
-    "санкт-петербург": ("spb", "2"),
-    "санкт-петербурге": ("spb", "2"),
-    "петербург": ("spb", "2"),
-    "спб": ("spb", "2"),
-    "казань": ("kazan", "43"),
-    "казани": ("kazan", "43"),
-    "екатеринбург": ("ekaterinburg", "54"),
-    "екатеринбурге": ("ekaterinburg", "54"),
-    "новосибирск": ("novosibirsk", "65"),
-    "новосибирске": ("novosibirsk", "65"),
-    "самара": ("samara", "51"),
-    "самаре": ("samara", "51"),
-    "челябинск": ("chelyabinsk", "56"),
-    "челябинске": ("chelyabinsk", "56"),
-    "красноярск": ("krasnoyarsk", "62"),
-    "красноярске": ("krasnoyarsk", "62"),
-    "тюмень": ("tyumen", "55"),
-    "тюмени": ("tyumen", "55"),
-    "уфа": ("ufa", "172"),
-    "уфе": ("ufa", "172"),
-    "пермь": ("perm", "50"),
-    "перми": ("perm", "50"),
-    "сочи": ("sochi", "239"),
+    "москва": ("moscow", "213", "Москва"),
+    "москве": ("moscow", "213", "Москва"),
+    "москвы": ("moscow", "213", "Москва"),
+    "санкт-петербург": ("spb", "2", "Санкт-Петербург"),
+    "санкт-петербурге": ("spb", "2", "Санкт-Петербург"),
+    "петербург": ("spb", "2", "Санкт-Петербург"),
+    "спб": ("spb", "2", "Санкт-Петербург"),
+    "казань": ("kazan", "43", "Казань"),
+    "казани": ("kazan", "43", "Казань"),
+    "екатеринбург": ("ekaterinburg", "54", "Екатеринбург"),
+    "екатеринбурге": ("ekaterinburg", "54", "Екатеринбург"),
+    "новосибирск": ("novosibirsk", "65", "Новосибирск"),
+    "новосибирске": ("novosibirsk", "65", "Новосибирск"),
+    "самара": ("samara", "51", "Самара"),
+    "самаре": ("samara", "51", "Самара"),
+    "челябинск": ("chelyabinsk", "56", "Челябинск"),
+    "челябинске": ("chelyabinsk", "56", "Челябинск"),
+    "красноярск": ("krasnoyarsk", "62", "Красноярск"),
+    "красноярске": ("krasnoyarsk", "62", "Красноярск"),
+    "тюмень": ("tyumen", "55", "Тюмень"),
+    "тюмени": ("tyumen", "55", "Тюмень"),
+    "уфа": ("ufa", "172", "Уфа"),
+    "уфе": ("ufa", "172", "Уфа"),
+    "пермь": ("perm", "50", "Пермь"),
+    "перми": ("perm", "50", "Пермь"),
+    "сочи": ("sochi", "239", "Сочи"),
 }
 
 
@@ -103,12 +108,22 @@ def _clean_text(value: object, *, limit: int = 240) -> str:
     return text[:limit]
 
 
-def _city_profile(question: str) -> tuple[str, str]:
+def _city_profile(question: str) -> tuple[str, str, str]:
     text = str(question or "").casefold()
     for alias, profile in _CITY_PROFILES.items():
         if alias in text:
             return profile
-    return "moscow", "213"
+    return "moscow", "213", "Москва"
+
+
+def _normalized_map_query(question: str, city_name: str) -> str:
+    text = " ".join(str(question or "").split())
+    text = _RANKING_WORDS_RE.sub(" ", text)
+    text = re.sub(r"\b(?:в|во)\s+(?:москве|москвы|санкт-петербурге|петербурге|казани|екатеринбурге|новосибирске|самаре|челябинске|красноярске|тюмени|уфе|перми|сочи)\b", " ", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip(" ,.-")
+    if city_name.casefold() not in text.casefold():
+        text = f"{text} {city_name}".strip()
+    return text[:220]
 
 
 def _balanced_json_after(text: str, marker: str) -> str | None:
@@ -250,15 +265,10 @@ def _yandex_from_json(payloads: list[object], source_url: str) -> list[MapPlace]
     for payload in payloads:
         for raw_node in _walk_json(payload):
             node = raw_node
-            meta = None
             properties = node.get("properties")
             if isinstance(properties, dict) and isinstance(properties.get("CompanyMetaData"), dict):
-                meta = properties.get("CompanyMetaData")
-            if isinstance(meta, dict):
-                node = {**node, **meta}
-
-            business_id = node.get("businessId") or node.get("business_id") or node.get("id")
-            business_id = str(business_id or "").strip()
+                node = {**node, **properties["CompanyMetaData"]}
+            business_id = str(node.get("businessId") or node.get("business_id") or node.get("id") or "").strip()
             name = _first_str(node, "name", "title", "shortTitle", "short_title")
             address = _first_str(node, "address", "fullAddress", "full_address", "description")
             if not (_NUMERIC_ID_RE.fullmatch(business_id) and name and (address or node.get("categories") or node.get("rating"))):
@@ -268,13 +278,12 @@ def _yandex_from_json(payloads: list[object], source_url: str) -> list[MapPlace]
             seen.add(business_id)
             rating = _float(node.get("rating") or node.get("ratingValue") or node.get("score"))
             reviews = _int(node.get("reviewsCount") or node.get("reviewCount") or node.get("reviews_count") or node.get("ratingCount"))
-            phone = _phone_from(node.get("phones") or node.get("phone"))
             rows.append(MapPlace(
                 provider="yandex_maps",
                 name=name,
                 card_url=f"https://yandex.ru/maps/org/{business_id}",
                 address=address,
-                phone=phone,
+                phone=_phone_from(node.get("phones") or node.get("phone")),
                 website=_website_from(node),
                 rating=rating,
                 reviews=reviews,
@@ -314,24 +323,21 @@ def _twogis_from_json(payloads: list[object], city_slug: str, source_url: str) -
             name = _first_str(node, "name", "full_name", "title") or _first_str(name_ex, "primary")
             address = _first_str(node, "full_address_name", "address_name", "address")
             type_value = str(node.get("type") or "").casefold()
-            if not (_NUMERIC_ID_RE.fullmatch(branch_id) and name and (type_value in {"branch", "firm", "organization", ""}) and (address or node.get("rubrics") or node.get("reviews"))):
+            if not (_NUMERIC_ID_RE.fullmatch(branch_id) and name and type_value in {"branch", "firm", "organization", ""} and (address or node.get("rubrics") or node.get("reviews"))):
                 continue
             if branch_id in seen:
                 continue
             seen.add(branch_id)
             reviews_obj = node.get("reviews") if isinstance(node.get("reviews"), dict) else {}
-            rating = _float(reviews_obj.get("rating") or node.get("rating"))
-            reviews = _int(reviews_obj.get("review_count") or reviews_obj.get("general_review_count") or node.get("reviews_count"))
-            phone = _phone_from(node.get("contact_groups") or node.get("phones") or node.get("phone"))
             rows.append(MapPlace(
                 provider="2gis",
                 name=name,
                 card_url=f"https://2gis.ru/{city_slug}/firm/{branch_id}",
                 address=address,
-                phone=phone,
+                phone=_phone_from(node.get("contact_groups") or node.get("phones") or node.get("phone")),
                 website=_website_from(node),
-                rating=rating,
-                reviews=reviews,
+                rating=_float(reviews_obj.get("rating") or node.get("rating")),
+                reviews=_int(reviews_obj.get("review_count") or reviews_obj.get("general_review_count") or node.get("reviews_count")),
                 source_url=source_url,
             ))
             if len(rows) >= 12:
@@ -399,11 +405,16 @@ class PublicMapsDiscovery:
         if cached and now - cached[0] <= _CACHE_TTL:
             return list(cached[1])
 
-        city_slug, region_id = _city_profile(question)
-        query = " ".join(str(question or "").split())
-        yandex_url = f"https://yandex.com/maps/{region_id}/{city_slug}/search/{quote(query, safe='')}/"
-        twogis_url = f"https://2gis.ru/{city_slug}/search/{quote(query, safe='')}"
-        google_url = f"https://www.google.com/maps/search/{quote(query, safe='')}?hl=ru"
+        city_slug, region_id, city_name = _city_profile(question)
+        query = _normalized_map_query(question, city_name)
+        encoded_path = quote(query, safe="")
+        encoded_qs = quote_plus(query)
+        urls = (
+            ("yandex", f"https://yandex.com/maps/{region_id}/{city_slug}/search/{encoded_path}/"),
+            ("yandex", f"https://yandex.com/maps/?text={encoded_qs}"),
+            ("2gis", f"https://2gis.ru/{city_slug}/search/{encoded_path}"),
+            ("google", f"https://www.google.com/maps/search/{encoded_path}?hl=ru"),
+        )
 
         headers = {
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36",
@@ -423,11 +434,7 @@ class PublicMapsDiscovery:
                 except (httpx.HTTPError, TimeoutError, ValueError):
                     return provider, url, ""
 
-            responses = await asyncio.gather(
-                fetch("yandex", yandex_url),
-                fetch("2gis", twogis_url),
-                fetch("google", google_url),
-            )
+            responses = await asyncio.gather(*(fetch(provider, url) for provider, url in urls))
 
         rows: list[MapPlace] = []
         for provider, url, body in responses:
