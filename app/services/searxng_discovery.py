@@ -14,7 +14,8 @@ _TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9+#._-]
 _STOPWORDS = {
     "кто", "что", "где", "когда", "какой", "какая", "какие", "какое", "сейчас", "сегодня",
     "текущий", "текущая", "текущие", "последний", "последняя", "последние", "найди", "покажи",
-    "лучший", "лучшие", "рейтинг", "отзывы", "это", "для", "или", "как", "его", "ее", "её", "при", "про", "из", "по",
+    "лучший", "лучшие", "рейтинг", "отзывы", "компания", "компании", "центр", "центры",
+    "это", "для", "или", "как", "его", "ее", "её", "при", "про", "из", "по",
     "who", "what", "where", "when", "which", "current", "latest", "today", "now", "the", "of", "for",
     "and", "is", "are", "show", "find", "site", "version", "best", "reviews", "rating",
 }
@@ -25,14 +26,24 @@ def _site_constraint(query: str) -> str:
     return str(match.group(1) if match else "").casefold().strip(".")
 
 
+def _stem(value: str) -> str:
+    value = value.casefold().strip("._-+")
+    # We only need a conservative lexical stem for SERP validation, not a
+    # linguistic stemmer. Seven characters safely catches Russian inflection
+    # such as Москва/Москве and слухопротезирование/слухопротезирования.
+    return value[:7] if len(value) >= 7 else value
+
+
 def _meaningful_tokens(query: str) -> tuple[str, ...]:
     clean = _SITE_FILTER.sub(" ", str(query or "")).casefold()
     result: list[str] = []
     for token in _TOKEN_RE.findall(clean):
         value = token.strip("._-+")
-        if len(value) < 3 or value in _STOPWORDS or value.isdigit() or value in result:
+        if len(value) < 3 or value in _STOPWORDS or value.isdigit():
             continue
-        result.append(value)
+        stem = _stem(value)
+        if stem and stem not in result:
+            result.append(stem)
     return tuple(result[:10])
 
 
@@ -42,22 +53,28 @@ def _relevant(query: str, title: str, url: str, snippet: str) -> bool:
     required = _site_constraint(query)
     if required and not (host == required or host.endswith("." + required)):
         return False
+
     tokens = _meaningful_tokens(query)
     if not tokens:
         return True
+
     haystack = " ".join((title, snippet, host, parsed.path)).casefold()
     matches = sum(1 for token in tokens if token in haystack)
-    # Discovery is recall-oriented. Reranking/synthesis can reject weak rows later;
-    # dropping them here caused valid Russian local-business searches to become 0 sources.
-    return matches >= 1
+
+    # One lexical match is enough for a very small query. Rich/local queries
+    # must match at least two independent concepts. This prevents unrelated
+    # foreign SERP pages from leaking into a Russian local-business answer.
+    required_matches = 1 if len(tokens) <= 2 else 2
+    return matches >= required_matches
 
 
 class SearxngDiscovery:
     """Self-hosted keyless metasearch with a direct free-SERP safety net.
 
     SearXNG queries Google/Yandex/DDG/Bing. If the instance/engines are blocked,
-    empty or time out, a bounded keyless HTML fallback attempts the public SERPs
-    directly. CAPTCHA/anti-bot pages are never bypassed; another engine is used.
+    empty or time out, a bounded keyless HTML fallback attempts public SERPs.
+    CAPTCHA/anti-bot pages are never bypassed. Irrelevant rows are rejected;
+    populated-but-unrelated SERPs are treated as unusable, not as evidence.
     """
 
     name = "searxng"
@@ -86,7 +103,6 @@ class SearxngDiscovery:
         response.raise_for_status()
         payload = response.json()
         relevant_rows: list[SearchHit] = []
-        fallback_rows: list[SearchHit] = []
         seen: set[str] = set()
         for row in payload.get("results") or []:
             if not isinstance(row, dict):
@@ -100,6 +116,8 @@ class SearxngDiscovery:
             seen.add(key)
             title = str(row.get("title") or "")[:320]
             snippet = str(row.get("content") or row.get("snippet") or "")[:1000]
+            if not _relevant(query, title, url, snippet):
+                continue
             source_engines = row.get("engines") or row.get("engine") or []
             if isinstance(source_engines, str):
                 provider = source_engines
@@ -107,43 +125,23 @@ class SearxngDiscovery:
                 provider = ",".join(str(item) for item in source_engines[:4])
             else:
                 provider = ""
-            hit = SearchHit(
+            relevant_rows.append(SearchHit(
                 query=query,
                 title=title,
                 url=url,
                 snippet=snippet,
-                rank=len(fallback_rows) + 1,
+                rank=len(relevant_rows) + 1,
                 provider="searxng:" + (provider or "mixed"),
-            )
-            fallback_rows.append(hit)
-            if _relevant(query, title, url, snippet):
-                relevant_rows.append(hit)
-            if len(fallback_rows) >= self.max_results * 2:
+            ))
+            if len(relevant_rows) >= self.max_results:
                 break
-
-        # Prefer relevance-filtered rows, but never turn a populated SERP into
-        # an empty answer merely because snippets are sparse or morphology differs.
-        rows = relevant_rows or fallback_rows
-        return [
-            SearchHit(
-                query=item.query,
-                title=item.title,
-                url=item.url,
-                snippet=item.snippet,
-                rank=index,
-                provider=item.provider,
-            )
-            for index, item in enumerate(rows[: self.max_results], start=1)
-        ]
+        return relevant_rows
 
     async def search(self, query: str, *, count: int = 10, country: str | None = None, language: str | None = None) -> list[SearchHit]:
-        _ = country
         limit = min(max(int(count), 1), self.max_results)
         rows: list[SearchHit] = []
 
         if self.base_url:
-            # Local-business research legitimately needs more than the former
-            # 2.2s budget; the outer smart-search layer is still bounded.
             timeout = min(self.timeout_seconds, 5.5)
             try:
                 async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
@@ -170,8 +168,9 @@ class SearxngDiscovery:
                     language=language,
                 )
             except DiscoveryError as exc:
-                raise DiscoveryError("Self-hosted and free SERP search returned no usable results") from exc
+                raise DiscoveryError("Self-hosted and free SERP search returned no relevant results") from exc
 
+        rows = [item for item in rows if _relevant(query, item.title, item.url, item.snippet)]
         if not rows:
-            raise DiscoveryError("Search returned no usable results")
+            raise DiscoveryError("Search returned no relevant results")
         return rows[:limit]
