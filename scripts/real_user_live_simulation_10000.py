@@ -18,12 +18,13 @@ from sqlalchemy import delete
 from app.db import SessionLocal
 from app.models import User
 from app.services.auth import create_session
+from scripts.answer_quality_lint import lint_answer
 from scripts.real_user_live_simulation_100 import (
     _CONTEXT_IDS,
     _MEMORY_IDS,
     _SEEDS,
     _delete_conversation,
-    _evaluate,
+    _evaluate as _base_evaluate,
     _stream_chat,
     _surface_probe,
 )
@@ -51,8 +52,6 @@ def _select_population(limit: int, *, seed: int, full: bool, longform_limit: int
         take = per_group + (1 if index < remainder else 0)
         selected.extend(rows[:take])
 
-    # Long-form generations are intentionally expensive on the single CPU slot.
-    # Keep a representative sample unless the operator explicitly asks --full.
     long_rows = [row for row in selected if row.category == "longform"]
     if len(long_rows) > longform_limit:
         keep = set(row.id for row in rng.sample(long_rows, longform_limit))
@@ -101,6 +100,50 @@ def _account_for(accounts: list[dict], cost: int, cursor: int) -> tuple[dict, in
     raise RuntimeError("benchmark account pool exhausted")
 
 
+def _percentile(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    rows = sorted(values)
+    index = min(len(rows) - 1, max(0, int(round((len(rows) - 1) * q))))
+    value = rows[index]
+    return round(value, 2) if isinstance(value, float) else value
+
+
+def _evaluate(case, run: dict) -> tuple[list[str], dict]:
+    issues, observation = _base_evaluate(case, run)
+    result = run.get("result") or {}
+    answer = str(result.get("text") or run.get("partial_text") or "").strip()
+    usage = result.get("usage") or {}
+    lint = lint_answer(case.prompt, answer)
+
+    merged = list(issues)
+    for issue in lint.issues:
+        if issue not in merged:
+            merged.append(issue)
+
+    client_ttft = run.get("first_token_ms")
+    server_ttft = usage.get("ttft_ms")
+    queue_ms = int(usage.get("queue_ms") or 0)
+    tokens_per_second = usage.get("tokens_per_second")
+    output_tokens = int(usage.get("output_tokens") or 0)
+    stream_overhead_ms = None
+    if client_ttft is not None and server_ttft is not None:
+        stream_overhead_ms = max(0, int(client_ttft) - int(server_ttft))
+
+    observation.update({
+        "issues": merged,
+        "ok": not merged,
+        "quality_score": lint.score,
+        "quality_issues": list(lint.issues),
+        "server_ttft_ms": None if server_ttft is None else int(server_ttft),
+        "queue_ms": queue_ms,
+        "stream_overhead_ms": stream_overhead_ms,
+        "tokens_per_second": None if tokens_per_second is None else round(float(tokens_per_second), 3),
+        "output_tokens": output_tokens,
+    })
+    return merged, observation
+
+
 def _summary_rows(observations: list[dict], field: str) -> dict:
     groups: defaultdict[str, list[dict]] = defaultdict(list)
     for row in observations:
@@ -108,18 +151,22 @@ def _summary_rows(observations: list[dict], field: str) -> dict:
     result = {}
     for key, rows in sorted(groups.items()):
         good = sum(1 for item in rows if item.get("ok"))
-        ttft = sorted(int(item["ttft_ms"]) for item in rows if item.get("ttft_ms") is not None)
-        total = sorted(int(item["total_ms"]) for item in rows if item.get("total_ms") is not None)
-        def p(values: list[int], q: float):
-            if not values: return None
-            return values[min(len(values) - 1, max(0, int(round((len(values) - 1) * q))))]
+        ttft = [float(item["ttft_ms"]) for item in rows if item.get("ttft_ms") is not None]
+        total = [float(item["total_ms"]) for item in rows if item.get("total_ms") is not None]
+        queue = [float(item["queue_ms"]) for item in rows if item.get("queue_ms") is not None]
+        tps = [float(item["tokens_per_second"]) for item in rows if item.get("tokens_per_second") is not None and float(item["tokens_per_second"]) > 0]
+        quality = [float(item["quality_score"]) for item in rows if item.get("quality_score") is not None]
         result[key] = {
             "runs": len(rows),
             "pass_rate": round(good / len(rows), 4) if rows else 0,
-            "ttft_p50_ms": p(ttft, 0.50),
-            "ttft_p95_ms": p(ttft, 0.95),
-            "total_p50_ms": p(total, 0.50),
-            "total_p95_ms": p(total, 0.95),
+            "quality_p10": _percentile(quality, 0.10),
+            "quality_p50": _percentile(quality, 0.50),
+            "ttft_p50_ms": _percentile(ttft, 0.50),
+            "ttft_p95_ms": _percentile(ttft, 0.95),
+            "queue_p95_ms": _percentile(queue, 0.95),
+            "tokens_per_second_p50": _percentile(tps, 0.50),
+            "total_p50_ms": _percentile(total, 0.50),
+            "total_p95_ms": _percentile(total, 0.95),
         }
     return result
 
@@ -135,10 +182,13 @@ def _markdown(report: dict) -> str:
         "",
         "## Основные метрики",
         "",
-        f"- TTFT p50: {report['metrics'].get('ttft_p50_ms')} мс",
-        f"- TTFT p95: {report['metrics'].get('ttft_p95_ms')} мс",
-        f"- Полное время p50: {report['metrics'].get('total_p50_ms')} мс",
-        f"- Полное время p95: {report['metrics'].get('total_p95_ms')} мс",
+        f"- Quality score p10 / p50: {report['metrics'].get('quality_p10')} / {report['metrics'].get('quality_p50')}",
+        f"- Клиентский TTFT p50 / p95: {report['metrics'].get('ttft_p50_ms')} / {report['metrics'].get('ttft_p95_ms')} мс",
+        f"- Серверный TTFT p50 / p95: {report['metrics'].get('server_ttft_p50_ms')} / {report['metrics'].get('server_ttft_p95_ms')} мс",
+        f"- Очередь p50 / p95: {report['metrics'].get('queue_p50_ms')} / {report['metrics'].get('queue_p95_ms')} мс",
+        f"- SSE/UI overhead p50 / p95: {report['metrics'].get('stream_overhead_p50_ms')} / {report['metrics'].get('stream_overhead_p95_ms')} мс",
+        f"- Скорость генерации p10 / p50: {report['metrics'].get('tokens_per_second_p10')} / {report['metrics'].get('tokens_per_second_p50')} ток/с",
+        f"- Полное время p50 / p95: {report['metrics'].get('total_p50_ms')} / {report['metrics'].get('total_p95_ms')} мс",
         f"- Ошибок транспорта/runtime: {report['issue_counts'].get('transport_or_runtime_error', 0)}",
         f"- Ответов без источников при обязательном web: {report['issue_counts'].get('web_answer_without_sources', 0)}",
         "",
@@ -153,6 +203,7 @@ def _markdown(report: dict) -> str:
             f"### {row['session_id']} · {row['persona_label']} · {row['style']}",
             f"Запрос: {row['prompt']}",
             f"Проблемы: {', '.join(row['issues'])}",
+            f"Quality score: {row.get('quality_score')}",
             f"Ответ: {row.get('answer_excerpt', '')[:500]}",
             "",
         ]
@@ -174,7 +225,6 @@ async def _run(args) -> dict:
     limits = httpx.Limits(max_connections=4, max_keepalive_connections=4)
     try:
         async with httpx.AsyncClient(trust_env=False, limits=limits) as client:
-            # Verify the real site/auth/chat shell for every temporary account.
             for account in accounts:
                 headers = {"Authorization": "Bearer " + account["token"], "Accept": "text/event-stream"}
                 surface_results.append(await _surface_probe(client, base_url, headers))
@@ -188,7 +238,6 @@ async def _run(args) -> dict:
                 seed_conversation: str | None = None
 
                 if case.base_id in _MEMORY_IDS:
-                    # Isolate memory recall from unrelated synthetic sessions on the same account.
                     await client.delete(base_url + "/v1/memory", headers=headers, timeout=10.0)
 
                 seed_prompt = _SEEDS.get(case.base_id)
@@ -235,9 +284,10 @@ async def _run(args) -> dict:
 
                 print(
                     f"[{number:04d}/{len(selected):04d}] {case.id} {case.persona}/{case.style}: "
-                    f"{'OK' if observation['ok'] else 'FAIL'} ttft={observation.get('ttft_ms')}ms "
-                    f"total={observation.get('total_ms')}ms web={observation.get('web_used')} "
-                    f"issues={','.join(observation.get('issues') or [])}",
+                    f"{'OK' if observation['ok'] else 'FAIL'} q={observation.get('quality_score')} "
+                    f"ttft={observation.get('ttft_ms')}ms queue={observation.get('queue_ms')}ms "
+                    f"tps={observation.get('tokens_per_second')} total={observation.get('total_ms')}ms "
+                    f"web={observation.get('web_used')} issues={','.join(observation.get('issues') or [])}",
                     flush=True,
                 )
     finally:
@@ -249,14 +299,24 @@ async def _run(args) -> dict:
         for issue in row.get("issues") or []:
             issue_counter[str(issue).split(":", 1)[0]] += 1
 
-    ttft = sorted(int(row["ttft_ms"]) for row in observations if row.get("ttft_ms") is not None)
-    total = sorted(int(row["total_ms"]) for row in observations if row.get("total_ms") is not None)
-    def p(values: list[int], q: float):
-        if not values: return None
-        return values[min(len(values) - 1, max(0, int(round((len(values) - 1) * q))))]
+    def metric(name: str) -> list[float]:
+        values = []
+        for row in observations:
+            value = row.get(name)
+            if value is not None:
+                values.append(float(value))
+        return values
+
+    ttft = metric("ttft_ms")
+    server_ttft = metric("server_ttft_ms")
+    queue = metric("queue_ms")
+    overhead = metric("stream_overhead_ms")
+    total = metric("total_ms")
+    quality = metric("quality_score")
+    tps = [value for value in metric("tokens_per_second") if value > 0]
 
     report = {
-        "format": "olya-real-user-live-10000-v1",
+        "format": "olya-real-user-live-10000-v2",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "population": 10_000,
         "live_runs": len(observations),
@@ -267,8 +327,13 @@ async def _run(args) -> dict:
         "pass_rate": passed / len(observations) if observations else 0.0,
         "surface_pass_rate": sum(1 for row in surface_results if row.get("passed")) / len(surface_results) if surface_results else 0.0,
         "metrics": {
-            "ttft_p50_ms": p(ttft, 0.50), "ttft_p95_ms": p(ttft, 0.95), "ttft_p99_ms": p(ttft, 0.99),
-            "total_p50_ms": p(total, 0.50), "total_p95_ms": p(total, 0.95), "total_p99_ms": p(total, 0.99),
+            "quality_p10": _percentile(quality, 0.10), "quality_p50": _percentile(quality, 0.50),
+            "ttft_p50_ms": _percentile(ttft, 0.50), "ttft_p95_ms": _percentile(ttft, 0.95), "ttft_p99_ms": _percentile(ttft, 0.99),
+            "server_ttft_p50_ms": _percentile(server_ttft, 0.50), "server_ttft_p95_ms": _percentile(server_ttft, 0.95),
+            "queue_p50_ms": _percentile(queue, 0.50), "queue_p95_ms": _percentile(queue, 0.95),
+            "stream_overhead_p50_ms": _percentile(overhead, 0.50), "stream_overhead_p95_ms": _percentile(overhead, 0.95),
+            "tokens_per_second_p10": _percentile(tps, 0.10), "tokens_per_second_p50": _percentile(tps, 0.50),
+            "total_p50_ms": _percentile(total, 0.50), "total_p95_ms": _percentile(total, 0.95), "total_p99_ms": _percentile(total, 0.99),
         },
         "issue_counts": dict(issue_counter.most_common()),
         "by_category": _summary_rows(observations, "category"),
