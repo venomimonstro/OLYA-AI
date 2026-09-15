@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 from pathlib import Path
@@ -200,7 +201,7 @@ def import_pbf(source: Path, *, default_city: str = "", keep_filtered: bool = Fa
                     "opening_hours": str(properties.get("opening_hours") or "")[:500],
                     "source": "osm", "source_url": source_url, "source_id": source_id, "confidence": 0.78,
                 }); written += 1
-            except (ValueError, OSError, sqlite3.Error if False else OSError):
+            except (ValueError, OSError, sqlite3.Error):
                 continue
             if written and written % 5000 == 0: print(f"indexed {written:,} businesses (seen {seen:,})", flush=True)
     return seen, written
