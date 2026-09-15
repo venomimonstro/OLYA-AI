@@ -22,6 +22,7 @@ python3 -m py_compile \
   app/services/response_strategy.py \
   app/inference/router.py \
   app/utility_chat.py \
+  app/workspace_client_v4.py \
   app/workspace_recovery_controls.py \
   app/workspace_chat_library_v1.py \
   app/task_solver_user_ui.py \
