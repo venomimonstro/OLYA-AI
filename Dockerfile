@@ -9,15 +9,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Git is required by the closed development runtime. Full installations also
-# include local document QA binaries. The 6GB starter keeps document rendering
-# disabled and omits LibreOffice/poppler to save disk and page-cache pressure.
+# Git is required by the closed development runtime. osmium-tool builds the
+# persistent local business catalog from OpenStreetMap PBF extracts so runtime
+# local-business search does not depend on third-party websites.
 RUN apt-get update \
     && if [ "$X1_RUNTIME_PROFILE" = "starter_6gb" ]; then \
-         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates; \
+         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates osmium-tool; \
        else \
          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-           git ca-certificates libreoffice-writer poppler-utils fonts-dejavu-core; \
+           git ca-certificates osmium-tool libreoffice-writer poppler-utils fonts-dejavu-core; \
        fi \
     && rm -rf /var/lib/apt/lists/*
 
@@ -49,7 +49,4 @@ RUN python -m scripts.build_provenance --root /app --write /app/BUILD_PROVENANCE
 
 USER x1
 
-# HTTP availability is independent from model warm-up. start_app.sh runs schema
-# migrations synchronously, then warms llama.cpp in the background and starts
-# Uvicorn immediately. A transient warm-up failure can no longer cause a 502.
 CMD ["/app/scripts/start_app.sh"]
