@@ -19,10 +19,18 @@ _TRANSFORM_RE = re.compile(
     re.I,
 )
 _WEB_RE = re.compile(
-    r"(?:\bваканси\w*\b|\bотзыв\w*\b|\bрейтинг\w*\b|\bнайди\b|\bпоищи\b|"
+    r"(?:\bотзыв\w*\b|\bрейтинг\w*\b|\bнайди\b|\bпоищи\b|"
     r"в интернете|в сети|проверь сайт|проанализируй сайт|\bлучши\w*\b|"
     r"\bчто\s+нужно\s+знать\s*,?\s+(?:чтобы|перед)\b|\bсовет\w*\b|\bрекомендац\w*\b|"
     r"\breviews?\b|\brating\b|\bsearch\b|\bfind\b|\brecommend\w*\b)",
+    re.I,
+)
+_VACANCY_LOOKUP_RE = re.compile(
+    r"(?:"
+    r"\b(?:найди|поищи|покажи|подбери|ищу|найти|поиск|актуальн\w*|открыт\w*)\b.{0,45}\bваканси\w*\b|"
+    r"\bваканси\w*\b.{0,60}\b(?:в\s+[А-Яа-яЁёA-Za-z-]+|удален\w*|зарплат\w*|от\s*\d|remote|сейчас|сегодня|актуальн\w*)\b|"
+    r"^\s*ваканси\w*\s+(?:python|php|java|маркетолог\w*|дизайнер\w*|разработчик\w*|аналитик\w*|менеджер\w*|seo\b|smm\b).*$"
+    r")",
     re.I,
 )
 _DEEP_WEB_RE = re.compile(
@@ -94,7 +102,12 @@ def should_use_web(question: str, web_mode: str) -> bool:
     if _self_contained_transform(question):
         return False
     text = " ".join(str(question or "").split())
-    return bool(text and (_URL_RE.search(text) or requires_fresh_data(text) or _WEB_RE.search(text)))
+    return bool(text and (
+        _URL_RE.search(text)
+        or requires_fresh_data(text)
+        or _WEB_RE.search(text)
+        or _VACANCY_LOOKUP_RE.search(text)
+    ))
 
 
 def _host(url: str) -> str:
