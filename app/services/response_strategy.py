@@ -11,8 +11,7 @@ _LEADING_FILLER_RE = re.compile(
 _FRESH_RE = re.compile(
     r"(?:\bсейчас\b|\bщас\b|\bсегодня\b|\bвчера\b|\bзавтра\b|\bпоследн\w*\b|\bактуальн\w*\b|"
     r"\bновост\w*\b|\bтекущ\w*\b|\bнынешн\w*\b|\bкурс\w*\b|\bцен[аы]\b|\bстоимост\w*\b|\bпоч[её]м\b|"
-    r"\bпогод\w*\b|\bрасписан\w*\b|\bnow\b|\btoday\b|\blatest\b|\bcurrent\b|\bnews\b|\bprice\b|\bweather\b)",
-    re.I,
+    r"\bпогод\w*\b|\bрасписан\w*\b|\bnow\b|\btoday\b|\blatest\b|\bcurrent\b|\bnews\b|\bprice\b|\bweather\b)", re.I,
 )
 _EXPLICIT_RECENCY_RE = re.compile(
     r"(?:\bсейчас\b|\bщас\b|\bсегодня\b|\bвчера\b|\bзавтра\b|\bпоследн\w*\b|\bактуальн\w*\b|\bтекущ\w*\b|"
@@ -37,6 +36,17 @@ _SHOPPING_LOOKUP_RE = re.compile(
     r"стиральн\w*\s+машин\w*|автомобил\w*|машин\w*|отель|гостиниц\w*|crm|хостинг|vps)\b|"
     r"\b(?:ноутбук|смартфон|телефон|монитор|телевизор|планшет|наушники|роутер|принтер|автомобил\w*)\b.{0,45}\bдо\s*\d[\d\s]*\s*(?:₽|руб|тыс)|"
     r"\b(?:recommend|choose|pick)\s+(?:a\s+)?(?:laptop|phone|monitor|tv|tablet|headphones|router|printer|hotel|crm|hosting)\b)", re.I,
+)
+_LOCAL_LOOKUP_RE = re.compile(
+    r"(?:\bгде\s+(?:поесть|покушать|перекусить|выпить\s+кофе|остановиться|припарковаться)\b|"
+    r"\bкуда\s+сходить\b|\bчто\s+посмотреть\s+в\s+[а-яёa-z-]+|"
+    r"\b(?:кафе|ресторан\w*|кофейн\w*|аптек\w*|отел\w*|гостиниц\w*)\b.{0,35}\b(?:рядом|поблизости|недалеко|в\s+[а-яёa-z-]+)|"
+    r"\b(?:restaurant|cafe|hotel|pharmacy)\s+(?:near\s+me|nearby|in\s+[a-z-]+))", re.I,
+)
+_REGULATED_LOOKUP_RE = re.compile(
+    r"(?:\b(?:какие|какой|сколько|размер|ставк\w*|правил\w*|услови\w*)\b.{0,45}\b(?:налог\w*|ндс|ндфл|штраф\w*|пошлин\w*|пенси\w*)\b|"
+    r"\b(?:налог\w*|ндс|ндфл|штраф\w*|самозанят\w*|усн|коап|трудов\w*\s+законодательств\w*)\b.{0,45}\b(?:платить|действует|ставк\w*|правил\w*|требован\w*)\b|"
+    r"\bможно\s+ли\s+(?:вернуть\s+товар|уволить|не\s+платить|получить\s+вычет)\b)", re.I,
 )
 _DYNAMIC_LOOKUP_RE = re.compile(
     r"(?:\b(?:какая|какой|какие|what)\s+(?:сейчас\s+|щас\s+)?верси\w*\b|"
@@ -122,7 +132,11 @@ def requires_fresh_data(text: str) -> bool:
         return False
     if _STABLE_EXPLANATION_RE.search(value) and not _EXPLICIT_RECENCY_RE.search(value) and not _CURRENT_ROLE_RE.search(value) and not _DYNAMIC_LOOKUP_RE.search(value):
         return False
-    return bool(_URL_RE.search(value) or _FRESH_RE.search(value) or _CURRENT_ROLE_RE.search(value) or _DYNAMIC_LOOKUP_RE.search(value) or _SHOPPING_LOOKUP_RE.search(value))
+    return bool(
+        _URL_RE.search(value) or _FRESH_RE.search(value) or _CURRENT_ROLE_RE.search(value) or
+        _DYNAMIC_LOOKUP_RE.search(value) or _SHOPPING_LOOKUP_RE.search(value) or
+        _LOCAL_LOOKUP_RE.search(value) or _REGULATED_LOOKUP_RE.search(value)
+    )
 
 
 def requires_memory_context(text: str) -> bool:
