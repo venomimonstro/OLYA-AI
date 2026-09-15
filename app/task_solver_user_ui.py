@@ -13,6 +13,7 @@ from app.workspace_premium_v6 import enhance_workspace_premium_v6
 from app.workspace_parallel_draft_patch import enhance_parallel_draft_safety
 from app.workspace_recovery_controls import enhance_recovery_controls
 from app.workspace_chat_library_v1 import enhance_chat_library
+from app.workspace_crash_recovery_v1 import enhance_crash_recovery
 
 router = APIRouter(tags=["user-workspace"])
 
@@ -99,6 +100,7 @@ def workspace(db: Session = Depends(get_db)) -> HTMLResponse:
     document = enhance_parallel_draft_safety(document)
     document = enhance_recovery_controls(document)
     document = enhance_chat_library(document)
+    document = enhance_crash_recovery(document)
 
     response = HTMLResponse(document, status_code=base.status_code)
     for key, value in base.headers.items():
