@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -29,31 +30,28 @@ def _int_env(name: str, default: int, minimum: int, maximum: int) -> int:
 
 
 def _business_roots(store: LocalSearchStore, *, limit: int) -> list[str]:
-    """Return a small rotating set of official business-site roots.
-
-    The database stores only business facts; crawling starts from websites that
-    were already observed in OSM or another source. This avoids inventing
-    domains and keeps the maintenance worker focused and cheap.
-    """
+    """Return least-recently-seeded official business website roots."""
     connection = sqlite3.connect(str(store.path), timeout=10.0)
     connection.row_factory = sqlite3.Row
     try:
-        rows = connection.execute(
+        candidates = connection.execute(
             """
             SELECT website
             FROM businesses
             WHERE website != ''
-            ORDER BY COALESCE(last_seen_at, updated_at) ASC, confidence DESC
+            ORDER BY confidence DESC, updated_at DESC
             LIMIT ?
             """,
-            (max(1, min(int(limit), 200)),),
+            (max(50, min(int(limit) * 100, 20_000)),),
         ).fetchall()
+        domain_rows = connection.execute("SELECT domain,last_crawled_at FROM domains").fetchall()
     finally:
         connection.close()
 
-    roots: list[str] = []
+    last_seeded = {str(row["domain"]): str(row["last_crawled_at"] or "") for row in domain_rows}
+    choices: list[tuple[str, str, str]] = []
     seen: set[str] = set()
-    for row in rows:
+    for row in candidates:
         raw = str(row["website"] or "").strip()
         if raw.startswith("www."):
             raw = "https://" + raw
@@ -62,8 +60,30 @@ def _business_roots(store: LocalSearchStore, *, limit: int) -> list[str]:
         if parsed.scheme not in {"http", "https"} or not host or host in seen:
             continue
         seen.add(host)
-        roots.append(f"{parsed.scheme}://{parsed.netloc}/")
-    return roots
+        choices.append((last_seeded.get(host, ""), host, f"{parsed.scheme}://{parsed.netloc}/"))
+    choices.sort(key=lambda item: (bool(item[0]), item[0], item[1]))
+    return [root for _last, _host, root in choices[: max(1, limit)]]
+
+
+def _mark_domain_attempt(store: LocalSearchStore, root: str) -> None:
+    parsed = urlsplit(root)
+    host = (parsed.hostname or "").casefold().removeprefix("www.")
+    if not host:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    connection = sqlite3.connect(str(store.path), timeout=10.0)
+    try:
+        connection.execute(
+            """
+            INSERT INTO domains(domain,last_crawled_at,enabled)
+            VALUES (?,?,1)
+            ON CONFLICT(domain) DO UPDATE SET last_crawled_at=excluded.last_crawled_at
+            """,
+            (host, now),
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def _file_roots(path: Path, *, limit: int) -> list[str]:
@@ -107,8 +127,9 @@ async def owned_search_maintenance_loop() -> None:
             businesses = int(stats.get("businesses") or 0)
             loop_now = asyncio.get_running_loop().time()
 
-            # Seed infrequently and only when the queue is running low. This
-            # avoids hammering sitemaps and keeps crawler CPU/network negligible.
+            # Seed infrequently and only when the queue is running low. Domains
+            # are least-recently-seeded, so the crawler expands coverage over
+            # time instead of repeatedly hitting the same few sites.
             if seed_limit > 0 and queued < max(10, crawl_limit * 2) and loop_now - last_seed_at >= 6 * 3600:
                 roots: list[str] = []
                 roots.extend(_file_roots(seeds_file, limit=seed_limit))
@@ -124,6 +145,10 @@ async def owned_search_maintenance_loop() -> None:
                         await crawler.seed_domain(root, max_sitemaps=8, max_urls=max_urls)
                     except Exception as exc:
                         logger.debug("Owned search seed failed for %s: %s", root, exc)
+                    finally:
+                        # Mark attempts too; an unavailable site must not starve
+                        # thousands of other domains from ever being indexed.
+                        _mark_domain_attempt(store, root)
                 last_seed_at = loop_now
 
             if int(store.stats().get("queued") or 0) > 0:
