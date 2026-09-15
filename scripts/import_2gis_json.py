@@ -79,7 +79,6 @@ def _first(*values: Any) -> str:
 
 
 def _load_recoverable_array(path: Path) -> LoadReport:
-    """Load parser-2gis JSON and salvage complete records from a truncated tail."""
     text = path.read_text(encoding="utf-8-sig")
     try:
         payload = json.loads(text)
@@ -112,20 +111,10 @@ def _load_recoverable_array(path: Path) -> LoadReport:
                 f"2GIS JSON is corrupted and no complete records could be recovered; parse error at char {strict_error.pos}"
             ) from strict_error
         stop = error_offset if error_offset is not None else index
-        return LoadReport(
-            items=items,
-            recovered=True,
-            error_offset=error_offset if error_offset is not None else strict_error.pos,
-            trailing_chars=max(0, length - stop),
-        )
+        return LoadReport(items, True, error_offset if error_offset is not None else strict_error.pos, max(0, length - stop))
     if not isinstance(payload, list):
         raise SystemExit("2GIS JSON must contain a list")
-    return LoadReport(
-        items=[item for item in payload if isinstance(item, dict)],
-        recovered=False,
-        error_offset=None,
-        trailing_chars=0,
-    )
+    return LoadReport([item for item in payload if isinstance(item, dict)], False, None, 0)
 
 
 def _contacts(item: dict[str, Any]) -> tuple[str, str, str]:
@@ -200,6 +189,21 @@ def _city(item: dict[str, Any], fallback: str) -> str:
     return fallback
 
 
+def _coordinates(item: dict[str, Any]) -> tuple[float | None, float | None]:
+    point = item.get("point") if isinstance(item.get("point"), dict) else {}
+    try:
+        lat = float(point.get("lat"))
+        lon = float(point.get("lon"))
+    except (TypeError, ValueError):
+        return None, None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None, None
+    # Protect the geo index from empty/default coordinates.
+    if lat == 0.0 and lon == 0.0:
+        return None, None
+    return lat, lon
+
+
 def _review_metrics(item: dict[str, Any]) -> tuple[float | None, int | None]:
     reviews = item.get("reviews")
     if not isinstance(reviews, dict):
@@ -233,23 +237,16 @@ def _record(item: dict[str, Any], *, city: str, category_override: str) -> dict[
     if not branch_id:
         branch_id = _clean((item.get("org") or {}).get("id")) if isinstance(item.get("org"), dict) else ""
     name_ex = item.get("name_ex") if isinstance(item.get("name_ex"), dict) else {}
-    name = _first(
-        name_ex.get("primary"),
-        item.get("name"),
-        (item.get("org") or {}).get("name") if isinstance(item.get("org"), dict) else "",
-    )
+    name = _first(name_ex.get("primary"), item.get("name"), (item.get("org") or {}).get("name") if isinstance(item.get("org"), dict) else "")
     if len(name) < 2:
         return None
 
     rubrics, detected_category = _rubrics(item)
-    point = item.get("point") if isinstance(item.get("point"), dict) else {}
     phone, website, email = _contacts(item)
     resolved_city = _city(item, city)
     rating, review_count = _review_metrics(item)
-    address = _first(
-        item.get("address_name"),
-        (item.get("address") or {}).get("name") if isinstance(item.get("address"), dict) else "",
-    )
+    lat, lon = _coordinates(item)
+    address = _first(item.get("address_name"), (item.get("address") or {}).get("name") if isinstance(item.get("address"), dict) else "")
     if address and resolved_city and resolved_city.casefold() not in address.casefold():
         address = f"{resolved_city}, {address}"
 
@@ -271,18 +268,11 @@ def _record(item: dict[str, Any], *, city: str, category_override: str) -> dict[
         "category": category_override or detected_category,
         "subcategory": rubrics[0] if rubrics else "",
         "country": "Россия",
-        "region": next(
-            (
-                _clean(row.get("name"))
-                for row in item.get("adm_div") or []
-                if isinstance(row, dict) and _clean(row.get("type")).casefold() == "region"
-            ),
-            "",
-        ),
+        "region": next((_clean(row.get("name")) for row in item.get("adm_div") or [] if isinstance(row, dict) and _clean(row.get("type")).casefold() == "region"), ""),
         "city": resolved_city,
         "address": address,
-        "lat": point.get("lat"),
-        "lon": point.get("lon"),
+        "lat": lat,
+        "lon": lon,
         "phone": phone,
         "website": website,
         "opening_hours": _schedule(item),
@@ -303,7 +293,7 @@ def main() -> int:
     path = Path(args.path)
     report = _load_recoverable_array(path)
     store = get_local_search_store()
-    written = skipped = ratings_imported = reviews_imported = 0
+    written = skipped = ratings_imported = reviews_imported = coordinates_imported = 0
     category_counts: dict[str, int] = {}
     for item in report.items:
         record = _record(item, city=args.city, category_override=args.category)
@@ -327,28 +317,26 @@ def main() -> int:
             ratings_imported += 1
         if record.get("review_count") is not None:
             reviews_imported += 1
+        if record.get("lat") is not None and record.get("lon") is not None:
+            coordinates_imported += 1
         category = str(record.get("category") or "unknown")
         category_counts[category] = category_counts.get(category, 0) + 1
 
-    print(
-        json.dumps(
-            {
-                "source": str(path),
-                "input_records": len(report.items),
-                "recovered_truncated_json": report.recovered,
-                "json_error_offset": report.error_offset,
-                "trailing_chars_ignored": report.trailing_chars,
-                "written": written,
-                "skipped": skipped,
-                "ratings_imported": ratings_imported,
-                "reviews_imported": reviews_imported,
-                "categories": category_counts,
-                "store": store.stats(),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+    print(json.dumps({
+        "source": str(path),
+        "input_records": len(report.items),
+        "recovered_truncated_json": report.recovered,
+        "json_error_offset": report.error_offset,
+        "trailing_chars_ignored": report.trailing_chars,
+        "written": written,
+        "skipped": skipped,
+        "ratings_imported": ratings_imported,
+        "reviews_imported": reviews_imported,
+        "coordinates_imported": coordinates_imported,
+        "coordinate_coverage_pct": round(coordinates_imported * 100.0 / written, 2) if written else 0.0,
+        "categories": category_counts,
+        "store": store.stats(),
+    }, ensure_ascii=False, indent=2))
     return 0 if written else 2
 
 
