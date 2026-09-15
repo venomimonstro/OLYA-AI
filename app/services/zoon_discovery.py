@@ -58,6 +58,23 @@ _STOP = {
     'центров', 'в', 'во', 'на', 'рядом', 'поблизости', 'около', 'москва', 'москве', 'москвы',
 }
 
+# Broad semantic hints are only used to enter Zoon's live taxonomy. Fine-grained
+# service/type selection is then discovered from the category page itself.
+_VERTICAL_HINTS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
+    (re.compile(r'слух|сурдолог|врач|доктор|клиник|медицин|стоматолог|диагност|анализ', re.I), ('medical', 'медицин')),
+    (re.compile(r'авто|машин|шиномонтаж|детейлинг|автомойк|техосмотр', re.I), ('autoservice', 'автосервис')),
+    (re.compile(r'юрист|адвокат|нотариус|правов|банкротств', re.I), ('law', 'юридичес')),
+    (re.compile(r'ресторан|кафе|бар\b|еда|пицц|суши', re.I), ('restaurants', 'ресторан')),
+    (re.compile(r'салон|красот|парикмах|барбершоп|маникюр|массаж', re.I), ('beauty', 'красот')),
+    (re.compile(r'фитнес|спортзал|тренаж|йога', re.I), ('fitness', 'фитнес')),
+    (re.compile(r'ветеринар|ветклиник|животн', re.I), ('vet', 'ветеринар')),
+    (re.compile(r'недвижим|риелтор|риэлтор', re.I), ('realty', 'недвижим')),
+    (re.compile(r'строител|ремонт квартир|двер|отоплен', re.I), ('building', 'строител')),
+    (re.compile(r'курс|школ|обучен|образован|репетитор', re.I), ('trainings', 'образован')),
+    (re.compile(r'магазин|товар|супермаркет|рынок', re.I), ('shops', 'магазин')),
+    (re.compile(r'туризм|отел|гостиниц|хостел|туроператор', re.I), ('tourism', 'туризм')),
+)
+
 
 @dataclass(frozen=True)
 class ZoonCard:
@@ -90,9 +107,22 @@ def _query_terms(question: str) -> tuple[str, ...]:
     return tuple(result[:8])
 
 
-def _text_score(text: str, terms: tuple[str, ...]) -> int:
-    haystack = _clean(text, 500).casefold()
-    return sum(1 for term in terms if term in haystack)
+def _semantic_hints(question: str) -> tuple[str, ...]:
+    text = normalized_question(question)
+    values: list[str] = []
+    for pattern, hints in _VERTICAL_HINTS:
+        if pattern.search(text):
+            for hint in hints:
+                if hint not in values:
+                    values.append(hint)
+    return tuple(values)
+
+
+def _text_score(text: str, terms: tuple[str, ...], hints: tuple[str, ...] = ()) -> int:
+    haystack = _clean(text, 700).casefold()
+    score = sum(2 for term in terms if term in haystack)
+    score += sum(3 for hint in hints if hint in haystack)
+    return score
 
 
 def _is_zoon_url(url: str, city_slug: str) -> bool:
@@ -101,7 +131,6 @@ def _is_zoon_url(url: str, city_slug: str) -> bool:
     path = parsed.path.casefold()
     if host != 'zoon.ru':
         return False
-    # Moscow canonical city pages may omit /msk/ and live at site root.
     allowed_prefixes = ('/', f'/{city_slug}/') if city_slug == 'msk' else (f'/{city_slug}/',)
     if not any(path.startswith(prefix) for prefix in allowed_prefixes):
         return False
@@ -282,6 +311,7 @@ async def _fetch_text(client: httpx.AsyncClient, url: str, *, max_bytes: int = 6
 
 def _category_candidates(root_url: str, body: str, city_slug: str, question: str) -> list[str]:
     terms = _query_terms(question)
+    hints = _semantic_hints(question)
     rows: list[tuple[int, str]] = []
     seen: set[str] = set()
     root_path = urlsplit(root_url).path.rstrip('/')
@@ -297,12 +327,16 @@ def _category_candidates(root_url: str, body: str, city_slug: str, question: str
         if '/type/' in path or '/specialists' in path or '/article/' in path or '/reviews' in path:
             continue
         segments = [part for part in path.split('/') if part]
-        # Category pages are shallow: /autoservice/ in Moscow or /city/law/ elsewhere.
-        expected_depth = 1 if city_slug == 'msk' else 2
-        if len(segments) != expected_depth:
+        # Moscow's landing is zoon.ru/, but its category URLs are /msk/<category>/.
+        valid_depths = {1, 2} if city_slug == 'msk' else {2}
+        if len(segments) not in valid_depths:
+            continue
+        if city_slug == 'msk' and len(segments) == 2 and segments[0] != 'msk':
+            continue
+        if city_slug != 'msk' and segments[0] != city_slug:
             continue
         label = _clean(label_html, 180)
-        score = _text_score(label + ' ' + path.replace('/', ' '), terms)
+        score = _text_score(label + ' ' + path.replace('/', ' '), terms, hints)
         if score <= 0:
             continue
         canonical = urlunsplit(('https', 'zoon.ru', parsed.path if parsed.path.endswith('/') else parsed.path + '/', '', ''))
@@ -314,12 +348,38 @@ def _category_candidates(root_url: str, body: str, city_slug: str, question: str
     return [url for _score, url in rows[:3]]
 
 
+def _subcategory_candidates(category_url: str, body: str, question: str) -> list[str]:
+    terms = _query_terms(question)
+    rows: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for href, label_html in _ANCHOR_RE.findall(body):
+        url = urljoin(category_url, html.unescape(href))
+        parsed = urlsplit(url)
+        if (parsed.hostname or '').casefold().removeprefix('www.') != 'zoon.ru':
+            continue
+        if '/type/' not in parsed.path:
+            continue
+        label = _clean(label_html, 220)
+        score = _text_score(label + ' ' + parsed.path.replace('/', ' '), terms)
+        if score <= 0:
+            continue
+        canonical = urlunsplit(('https', 'zoon.ru', parsed.path if parsed.path.endswith('/') else parsed.path + '/', '', ''))
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        rows.append((score, canonical))
+    rows.sort(key=lambda item: item[0], reverse=True)
+    return [url for _score, url in rows[:2]]
+
+
 def _organization_links(category_url: str, body: str, city_slug: str, question: str, limit: int) -> list[str]:
     terms = _query_terms(question)
     category_segments = [part for part in urlsplit(category_url).path.split('/') if part]
-    candidates: list[tuple[int, str]] = []
+    candidates: list[tuple[int, int, str]] = []
     seen: set[str] = set()
+    position = 0
     for href, label_html in _ANCHOR_RE.findall(body):
+        position += 1
         url = urljoin(category_url, html.unescape(href))
         if not _is_zoon_url(url, city_slug):
             continue
@@ -328,11 +388,9 @@ def _organization_links(category_url: str, body: str, city_slug: str, question: 
         if any(token in path for token in ('/type/', '/specialists/', '/article/', '/network/', '/chains/')):
             continue
         segments = [part for part in path.split('/') if part]
-        # Organization card is at least one level deeper than its category.
         if len(segments) <= len(category_segments):
             continue
         label = _clean(label_html, 220)
-        # Listing pages contain category/filter links too; require a meaningful visible name.
         if len(label) < 3:
             continue
         canonical = _canonical_card_url(url)
@@ -341,18 +399,18 @@ def _organization_links(category_url: str, body: str, city_slug: str, question: 
             continue
         seen.add(key)
         score = _text_score(label, terms)
-        candidates.append((score, canonical))
-    # Preserve page ranking but prefer links whose visible text overlaps the query.
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    return [url for _score, url in candidates[:limit]]
+        candidates.append((score, -position, canonical))
+    candidates.sort(reverse=True)
+    return [url for _score, _position, url in candidates[:limit]]
 
 
 async def discover_zoon(question: str, discovery=None, *, limit: int = 8) -> list[MapPlace]:
     """Generic direct Zoon discovery without depending on SERP.
 
-    Pipeline: city landing -> dynamically discovered best matching category ->
-    organization cards -> JSON-LD/HTML extraction. The category taxonomy is read
-    from Zoon itself, so new industries do not require code changes.
+    Pipeline: city landing -> live taxonomy category -> optional matching type ->
+    organization cards -> JSON-LD/HTML extraction. The taxonomy is read from
+    Zoon itself, while broad hints only bridge user vocabulary to a top-level
+    vertical such as hearing aids -> medical.
     """
     _ = discovery
     city_slug = _city_slug(question)
@@ -363,7 +421,7 @@ async def discover_zoon(question: str, discovery=None, *, limit: int = 8) -> lis
         'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.5',
         'Cache-Control': 'no-cache',
     }
-    timeout = httpx.Timeout(3.2, connect=1.0)
+    timeout = httpx.Timeout(3.5, connect=1.2)
     async with httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=True, headers=headers) as client:
         final_root, root_body = await _fetch_text(client, root_url, max_bytes=4_000_000)
         if not root_body:
@@ -373,25 +431,40 @@ async def discover_zoon(question: str, discovery=None, *, limit: int = 8) -> lis
             return []
 
         category_pages = await asyncio.gather(*(_fetch_text(client, url, max_bytes=5_000_000) for url in categories))
-        card_urls: list[str] = []
-        seen: set[str] = set()
+        listing_pages: list[tuple[str, str]] = []
+        subcategory_urls: list[str] = []
+        seen_sub: set[str] = set()
         for category_url, body in category_pages:
             if not body:
                 continue
-            for url in _organization_links(category_url, body, city_slug, question, max(limit * 2, 12)):
+            listing_pages.append((category_url, body))
+            for sub_url in _subcategory_candidates(category_url, body, question):
+                if sub_url not in seen_sub:
+                    seen_sub.add(sub_url)
+                    subcategory_urls.append(sub_url)
+
+        if subcategory_urls:
+            sub_pages = await asyncio.gather(*(_fetch_text(client, url, max_bytes=5_000_000) for url in subcategory_urls[:3]))
+            # Matching type pages are more specific, so process them first.
+            listing_pages = [row for row in sub_pages if row[1]] + listing_pages
+
+        card_urls: list[str] = []
+        seen: set[str] = set()
+        for listing_url, body in listing_pages:
+            for url in _organization_links(listing_url, body, city_slug, question, max(limit * 2, 14)):
                 key = canonical_result_url(url)
                 if not key or key in seen:
                     continue
                 seen.add(key)
                 card_urls.append(url)
-                if len(card_urls) >= max(limit * 2, 12):
+                if len(card_urls) >= max(limit * 2, 14):
                     break
-            if len(card_urls) >= max(limit * 2, 12):
+            if len(card_urls) >= max(limit * 2, 14):
                 break
         if not card_urls:
             return []
 
-        fetched = await asyncio.gather(*(_fetch_text(client, url) for url in card_urls[: max(limit * 2, 12)]))
+        fetched = await asyncio.gather(*(_fetch_text(client, url) for url in card_urls[: max(limit * 2, 14)]))
 
     result: list[MapPlace] = []
     seen_cards: set[str] = set()
