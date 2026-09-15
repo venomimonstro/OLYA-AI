@@ -32,6 +32,8 @@ python3 -m py_compile \
   scripts/client_product_audit.py \
   scripts/latency_path_audit.py \
   scripts/exact_fastpath_audit.py \
+  scripts/workspace_stability_audit.py \
+  scripts/web_prompt_budget_audit.py \
   scripts/answer_quality_lint.py \
   scripts/real_user_scenarios.py \
   scripts/real_user_routing_audit.py \
@@ -65,6 +67,12 @@ if [ "$ready" -ne 1 ]; then
   fail "Application did not become healthy"
 fi
 
+info "Running workspace browser-stability regression"
+docker compose exec -T app python -m scripts.workspace_stability_audit
+
+info "Running compact web-prompt latency regression"
+docker compose exec -T app python -m scripts.web_prompt_budget_audit
+
 info "Warming the exact fast-chat prompt prefix"
 docker compose exec -T app python -m scripts.warm_local_llm
 
@@ -86,4 +94,4 @@ docker compose exec -T app python -m scripts.client_product_audit
 info "Running broad product route/UI audit"
 docker compose exec -T app python -m scripts.product_surface_audit
 
-info "PASSED: exact fast paths, 10,000-user routing, fast answers, search, prompt warmup, workspace, memory and owner surfaces are registered"
+info "PASSED: workspace stability, compact web evidence, exact fast paths, 10,000-user routing, memory and owner surfaces are registered"
