@@ -30,6 +30,7 @@ python3 -m py_compile \
   scripts/warm_local_llm.py \
   scripts/client_product_audit.py \
   scripts/latency_path_audit.py \
+  scripts/answer_quality_lint.py \
   scripts/real_user_scenarios.py \
   scripts/real_user_routing_audit.py \
   scripts/real_user_live_simulation_100.py \
