@@ -50,25 +50,17 @@ class LocalBusinessResult:
 
 def is_local_business_question(question: str) -> bool:
     text = normalized_question(question)
-    if not text or _NON_BUSINESS_LOCAL_RE.search(text):
-        return False
-    if not (_CITY_MENTION_RE.search(text) or _LOCATION_RE.search(text)):
-        return False
-    if _SELECTION_RE.search(text):
-        return True
+    if not text or _NON_BUSINESS_LOCAL_RE.search(text): return False
+    if not (_CITY_MENTION_RE.search(text) or _LOCATION_RE.search(text)): return False
+    if _SELECTION_RE.search(text): return True
     return bool(_BUSINESS_GENERIC_RE.search(text) and (_CITY_MENTION_RE.search(text) or _LOCAL_ACTION_RE.search(text)))
 
 
-def _host(url: str) -> str:
-    return (urlsplit(str(url or "")).hostname or "").casefold().removeprefix("www.")
-
+def _host(url: str) -> str: return (urlsplit(str(url or "")).hostname or "").casefold().removeprefix("www.")
 
 def _kind(url: str) -> str:
-    parsed = urlsplit(str(url or ""))
-    host = (parsed.hostname or "").casefold().removeprefix("www.")
-    path = (parsed.path or "").casefold()
-    if host.endswith(("yandex.ru", "yandex.com")) and (path.startswith("/maps") or path.startswith("/profile/") or path.startswith("/medicine/clinic/")):
-        return "yandex_maps"
+    parsed = urlsplit(str(url or "")); host = (parsed.hostname or "").casefold().removeprefix("www."); path = (parsed.path or "").casefold()
+    if host.endswith(("yandex.ru", "yandex.com")) and (path.startswith("/maps") or path.startswith("/profile/") or path.startswith("/medicine/clinic/")): return "yandex_maps"
     if host.endswith("2gis.ru"): return "2gis"
     if host == "zoon.ru": return "zoon"
     if host == "yell.ru": return "yell"
@@ -81,10 +73,8 @@ def _clean_title(value: str) -> str:
     for sep in (" — ", " | ", " - ", " · "):
         if sep in text:
             left, right = text.split(sep, 1)
-            if len(left.strip()) >= 3 and _GENERIC_TITLE.search(right):
-                text = left.strip(); break
-    text = _GENERIC_TITLE.sub(" ", text)
-    return _SPACE.sub(" ", text).strip(" -–—|·:,.\t\n")[:140]
+            if len(left.strip()) >= 3 and _GENERIC_TITLE.search(right): text = left.strip(); break
+    return _SPACE.sub(" ", _GENERIC_TITLE.sub(" ", text)).strip(" -–—|·:,.\t\n")[:140]
 
 
 def _stem(value: str) -> str:
@@ -129,35 +119,25 @@ def _source_row(hit: SearchHit) -> dict:
     return {"title": _clean_title(hit.title) or hit.title or _host(hit.url), "url": hit.url, "domain": _host(hit.url), "provider": hit.provider, "snippet": str(hit.snippet or "")[:300]}
 
 
-def _md(label: str, url: str) -> str:
-    return f"[{label}]({str(url or '').replace(')', '%29')})"
-
+def _md(label: str, url: str) -> str: return f"[{label}]({str(url or '').replace(')', '%29')})"
 
 async def _search(discovery, query: str, *, timeout: float = 3.4) -> list[SearchHit]:
-    try:
-        return await asyncio.wait_for(discovery.search(query, count=10, country="RU", language="ru"), timeout=timeout)
-    except (DiscoveryError, TimeoutError, asyncio.TimeoutError):
-        return []
-
+    try: return await asyncio.wait_for(discovery.search(query, count=10, country="RU", language="ru"), timeout=timeout)
+    except (DiscoveryError, TimeoutError, asyncio.TimeoutError): return []
 
 async def _empty_places() -> list[MapPlace]: return []
 
 
 def _entity_score(row: dict) -> float:
-    map_evidence = sum(bool(row.get(key)) for key in ("yandex_maps", "2gis"))
-    directory_evidence = sum(bool(row.get(key)) for key in ("zoon", "yell"))
-    osm_evidence = 1 if row.get("osm") else 0
+    map_evidence = sum(bool(row.get(key)) for key in ("yandex_maps", "2gis")); directory_evidence = sum(bool(row.get(key)) for key in ("zoon", "yell")); osm_evidence = 1 if row.get("osm") else 0
     independent = map_evidence + directory_evidence + osm_evidence + (1 if row.get("web") else 0)
-    best_rating = max((v for v in row.get("ratings", {}).values() if isinstance(v, (int, float))), default=0.0)
-    best_reviews = max((v for v in row.get("reviews", {}).values() if isinstance(v, int)), default=0)
-    review_confidence = min(math.log1p(best_reviews) / math.log(1001), 1.0) if best_reviews > 0 else 0.0
-    rating_quality = max(0.0, min((best_rating - 3.5) / 1.5, 1.0)) if best_rating else 0.0
+    best_rating = max((v for v in row.get("ratings", {}).values() if isinstance(v, (int, float))), default=0.0); best_reviews = max((v for v in row.get("reviews", {}).values() if isinstance(v, int)), default=0)
+    review_confidence = min(math.log1p(best_reviews) / math.log(1001), 1.0) if best_reviews > 0 else 0.0; rating_quality = max(0.0, min((best_rating - 3.5) / 1.5, 1.0)) if best_rating else 0.0
     completeness = sum(bool(row.get(key)) for key in ("address", "phone", "website", "web")) / 4.0
     return map_evidence * 2.2 + directory_evidence * 1.3 + osm_evidence * 1.4 + min(independent, 5) * 0.3 + rating_quality * 1.5 + review_confidence + completeness * 0.7
 
 
-def _empty_entity(name: str) -> dict:
-    return {"name": name, "address": "", "phone": "", "website": "", "web": "", "yandex_maps": "", "2gis": "", "zoon": "", "yell": "", "osm": "", "ratings": {}, "reviews": {}}
+def _empty_entity(name: str) -> dict: return {"name": name, "address": "", "phone": "", "website": "", "web": "", "yandex_maps": "", "2gis": "", "zoon": "", "yell": "", "osm": "", "ratings": {}, "reviews": {}}
 
 
 def _merge_place(entities: dict[str, dict], place: MapPlace) -> None:
@@ -176,67 +156,16 @@ def _places(value) -> list[MapPlace]: return value if isinstance(value, list) el
 def _hits(value) -> list[SearchHit]: return value if isinstance(value, list) else []
 
 
-async def resolve_local_business(question: str, discovery) -> LocalBusinessResult | None:
-    if not is_local_business_question(question): return None
-
-    city_slug = _city_slug(question)
-    medical = bool(_MEDICAL_RE.search(normalized_question(question)))
-    cached_rows = load_places(question, limit=30)
-    queries = (question, f"site:yandex.ru/maps/org/ {question}", f"site:2gis.ru/{city_slug}/firm/ {question}", f"site:yell.ru/{city_slug}/com/ {question}")
-
-    provider_tasks = (
-        asyncio.create_task(_RU_MAPS.search(question)),
-        asyncio.create_task(discover_indexed_businesses(question, discovery, limit=10)),
-        asyncio.create_task(discover_osm_businesses(question, limit=12, timeout_seconds=5.5)),
-        asyncio.create_task(discover_zoon(question, discovery, limit=8)),
-        asyncio.create_task(discover_yell(question, limit=8)),
-        asyncio.create_task(discover_yandex_medicine(question, discovery, limit=8) if medical else _empty_places()),
-    )
-    serp_tasks = tuple(asyncio.create_task(_search(discovery, query)) for query in queries)
-    gathered = await asyncio.gather(*provider_tasks, *serp_tasks, return_exceptions=True)
-
-    public_rows, indexed_rows, osm_rows, zoon_rows, yell_rows, medicine_rows = (_places(gathered[i]) for i in range(6))
-    live_batches = [osm_rows, indexed_rows, medicine_rows, public_rows, zoon_rows, yell_rows]
-    for batch in live_batches:
-        if batch:
-            store_places(question, batch)
-    serp_batches = [_hits(value) for value in gathered[6:]]
-
-    entities: dict[str, dict] = {}
-    source_rows: list[dict] = []
-    # Persistent verified cache is always available first; live sources enrich it.
-    for batch in [cached_rows, *live_batches]:
-        for place in batch:
-            _merge_place(entities, place)
-            source_rows.append(place.public_source())
-
-    seen_urls = {canonical_result_url(row["url"]) for row in source_rows if row.get("url")}
-    for batch in serp_batches:
-        for hit in batch:
-            if not _relevant(hit, question): continue
-            canonical = canonical_result_url(hit.url)
-            if not canonical or canonical in seen_urls: continue
-            seen_urls.add(canonical); source_rows.append(_source_row(hit))
-            name = _clean_title(hit.title); key = _entity_key(name)
-            if not key: continue
-            row = entities.setdefault(key, _empty_entity(name)); kind = _kind(hit.url)
-            if kind in {"yandex_maps", "2gis", "zoon", "yell", "osm"}: row[kind] = row[kind] or hit.url
-            elif not row["web"]: row["web"] = hit.url
-            if is_yandex_medicine_url(hit.url) and not row["yandex_maps"]: row["yandex_maps"] = hit.url
-
+def _render(question: str, places: list[MapPlace], source_rows: list[dict], *, cache_only: bool) -> LocalBusinessResult:
+    city_slug = _city_slug(question); entities: dict[str, dict] = {}
+    for place in places: _merge_place(entities, place)
     rows = [row for row in entities.values() if any(row.get(key) for key in ("yandex_maps", "2gis", "zoon", "yell", "osm", "web"))]
     rows.sort(key=_entity_score, reverse=True); rows = rows[:7]
     if not rows:
-        return LocalBusinessResult(text="Локальный индекс пока пуст для этой категории, а внешние источники сейчас недоступны. Я не буду придумывать компании. После первого успешного обновления результаты будут сохраняться локально и останутся доступны даже при сбое внешнего поиска.", sources=[], searched=0)
-
-    using_cache_only = bool(cached_rows) and not any(live_batches)
-    out = [
-        ("Внешние каталоги сейчас недоступны, поэтому использую последние проверенные данные из локального индекса OLYA." if using_cache_only else "Подобрал подтверждённые организации из локального индекса и доступных внешних источников.")
-        + " Рейтинги показываю только когда источник реально их публикует."
-    ]
-    for index, row in enumerate(rows, start=1):
-        name = row["name"]; fallback = _map_search_links(name, city_slug=city_slug, address=row.get("address", ""))
-        out.append(f"\n{index}. **{name}**")
+        return LocalBusinessResult(text="Локальный индекс пока пуст для этой категории, а внешние источники сейчас недоступны. Я не буду придумывать компании.", sources=[], searched=0)
+    out = [("Использую проверенные данные из локального индекса OLYA." if cache_only else "Подобрал подтверждённые организации из локального индекса и доступных внешних источников.") + " Рейтинги показываю только когда источник реально их публикует."]
+    for index, row in enumerate(rows, 1):
+        name = row["name"]; fallback = _map_search_links(name, city_slug=city_slug, address=row.get("address", "")); out.append(f"\n{index}. **{name}**")
         if row.get("address"): out.append(f"Адрес: {row['address']}")
         if row.get("phone"): out.append(f"Телефон: {row['phone']}")
         website = row.get("website") or row.get("web")
@@ -245,9 +174,48 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
             rating = row["ratings"].get(provider); reviews = row["reviews"].get(provider)
             if rating is not None: out.append(f"{label}: {rating:g}" + (f" · {reviews} отзывов/оценок" if reviews is not None else ""))
         if row.get("osm"): out.append("OpenStreetMap: " + _md("карточка", row["osm"]))
-        out.append("Яндекс: " + _md("карточка" if row["yandex_maps"] else "поиск на карте", row["yandex_maps"] or fallback["yandex"]))
-        out.append("2ГИС: " + _md("карточка" if row["2gis"] else "поиск на карте", row["2gis"] or fallback["2gis"]))
+        out.append("Яндекс: " + _md("карточка" if row["yandex_maps"] else "поиск на карте", row["yandex_maps"] or fallback["yandex"])); out.append("2ГИС: " + _md("карточка" if row["2gis"] else "поиск на карте", row["2gis"] or fallback["2gis"]))
         if row.get("zoon"): out.append("Zoon: " + _md("карточка", row["zoon"]))
         if row.get("yell"): out.append("Yell: " + _md("карточка", row["yell"]))
-
     return LocalBusinessResult(text="\n".join(out), sources=source_rows[:20], searched=len(source_rows))
+
+
+async def resolve_local_business(question: str, discovery) -> LocalBusinessResult | None:
+    if not is_local_business_question(question): return None
+    cached_rows = load_places(question, limit=30)
+    # Warm index is authoritative for availability: answer immediately and do not
+    # make user latency depend on live websites. Refresh is an explicit bootstrap/update job.
+    if len(cached_rows) >= 5:
+        return _render(question, cached_rows, [place.public_source() for place in cached_rows], cache_only=True)
+
+    city_slug = _city_slug(question); medical = bool(_MEDICAL_RE.search(normalized_question(question)))
+    queries = (question, f"site:yandex.ru/maps/org/ {question}", f"site:2gis.ru/{city_slug}/firm/ {question}", f"site:yell.ru/{city_slug}/com/ {question}")
+    provider_tasks = (
+        asyncio.create_task(_RU_MAPS.search(question)), asyncio.create_task(discover_indexed_businesses(question, discovery, limit=10)), asyncio.create_task(discover_osm_businesses(question, limit=12, timeout_seconds=5.5)), asyncio.create_task(discover_zoon(question, discovery, limit=8)), asyncio.create_task(discover_yell(question, limit=8)), asyncio.create_task(discover_yandex_medicine(question, discovery, limit=8) if medical else _empty_places()),
+    )
+    serp_tasks = tuple(asyncio.create_task(_search(discovery, query)) for query in queries); gathered = await asyncio.gather(*provider_tasks, *serp_tasks, return_exceptions=True)
+    public_rows, indexed_rows, osm_rows, zoon_rows, yell_rows, medicine_rows = (_places(gathered[i]) for i in range(6)); live_batches = [osm_rows, indexed_rows, medicine_rows, public_rows, zoon_rows, yell_rows]
+    for batch in live_batches:
+        if batch: store_places(question, batch)
+    merged_places = [*cached_rows]
+    for batch in live_batches: merged_places.extend(batch)
+    source_rows = [place.public_source() for place in merged_places]
+    seen_urls = {canonical_result_url(row["url"]) for row in source_rows if row.get("url")}
+    entities: dict[str, dict] = {}
+    for place in merged_places: _merge_place(entities, place)
+    for batch in [_hits(value) for value in gathered[6:]]:
+        for hit in batch:
+            if not _relevant(hit, question): continue
+            canonical = canonical_result_url(hit.url)
+            if not canonical or canonical in seen_urls: continue
+            seen_urls.add(canonical); source_rows.append(_source_row(hit)); name = _clean_title(hit.title); key = _entity_key(name)
+            if not key: continue
+            row = entities.setdefault(key, _empty_entity(name)); kind = _kind(hit.url)
+            if kind in {"yandex_maps", "2gis", "zoon", "yell", "osm"}: row[kind] = row[kind] or hit.url
+            elif not row["web"]: row["web"] = hit.url
+            if is_yandex_medicine_url(hit.url) and not row["yandex_maps"]: row["yandex_maps"] = hit.url
+    # Render MapPlace-backed results first. SERP-only evidence is deliberately not
+    # converted into invented cards; local index will absorb structured sources.
+    if merged_places:
+        return _render(question, merged_places, source_rows, cache_only=False)
+    return LocalBusinessResult(text="Локальный индекс пока пуст для этой категории, а внешние источники сейчас недоступны. Запусти bootstrap локальной базы: после этого поиск будет работать офлайн и не зависеть от каталогов.", sources=[], searched=0)
