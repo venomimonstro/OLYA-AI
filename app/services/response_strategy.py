@@ -20,6 +20,11 @@ _STABLE_EXPLANATION_RE = re.compile(
     r"в\s+ч[её]м\s+смысл|what\s+is|what\s+does|how\s+does|explain)\b",
     re.I,
 )
+_TRANSFORM_RE = re.compile(
+    r"^\s*(?:переведи|перепиши|сократи|исправь|отредактируй|улучши|сделай\s+(?:лучше|профессиональнее)|"
+    r"translate|rewrite|shorten|proofread|edit|improve)\b",
+    re.I,
+)
 _CURRENT_ROLE_RE = re.compile(
     r"(?:^|[?.!\s])(?:кто\s+(?:же\s+)?(?:президент|премьер(?:-министр)?|губернатор|мэр|"
     r"генеральный\s+директор|директор|ceo|cto)\b|"
@@ -97,6 +102,11 @@ def _has_self_contained_payload(text: str) -> bool:
 def requires_fresh_data(text: str) -> bool:
     value = normalized_question(text)
     if not value:
+        return False
+    # A supplied passage may itself mention yesterday/today/current. For pure
+    # rewrite/translation/proofreading tasks those are source text, not a request
+    # to consult the web.
+    if _TRANSFORM_RE.search(value) and _has_self_contained_payload(text) and not _URL_RE.search(value):
         return False
     if _STABLE_EXPLANATION_RE.search(value) and not _EXPLICIT_RECENCY_RE.search(value) and not _CURRENT_ROLE_RE.search(value) and not _DYNAMIC_LOOKUP_RE.search(value):
         return False
