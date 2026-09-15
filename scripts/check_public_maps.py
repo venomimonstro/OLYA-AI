@@ -10,6 +10,7 @@ from app.services.discovery import BraveSearchDiscovery, DisabledDiscovery, Prov
 from app.services.russian_maps_discovery import RussianMapsDiscovery
 from app.services.searxng_discovery import SearxngDiscovery
 from app.services.yandex_medicine_discovery import discover_yandex_medicine
+from app.services.yell_discovery import discover_yell
 from app.services.zoon_discovery import discover_zoon
 
 
@@ -63,19 +64,23 @@ async def main() -> int:
 
     direct_task = asyncio.create_task(maps.search(query))
     zoon_task = asyncio.create_task(discover_zoon(query, search, limit=10))
+    yell_task = asyncio.create_task(discover_yell(query, limit=10))
     medicine_task = asyncio.create_task(
         discover_yandex_medicine(query, search, limit=10) if _MEDICAL_RE.search(query) else _empty()
     )
-    direct_rows, zoon_rows, medicine_rows = await asyncio.gather(direct_task, zoon_task, medicine_task)
+    direct_rows, zoon_rows, yell_rows, medicine_rows = await asyncio.gather(
+        direct_task, zoon_task, yell_task, medicine_task
+    )
     elapsed = perf_counter() - started
 
     print(f"query: {query}")
     print(f"elapsed: {elapsed:.2f}s")
     _print_rows("direct_yandex_2gis", direct_rows)
     _print_rows("zoon", zoon_rows)
+    _print_rows("yell", yell_rows)
     _print_rows("yandex_medicine", medicine_rows)
 
-    all_rows = [*direct_rows, *zoon_rows, *medicine_rows]
+    all_rows = [*direct_rows, *zoon_rows, *yell_rows, *medicine_rows]
     unique = {(row.provider, row.card_url) for row in all_rows}
     print(f"\ntotal_unique_cards: {len(unique)}")
     return 0 if unique else 2
