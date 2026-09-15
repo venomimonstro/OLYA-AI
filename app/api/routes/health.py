@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import secrets
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.encoders import jsonable_encoder
@@ -16,6 +17,7 @@ install_system_observability_compat()
 
 router = APIRouter(tags=["health"])
 _BUILD_PROVENANCE = Path("/app/BUILD_PROVENANCE.json")
+_INSTANCE_ID = secrets.token_hex(8)
 
 
 def _runtime_provenance() -> dict:
@@ -34,7 +36,10 @@ def _runtime_provenance() -> dict:
 
 @router.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok"}
+    # instance_id changes on every app-process restart. Browser clients use it
+    # to distinguish a transient network interruption from a server restart,
+    # where old in-memory chat runs cannot be resumed safely.
+    return {"status": "ok", "instance_id": _INSTANCE_ID}
 
 
 @router.get("/version")
@@ -43,6 +48,7 @@ async def version(request: Request) -> dict:
     settings = getattr(request.app.state, "settings", None)
     payload["runtime_profile"] = str(getattr(settings, "server_optimization_profile", "unknown") or "unknown")
     payload["model"] = str(getattr(settings, "llama_model_name", "") or "")
+    payload["instance_id"] = _INSTANCE_ID
     return payload
 
 
@@ -55,5 +61,6 @@ async def ready(request: Request, db: Session = Depends(get_db)):
         "score": result["score"],
         "components": {item["key"]: item["status"] for item in result["checks"]},
         "checked_at": result["checked_at"],
+        "instance_id": _INSTANCE_ID,
     }
     return JSONResponse(status_code=503 if critical else 200, content=jsonable_encoder(body))
