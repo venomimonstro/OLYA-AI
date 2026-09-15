@@ -23,7 +23,7 @@ from app.services.clean_web import build_clean_web_context
 from app.services.live_structured_facts import is_live_structured_question, resolve_live_structured_fact
 from app.services.local_business_search import is_local_business_question, resolve_local_business
 from app.services.long_term_memory import MemoryBundle, memory_context_message, retrieve_memories
-from app.services.response_completeness import expansion_messages, needs_expansion
+from app.services.response_completeness import expansion_messages, guidance_message, needs_expansion
 from app.services.response_strategy import is_atomic_knowledge_question, normalized_question, requires_memory_context
 from app.services.task_solver import reset_task_solver_context, set_task_solver_context
 from app.utility_chat import utility_reply
@@ -84,7 +84,7 @@ def _structured_metadata(execution) -> dict:
 
 def _local_business_metadata(execution) -> dict:
     sources = list(getattr(execution, "sources", []) or [])[:10]
-    return {"kind": "local_business", "web_used": True, "searched_results": int(getattr(execution, "searched", len(sources)) or len(sources)), "fetched_sources": len(sources), "failed_fetches": 0, "sources": sources, "warnings": [] if sources else ["Карточки компаний не удалось подтвердить"], "steps": ["Проверяю локальный индекс OLYA", "Обновляю через OpenStreetMap, Яндекс, 2ГИС, Zoon и Yell", "Возвращаю подтверждённые организации"]}
+    return {"kind": "local_business", "web_used": True, "searched_results": int(getattr(execution, "searched", len(sources)) or len(sources)), "fetched_sources": len(sources), "failed_fetches": 0, "sources": sources, "warnings": [] if sources else ["Карточки компаний не удалось подтвердить"], "steps": ["Проверяю локальный индекс OLYA", "При необходимости проверяю OpenStreetMap, Яндекс, 2ГИС, Zoon и Yell", "Возвращаю подтверждённые организации"]}
 
 
 def _instant_metadata(kind: str, *, cached: bool = False) -> dict:
@@ -159,6 +159,9 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
             job._publish_nowait("status", {"state": "synthesizing", "message": "Источники собраны. Формирую ответ…", "task_kind": "web_research", "fetched_sources": web.fetched, "search_results": web.searched})
 
         context_messages = list(web.context_messages)
+        completeness = guidance_message(question)
+        if completeness is not None:
+            context_messages.append(completeness)
         if not payload.conversation_id and requires_memory_context(question):
             memories = retrieve_memories(job_db, conversation_id="", query=question, limit=5, user_id=job_user.id)
             memory_message = memory_context_message(MemoryBundle(summary="", memories=memories))
@@ -169,11 +172,12 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
         try:
             result = await legacy_chat._chat_impl(managed_payload, request, job_user, job_db, on_token=job.token, on_replace=job.replace)
             if not atomic and needs_expansion(question, result.text):
-                job._publish_nowait("status", {"state": "verifying", "message": "Ответ слишком короткий. Дорабатываю полноту…", "task_kind": "completeness_repair"})
+                job._publish_nowait("status", {"state": "verifying", "message": "Ответ недостаточно полный. Дорабатываю…", "task_kind": "completeness_repair"})
                 repair = expansion_messages(question, result.text)
-                repair_messages = [repair[0], *context_messages, repair[1]] if context_messages else repair
+                repair_context = [item for item in context_messages if item is not completeness]
+                repair_messages = [repair[0], *repair_context, repair[1]] if repair_context else repair
                 try:
-                    expanded = (await request.app.state.llama.chat(repair_messages, max_tokens=1100 if payload.mode != "deep" else 1800, reasoning=False)).strip()
+                    expanded = (await request.app.state.llama.chat(repair_messages, max_tokens=1200 if payload.mode != "deep" else 1900, reasoning=False)).strip()
                 except Exception:
                     expanded = ""
                 if expanded and len(expanded) > len(result.text):
