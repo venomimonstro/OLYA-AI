@@ -54,6 +54,34 @@ def workspace(db: Session = Depends(get_db)) -> HTMLResponse:
         "task progress status",
     )
 
+    # Rendering 100 historical Markdown messages synchronously can freeze or
+    # crash a browser tab when chats contain long articles/code/tables. Load a
+    # small recent window and keep older history behind the existing button.
+    document = _replace_once(
+        document,
+        "const rows=await api('/v1/conversations/'+encodeURIComponent(id)+'/messages?limit=100',{},30000);",
+        "const rows=await api('/v1/conversations/'+encodeURIComponent(id)+'/messages?limit=30',{},30000);",
+        "initial chat history batch",
+    )
+    document = _replace_once(
+        document,
+        "oldestMessageAt=rows.length?rows[0].created_at:null;hasOlder=rows.length===100;olderButton();messages.scrollTop=messages.scrollHeight;await loadConversations()}",
+        "oldestMessageAt=rows.length?rows[0].created_at:null;hasOlder=rows.length===30;olderButton();messages.scrollTop=messages.scrollHeight;await loadConversations()}",
+        "initial chat history pagination",
+    )
+    document = _replace_once(
+        document,
+        "'/messages?limit=100&before='+before",
+        "'/messages?limit=30&before='+before",
+        "older chat history batch",
+    )
+    document = _replace_once(
+        document,
+        "oldestMessageAt=rows.length?rows[0].created_at:oldestMessageAt;hasOlder=rows.length===100;olderButton();messages.scrollTop=messages.scrollHeight-oldHeight}",
+        "oldestMessageAt=rows.length?rows[0].created_at:oldestMessageAt;hasOlder=rows.length===30;olderButton();messages.scrollTop=messages.scrollHeight-oldHeight}",
+        "older chat history pagination",
+    )
+
     forced_scroll = "renderMarkdown(live.bubble,raw);messages.scrollTop=messages.scrollHeight"
     forced_count = document.count(forced_scroll)
     if forced_count != 2:
