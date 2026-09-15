@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import app.services.local_search_store as store_module
+from app.services.business_quality import save_business_quality
 from app.services.local_business_index import discover_local_businesses
 from app.services.local_business_search import resolve_local_business
 from app.services.local_search_discovery import LocalSearchDiscovery
@@ -49,6 +50,40 @@ class OwnedSearchCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(rows)
         self.assertEqual(rows[0].name, "Тест Авто")
         self.assertEqual(rows[0].provider, "osm")
+
+    async def test_quality_ranking_penalizes_tiny_review_sample(self) -> None:
+        tiny_id = self.store.upsert_business({
+            "source_key": "2gis:1",
+            "source": "2gis",
+            "source_id": "1",
+            "source_url": "https://2gis.ru/moscow/firm/1",
+            "name": "Пять звезд один отзыв",
+            "category": "car_repair",
+            "city": "Москва",
+            "address": "Москва, улица А, 1",
+            "confidence": 0.95,
+        })
+        mature_id = self.store.upsert_business({
+            "source_key": "2gis:2",
+            "source": "2gis",
+            "source_id": "2",
+            "source_url": "https://2gis.ru/moscow/firm/2",
+            "name": "Проверенный сервис",
+            "category": "car_repair",
+            "city": "Москва",
+            "address": "Москва, улица Б, 2",
+            "confidence": 0.95,
+        })
+        save_business_quality(tiny_id, rating=5.0, reviews=1, store=self.store)
+        save_business_quality(mature_id, rating=4.8, reviews=350, store=self.store)
+
+        rows = discover_local_businesses("лучшие автосервисы в москве", limit=10)
+        self.assertGreaterEqual(len(rows), 2)
+        self.assertEqual(rows[0].name, "Проверенный сервис")
+        self.assertEqual(rows[0].rating, 4.8)
+        self.assertEqual(rows[0].reviews, 350)
+        self.assertEqual(rows[1].rating, 5.0)
+        self.assertEqual(rows[1].reviews, 1)
 
     async def test_full_local_business_resolver_works_offline(self) -> None:
         self._insert_moscow_car_repair()
