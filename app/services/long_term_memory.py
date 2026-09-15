@@ -12,6 +12,11 @@ from app.schemas.chat import ChatMessage
 
 _WORD_RE = re.compile(r"[0-9a-zA-Zа-яА-ЯёЁ_+.-]{2,}")
 _SENTENCE_RE = re.compile(r"(?<=[.!?\n])\s+")
+_MEMORY_REFERENCE_RE = re.compile(
+    r"(?:что\s+ты\s+помнишь|ты\s+помнишь|мои\s+предпочтения|учти\s+мои|что\s+я\s+предпочитаю|"
+    r"как\s+я\s+люблю|что\s+мы\s+решили|наши\s+решения|remember\s+about\s+me|my\s+preferences)",
+    re.I,
+)
 _STOP = {
     "это", "как", "что", "для", "или", "при", "над", "под", "без", "про", "уже", "ещё", "еще", "будет",
     "нужно", "надо", "можно", "мы", "вы", "они", "она", "оно", "его", "ее", "её", "наш", "наша", "наше",
@@ -160,8 +165,8 @@ def _trim_memory(db: Session, conversation_id: str, *, limit: int) -> None:
 
 def _clip_summary_line(role: str, content: str) -> str:
     clean = " ".join(str(content or "").split())
-    if len(clean) > 180:
-        clean = clean[:177].rstrip() + "..."
+    if len(clean) > 160:
+        clean = clean[:157].rstrip() + "..."
     prefix = "Пользователь" if role == "user" else "OLYA"
     return f"- {prefix}: {clean}"
 
@@ -172,8 +177,8 @@ def refresh_rolling_summary(
     conversation_id: str,
     project_id: str | None,
     hot_messages: int = 6,
-    source_messages: int = 24,
-    max_chars: int = 900,
+    source_messages: int = 20,
+    max_chars: int = 650,
 ) -> str:
     rows = list(
         db.scalars(
@@ -186,7 +191,7 @@ def refresh_rolling_summary(
     )
     if not rows:
         return ""
-    lines = ["Более ранний контекст этого чата:"]
+    lines = ["Ранее в этом чате:"]
     used = len(lines[0])
     for row in reversed(rows):
         if row.role not in {"user", "assistant"}:
@@ -204,7 +209,7 @@ def refresh_rolling_summary(
             ConversationMemory.memory_key == "rolling",
         )
     )
-    terms = keywords(value, limit=24)
+    terms = keywords(value, limit=20)
     if item is None:
         db.add(
             ConversationMemory(
@@ -226,17 +231,15 @@ def refresh_rolling_summary(
     return value
 
 
-def _score(query_terms: set[str], item: ConversationMemory) -> float:
+def _score(query_terms: set[str], item: ConversationMemory, *, explicit_reference: bool) -> float:
     item_terms = {str(value).casefold() for value in (item.keywords or [])}
     overlap = len(query_terms & item_terms) if query_terms and item_terms else 0
-    recency_free_bonus = {"explicit": 5.0, "decision": 3.5, "preference": 3.0, "fact": 2.0}.get(item.kind, 0.0)
-    if not query_terms:
-        return recency_free_bonus
     if overlap == 0:
-        return recency_free_bonus if item.kind == "explicit" else 0.0
+        return 4.0 if explicit_reference and item.kind in {"explicit", "preference", "decision"} else 0.0
+    kind_bonus = {"explicit": 2.5, "decision": 2.0, "preference": 1.8, "fact": 1.0}.get(item.kind, 0.0)
     precision = overlap / max(1, len(item_terms))
     recall = overlap / max(1, len(query_terms))
-    return recency_free_bonus + overlap * 2.0 + precision + recall
+    return kind_bonus + overlap * 2.0 + precision + recall
 
 
 def retrieve_memories(
@@ -265,7 +268,12 @@ def retrieve_memories(
         )
     rows = list(db.scalars(stmt).all())
     query_terms = set(keywords(query, limit=28))
-    ranked = sorted(((_score(query_terms, item), item) for item in rows), key=lambda pair: pair[0], reverse=True)
+    explicit_reference = bool(_MEMORY_REFERENCE_RE.search(query or ""))
+    ranked = sorted(
+        ((_score(query_terms, item, explicit_reference=explicit_reference), item) for item in rows),
+        key=lambda pair: pair[0],
+        reverse=True,
+    )
     result: list[ConversationMemory] = []
     seen: set[str] = set()
     for score, item in ranked:
@@ -289,22 +297,25 @@ def build_memory_bundle(
     query: str,
     hot_messages: int = 6,
     user_id: str | None = None,
+    include_summary: bool = False,
 ) -> MemoryBundle:
-    summary = refresh_rolling_summary(
-        db,
-        conversation_id=conversation_id,
-        project_id=project_id,
-        hot_messages=hot_messages,
-        source_messages=24,
-        max_chars=900,
-    )
+    summary = ""
+    if include_summary:
+        summary = refresh_rolling_summary(
+            db,
+            conversation_id=conversation_id,
+            project_id=project_id,
+            hot_messages=hot_messages,
+            source_messages=20,
+            max_chars=650,
+        )
     return MemoryBundle(
         summary=summary,
         memories=retrieve_memories(
             db,
             conversation_id=conversation_id,
             query=query,
-            limit=5,
+            limit=4,
             user_id=user_id,
         ),
     )
@@ -313,10 +324,10 @@ def build_memory_bundle(
 def memory_context_message(bundle: MemoryBundle) -> ChatMessage | None:
     if not bundle.active:
         return None
-    sections = ["ПАМЯТЬ OLYA. Используй только если она относится к текущему запросу; новое сообщение пользователя приоритетнее."]
+    sections = ["ПАМЯТЬ OLYA. Используй только если относится к текущему запросу; новое сообщение важнее."]
     labels = {
         "explicit": "Явно сохранено",
-        "decision": "Решения и ограничения",
+        "decision": "Решения",
         "preference": "Предпочтения",
         "fact": "Факты",
     }
@@ -326,4 +337,4 @@ def memory_context_message(bundle: MemoryBundle) -> ChatMessage | None:
             sections.append(labels[kind] + ":\n" + "\n".join(f"- {value}" for value in values))
     if bundle.summary.strip():
         sections.append(bundle.summary.strip())
-    return ChatMessage(role="system", content="\n\n".join(sections)[:2600])
+    return ChatMessage(role="system", content="\n\n".join(sections)[:1800])
