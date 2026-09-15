@@ -8,10 +8,15 @@ from urllib.parse import urlsplit
 from app.schemas.chat import ChatMessage
 from app.services.discovery import DiscoveryError, canonical_result_url
 from app.services.research import ResearchFetchError, lexical_excerpts
-from app.services.response_strategy import requires_fresh_data
+from app.services.response_strategy import normalized_question, requires_fresh_data
 
 
 _URL_RE = re.compile(r"https?://[^\s<>()\[\]{}]+", re.I)
+_TRANSFORM_RE = re.compile(
+    r"^(?:переведи|перепиши|сократи|исправь|отредактируй|улучши|сделай\s+(?:лучше|профессиональнее)|"
+    r"translate|rewrite|shorten|proofread|edit|improve)\b",
+    re.I,
+)
 # Discovery intent only. Time-sensitive facts are classified exclusively by
 # response_strategy.requires_fresh_data(), avoiding duplicated regex decisions.
 _WEB_RE = re.compile(
@@ -58,11 +63,26 @@ class CleanWebResult:
         }
 
 
+def _self_contained_transform(question: str) -> bool:
+    raw = str(question or "")
+    value = normalized_question(raw)
+    if not _TRANSFORM_RE.search(value) or _URL_RE.search(raw):
+        return False
+    if "```" in raw and len(raw) >= 30:
+        return True
+    for separator in ("\n", ":"):
+        if separator in raw and len(raw.split(separator, 1)[1].strip()) >= 8:
+            return True
+    return False
+
+
 def should_use_web(question: str, web_mode: str) -> bool:
     if web_mode == "off":
         return False
     if web_mode == "always":
         return True
+    if _self_contained_transform(question):
+        return False
     text = " ".join(str(question or "").split())
     return bool(text and (_URL_RE.search(text) or requires_fresh_data(text) or _WEB_RE.search(text)))
 
