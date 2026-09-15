@@ -205,14 +205,14 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
 
     advice = bool(_ADVICE_WEB_RE.search(question or ""))
     deep_read = bool(deep or _DEEP_WEB_RE.search(question or "") or _URL_RE.search(question or ""))
-    blocks = ["WEB DATA. Используй только эти факты; отсутствующее не выдумывай."]
+    blocks = ["WEB DATA. Бери факты только отсюда."]
     if advice:
-        blocks.append("Дай вывод и 5–8 конкретных рекомендаций; не пересказывай сайты по очереди.")
+        blocks.append("Вывод + 5–8 практических пунктов; не пересказывай сайты.")
 
-    # Keep TOP-5 for the source UI, but only the strongest three compact snippets
-    # enter the CPU model prompt. Full URLs stay outside the prompt metadata.
+    # TOP-5 remains visible to the user, but only two compact snippets enter the
+    # interactive CPU prompt. This is the main TTFT guardrail.
     for index, hit in enumerate(unique, start=1):
-        snippet = _clean(hit.snippet, 110)
+        snippet = _clean(hit.snippet, 82)
         domain = _host(hit.url)
         result.sources.append({
             "title": _clean(hit.title, 180) or domain or "Источник",
@@ -221,17 +221,16 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
             "provider": hit.provider,
             "snippet": snippet,
         })
-        if index <= 3:
-            blocks.append(f"[{index}] {_clean(hit.title, 72)} | {domain}\n{snippet}")
+        if index <= 2:
+            blocks.append(f"[{index}] {_clean(hit.title, 48)} | {domain}\n{snippet}")
 
-    # Interactive advice may use one page only when it returns very quickly.
-    # Deep/research requests may read two pages. This caps search/fetch latency
-    # and prevents multi-thousand-token web prompts on the 6-thread CPU node.
+    # Advice gets at most one opportunistic tiny page excerpt; it may not delay
+    # the response by more than 0.65 s. Deep/research may read two fuller pages.
     page_limit = 2 if deep_read else (1 if advice else 0)
     if page_limit and unique:
-        page_timeout = 2.0 if deep_read else 0.8
-        excerpt_window = 260 if deep_read else 170
-        excerpt_limit = 380 if deep_read else 180
+        page_timeout = 1.8 if deep_read else 0.65
+        excerpt_window = 240 if deep_read else 120
+        excerpt_limit = 340 if deep_read else 120
 
         async def fetch_one(index: int, hit):
             try:
@@ -252,7 +251,7 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
 
     if not unique:
         result.warning = "Поиск не вернул релевантных результатов; актуальные факты не подтверждены."
-    context_limit = 1900 if deep_read else 950
+    context_limit = 1600 if deep_read else 620
     result.context_messages = [ChatMessage(role="system", content="\n\n".join(blocks)[:context_limit])]
     _cache_put(key, result)
     return result
