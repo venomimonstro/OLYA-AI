@@ -34,6 +34,10 @@ def city_slug(query: str) -> str:
     return "msk"
 
 
+def yell_city_slug(slug: str) -> str:
+    return "moscow" if slug == "msk" else slug
+
+
 def compact_query(query: str) -> str:
     value = re.sub(r"\b(?:лучши\w*|топ|рейтинг\w*|найди\w*|подбер\w*|посовет\w*)\b", " ", query, flags=re.I)
     return " ".join(value.split())[:220]
@@ -80,11 +84,13 @@ async def main() -> int:
     slug = city_slug(query)
     q = compact_query(query)
     zoon_root = "https://zoon.ru/" if slug == "msk" else f"https://zoon.ru/{slug}/"
+    yell_root = f"https://www.yell.ru/{yell_city_slug(slug)}/"
     yandex_q = quote_plus(q)
     twogis_q = quote(q, safe="")
 
     urls = [
         ("zoon_root", zoon_root),
+        ("yell_root", yell_root),
         ("yandex_maps", f"https://yandex.ru/maps/?text={yandex_q}"),
         ("2gis_search", f"https://2gis.ru/{'moscow' if slug == 'msk' else slug}/search/{twogis_q}"),
         ("searxng_internal", "http://searxng:8080/search?q=" + quote_plus(query) + "&format=json&language=ru&engines=yandex,duckduckgo,bing"),
