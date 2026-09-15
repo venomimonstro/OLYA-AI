@@ -8,6 +8,12 @@ from app.services.local_search_store import get_local_search_store
 from app.services.local_web_crawler import LocalWebCrawler
 
 
+def _same_city(left: str, right: str) -> bool:
+    def norm(value: str) -> str:
+        return ' '.join(str(value or '').casefold().replace('ё', 'е').split())
+    return not right or norm(left) == norm(right)
+
+
 async def _main() -> int:
     parser = argparse.ArgumentParser(description='OLYA local text search/index maintenance')
     sub = parser.add_subparsers(dest='command', required=True)
@@ -62,7 +68,17 @@ async def _main() -> int:
             for row in rows
         ]
     elif args.command == 'business':
-        rows = store.search_businesses(args.query, city=args.city, category=args.category, limit=args.limit)
+        fetch_limit = max(50, min(int(args.limit) * 8, 500))
+        # Canonical category is stronger than free-text morphology. Do not pass
+        # Cyrillic city through SQLite NOCASE; filter it with Python casefold.
+        rows = store.search_businesses(
+            '' if args.category else args.query,
+            category=args.category,
+            limit=fetch_limit,
+        )
+        if args.query and not args.category:
+            rows = store.search_businesses(args.query, limit=fetch_limit)
+        rows = [row for row in rows if _same_city(row.city, args.city)][:max(1, min(int(args.limit), 100))]
         result = [
             {
                 'name': row.name,
