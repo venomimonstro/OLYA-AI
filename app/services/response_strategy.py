@@ -3,6 +3,11 @@ from __future__ import annotations
 import re
 
 _URL_RE = re.compile(r"https?://|www\.", re.I)
+_LEADING_FILLER_RE = re.compile(
+    r"^\s*(?:(?:подскажи(?:те)?|скажи(?:те)?|слушай(?:те)?|можешь\s+подсказать|можете\s+подсказать|"
+    r"пожалуйста|please|tell\s+me|can\s+you\s+tell\s+me)\s*(?:,|:|-)?\s*)+",
+    re.I,
+)
 _FRESH_RE = re.compile(
     r"(?:\bсейчас\b|\bщас\b|\bсегодня\b|\bвчера\b|\bзавтра\b|\bпоследн\w*\b|\bактуальн\w*\b|"
     r"\bновост\w*\b|\bтекущ\w*\b|\bнынешн\w*\b|\bкурс\w*\b|\bцен[аы]\b|\bстоимост\w*\b|\bпоч[её]м\b|"
@@ -31,8 +36,7 @@ _SHOPPING_LOOKUP_RE = re.compile(
     r"монитор|телевизор|планшет|наушники|роутер|принтер|фотоаппарат|кофемашин\w*|пылесос|холодильник|"
     r"стиральн\w*\s+машин\w*|автомобил\w*|машин\w*|отель|гостиниц\w*|crm|хостинг|vps)\b|"
     r"\b(?:ноутбук|смартфон|телефон|монитор|телевизор|планшет|наушники|роутер|принтер|автомобил\w*)\b.{0,45}\bдо\s*\d[\d\s]*\s*(?:₽|руб|тыс)|"
-    r"\b(?:recommend|choose|pick)\s+(?:a\s+)?(?:laptop|phone|monitor|tv|tablet|headphones|router|printer|hotel|crm|hosting)\b)",
-    re.I,
+    r"\b(?:recommend|choose|pick)\s+(?:a\s+)?(?:laptop|phone|monitor|tv|tablet|headphones|router|printer|hotel|crm|hosting)\b)", re.I,
 )
 _DYNAMIC_LOOKUP_RE = re.compile(
     r"(?:\b(?:какая|какой|какие|what)\s+(?:сейчас\s+|щас\s+)?верси\w*\b|"
@@ -76,12 +80,18 @@ _ANALYTIC_RE = re.compile(
 
 
 def normalized_question(text: str) -> str:
-    return " ".join(str(text or "").casefold().strip().split())
+    value = " ".join(str(text or "").casefold().strip().split())
+    previous = None
+    while value and previous != value:
+        previous = value
+        value = _LEADING_FILLER_RE.sub("", value, count=1).strip()
+    return value
 
 
 def _transform_payload_present(text: str) -> bool:
     raw = str(text or "")
-    if not _TRANSFORM_RE.search(raw):
+    normalized = normalized_question(raw)
+    if not _TRANSFORM_RE.search(normalized):
         return False
     if "```" in raw and len(raw) >= 30:
         return True
@@ -112,13 +122,7 @@ def requires_fresh_data(text: str) -> bool:
         return False
     if _STABLE_EXPLANATION_RE.search(value) and not _EXPLICIT_RECENCY_RE.search(value) and not _CURRENT_ROLE_RE.search(value) and not _DYNAMIC_LOOKUP_RE.search(value):
         return False
-    return bool(
-        _URL_RE.search(value)
-        or _FRESH_RE.search(value)
-        or _CURRENT_ROLE_RE.search(value)
-        or _DYNAMIC_LOOKUP_RE.search(value)
-        or _SHOPPING_LOOKUP_RE.search(value)
-    )
+    return bool(_URL_RE.search(value) or _FRESH_RE.search(value) or _CURRENT_ROLE_RE.search(value) or _DYNAMIC_LOOKUP_RE.search(value) or _SHOPPING_LOOKUP_RE.search(value))
 
 
 def requires_memory_context(text: str) -> bool:
@@ -144,7 +148,7 @@ def mentions_workspace_context(text: str) -> bool:
 
 
 def is_atomic_knowledge_question(text: str) -> bool:
-    value = " ".join(str(text or "").strip().split())
+    value = normalized_question(text)
     if not value or len(value) > 240:
         return False
     if requires_fresh_data(value) or _URL_RE.search(value) or _ANALYTIC_RE.search(value):
@@ -155,16 +159,10 @@ def is_atomic_knowledge_question(text: str) -> bool:
 
 
 def is_independent_fast_question(text: str) -> bool:
-    value = " ".join(str(text or "").strip().split())
+    value = normalized_question(text)
     if not value or len(value) > 420:
         return False
-    return not (
-        requires_conversation_context(value)
-        or requires_memory_context(value)
-        or mentions_workspace_context(value)
-        or _ANALYTIC_RE.search(value)
-        or _URL_RE.search(value)
-    )
+    return not (requires_conversation_context(value) or requires_memory_context(value) or mentions_workspace_context(value) or _ANALYTIC_RE.search(value) or _URL_RE.search(value))
 
 
 def atomic_output_cap(text: str) -> int | None:
