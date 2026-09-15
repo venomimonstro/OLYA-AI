@@ -29,9 +29,16 @@ python3 -m py_compile \
   app/admin_chats_ui.py \
   scripts/warm_local_llm.py \
   scripts/client_product_audit.py \
-  scripts/latency_path_audit.py
+  scripts/latency_path_audit.py \
+  scripts/real_user_scenarios.py \
+  scripts/real_user_routing_audit.py \
+  scripts/real_user_live_simulation_100.py
 bash -n scripts/start_app.sh
+bash -n scripts/run_real_user_simulation_100.sh
 docker compose config --quiet
+
+info "Running static 100-user routing simulation before restart"
+python3 -m scripts.real_user_routing_audit
 
 info "Rebuilding application only; llama.cpp/search/database stay running"
 docker compose up -d --build --force-recreate app
@@ -58,10 +65,13 @@ docker compose exec -T app python -m scripts.warm_local_llm
 info "Running latency-aware answer path audit"
 docker compose exec -T app python -m scripts.latency_path_audit
 
+info "Running static 100-user routing simulation inside production container"
+docker compose exec -T app python -m scripts.real_user_routing_audit
+
 info "Running focused client/admin/memory audit"
 docker compose exec -T app python -m scripts.client_product_audit
 
 info "Running broad product route/UI audit"
 docker compose exec -T app python -m scripts.product_surface_audit
 
-info "PASSED: fast answers, search routing, prompt warmup, workspace, memory and owner surfaces are registered"
+info "PASSED: 100-user routing, fast answers, search, prompt warmup, workspace, memory and owner surfaces are registered"
