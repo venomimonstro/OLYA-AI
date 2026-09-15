@@ -60,16 +60,16 @@ def main() -> int:
         selected = ['central']
 
     workdir = Path(args.workdir); workdir.mkdir(parents=True, exist_ok=True)
-    report = []; total_written = 0
+    report = []; total_written = 0; total_rejected = 0
     for district in selected:
         filename = DISTRICTS[district]; target = workdir / filename; url = f'{BASE}/{filename}'
         try:
             print(f'[{district}] download {url}', file=sys.stderr, flush=True)
             _download(url, target, force=args.force_download)
             print(f'[{district}] import {target}', file=sys.stderr, flush=True)
-            written = import_pbf(target, limit=max(0,args.limit))
-            total_written += written
-            report.append({'district':district,'ok':True,'indexed':written})
+            written, rejected = import_pbf(target, limit=max(0,args.limit))
+            total_written += written; total_rejected += rejected
+            report.append({'district':district,'ok':True,'indexed':written,'rejected':rejected})
         except Exception as exc:
             report.append({'district':district,'ok':False,'error':f'{type(exc).__name__}: {exc}'})
             print(f'[{district}] failed: {type(exc).__name__}: {exc}', file=sys.stderr, flush=True)
@@ -80,7 +80,7 @@ def main() -> int:
 
     stats = get_local_search_store().stats()
     ok = total_written > 0 and all(item.get('ok') for item in report)
-    print(json.dumps({'ok':ok,'indexed':total_written,'districts':report,'stats':stats}, ensure_ascii=False, indent=2))
+    print(json.dumps({'ok':ok,'indexed':total_written,'rejected':total_rejected,'districts':report,'stats':stats}, ensure_ascii=False, indent=2))
     return 0 if ok else 2
 
 
