@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.models import ResearchSource, SourceEvidence
 from app.services.deadline import DeadlineExceededError, clamp_timeout_seconds
+from app.services.local_page_cache import get_local_page
 
 
 _WORD_RE = re.compile(r"[\w\-]{2,}", re.UNICODE)
@@ -47,25 +48,18 @@ class _TextExtractor(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs) -> None:
         tag=tag.lower(); data=self._attrs(attrs)
-        if tag == "html" and not self.lang:
-            self.lang=data.get("lang", "")[:40]
+        if tag == "html" and not self.lang: self.lang=data.get("lang", "")[:40]
         if tag == "meta":
             name=data.get("name", "").casefold()
-            if name == "description" and not self.meta_description:
-                self.meta_description=data.get("content", "")[:1000]
+            if name == "description" and not self.meta_description: self.meta_description=data.get("content", "")[:1000]
             elif name in {"robots", "googlebot", "yandex"} and data.get("content"):
-                value=data.get("content", "")[:500]
-                self.robots=(self.robots+", "+value).strip(", ")[:1000]
+                value=data.get("content", "")[:500]; self.robots=(self.robots+", "+value).strip(", ")[:1000]
         elif tag == "link":
             rel={item.casefold() for item in data.get("rel", "").split()}
-            if "canonical" in rel and not self.canonical:
-                self.canonical=data.get("href", "")[:2000]
-        elif tag == "h1":
-            self.h1_count += 1
-        elif tag == "h2":
-            self.h2_count += 1
-        if tag == "script" and data.get("type", "").casefold() == "application/ld+json":
-            self.structured_data_count += 1
+            if "canonical" in rel and not self.canonical: self.canonical=data.get("href", "")[:2000]
+        elif tag == "h1": self.h1_count += 1
+        elif tag == "h2": self.h2_count += 1
+        if tag == "script" and data.get("type", "").casefold() == "application/ld+json": self.structured_data_count += 1
         if tag in {"script","style","noscript","svg","canvas","template"}: self._skip += 1
         elif tag == "title": self._in_title=True
         elif tag in {"p","div","article","section","main","li","br","h1","h2","h3","h4","td","th"}: self.parts.append("\n")
@@ -90,18 +84,10 @@ class _TextExtractor(HTMLParser):
     def metadata(self) -> dict:
         robots=self.robots.casefold()
         return {
-            "title": self.title[:500],
-            "title_chars": len(self.title),
-            "meta_description": self.meta_description,
-            "meta_description_chars": len(self.meta_description),
-            "canonical": self.canonical,
-            "robots": self.robots,
-            "noindex": "noindex" in robots,
-            "nofollow": "nofollow" in robots,
-            "lang": self.lang,
-            "h1_count": self.h1_count,
-            "h2_count": self.h2_count,
-            "structured_data_blocks": self.structured_data_count,
+            "title": self.title[:500], "title_chars": len(self.title), "meta_description": self.meta_description,
+            "meta_description_chars": len(self.meta_description), "canonical": self.canonical, "robots": self.robots,
+            "noindex": "noindex" in robots, "nofollow": "nofollow" in robots, "lang": self.lang,
+            "h1_count": self.h1_count, "h2_count": self.h2_count, "structured_data_blocks": self.structured_data_count,
         }
 
 
@@ -143,14 +129,12 @@ async def validate_public_url(url: str) -> str:
 def extract_document(body: str, media_type: str) -> tuple[str, str, dict]:
     if media_type == "text/plain": return "", _SPACE_RE.sub(" ",body).strip(), {}
     if media_type in _XML_MEDIA_TYPES:
-        text=re.sub(r"<[^>]+>"," ",body)
-        return "", _SPACE_RE.sub(" ",html.unescape(text)).strip(), {}
+        text=re.sub(r"<[^>]+>"," ",body); return "", _SPACE_RE.sub(" ",html.unescape(text)).strip(), {}
     parser=_TextExtractor(); parser.feed(body); return parser.title, parser.text(), parser.metadata()
 
 
 def extract_text(body: str, media_type: str) -> tuple[str,str]:
-    title, text, _metadata = extract_document(body, media_type)
-    return title, text
+    title, text, _metadata = extract_document(body, media_type); return title, text
 
 
 def _tokens(text: str) -> set[str]: return {item.casefold() for item in _WORD_RE.findall(text)}
@@ -176,10 +160,25 @@ class ResearchFetcher:
         self.timeout_seconds=timeout_seconds; self.max_bytes=max_bytes; self.max_chars=max_chars; self.max_redirects=max_redirects
 
     async def fetch(self,url:str)->FetchedPage:
+        # Exact local snapshot first. This is the key offline-first bridge: a
+        # SearchHit from OLYA's own FTS index never needs to re-download the page
+        # before the model can read it.
+        try:
+            local = await asyncio.to_thread(get_local_page, str(url or '').strip())
+        except Exception:
+            local = None
+        if local is not None:
+            content = local.content[:self.max_chars].strip()
+            if content:
+                return FetchedPage(
+                    requested_url=local.url, final_url=local.url,
+                    title=local.title or urlsplit(local.url).hostname or local.url,
+                    content=content, http_status=200, media_type='text/plain',
+                    metadata={'source': 'olya_local_index', 'fetched_at': local.fetched_at},
+                )
         try:
             budget=clamp_timeout_seconds(self.timeout_seconds,stage="research fetch",minimum=0.1)
-            async with asyncio.timeout(budget):
-                return await self._fetch_with_budget(url,budget)
+            async with asyncio.timeout(budget): return await self._fetch_with_budget(url,budget)
         except (DeadlineExceededError,TimeoutError) as exc:
             raise ResearchFetchError("Request deadline exceeded during research fetch") from exc
 
