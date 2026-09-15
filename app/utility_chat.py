@@ -34,6 +34,19 @@ _CITY_TIMEZONES = {
     "красноярске": ("Красноярске", "Asia/Krasnoyarsk"), "красноярск": ("Красноярске", "Asia/Krasnoyarsk"),
     "иркутске": ("Иркутске", "Asia/Irkutsk"), "иркутск": ("Иркутске", "Asia/Irkutsk"),
     "владивостоке": ("Владивостоке", "Asia/Vladivostok"), "владивосток": ("Владивостоке", "Asia/Vladivostok"),
+    "токио": ("Токио", "Asia/Tokyo"), "tokyo": ("Tokyo", "Asia/Tokyo"),
+    "лондоне": ("Лондоне", "Europe/London"), "лондон": ("Лондоне", "Europe/London"), "london": ("London", "Europe/London"),
+    "париже": ("Париже", "Europe/Paris"), "париж": ("Париже", "Europe/Paris"), "paris": ("Paris", "Europe/Paris"),
+    "берлине": ("Берлине", "Europe/Berlin"), "берлин": ("Берлине", "Europe/Berlin"), "berlin": ("Berlin", "Europe/Berlin"),
+    "амстердаме": ("Амстердаме", "Europe/Amsterdam"), "амстердам": ("Амстердаме", "Europe/Amsterdam"), "amsterdam": ("Amsterdam", "Europe/Amsterdam"),
+    "дубае": ("Дубае", "Asia/Dubai"), "дубай": ("Дубае", "Asia/Dubai"), "dubai": ("Dubai", "Asia/Dubai"),
+    "нью-йорке": ("Нью-Йорке", "America/New_York"), "нью-йорк": ("Нью-Йорке", "America/New_York"), "new york": ("New York", "America/New_York"),
+    "лос-анджелесе": ("Лос-Анджелесе", "America/Los_Angeles"), "лос-анджелес": ("Лос-Анджелесе", "America/Los_Angeles"), "los angeles": ("Los Angeles", "America/Los_Angeles"),
+    "пекине": ("Пекине", "Asia/Shanghai"), "пекин": ("Пекине", "Asia/Shanghai"), "beijing": ("Beijing", "Asia/Shanghai"),
+    "шанхае": ("Шанхае", "Asia/Shanghai"), "шанхай": ("Шанхае", "Asia/Shanghai"), "shanghai": ("Shanghai", "Asia/Shanghai"),
+    "сеуле": ("Сеуле", "Asia/Seoul"), "сеул": ("Сеуле", "Asia/Seoul"), "seoul": ("Seoul", "Asia/Seoul"),
+    "сингапуре": ("Сингапуре", "Asia/Singapore"), "сингапур": ("Сингапуре", "Asia/Singapore"), "singapore": ("Singapore", "Asia/Singapore"),
+    "сиднее": ("Сиднее", "Australia/Sydney"), "сидней": ("Сиднее", "Australia/Sydney"), "sydney": ("Sydney", "Australia/Sydney"),
 }
 _MONTHS_RU = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря")
 
@@ -146,8 +159,8 @@ def utility_reply(user_text: str) -> UtilityReply | None:
 
     normalized = text.casefold()
     location = _city(text)
-    asks_time = any(marker in normalized for marker in _TIME_MARKERS)
-    asks_date = any(marker in normalized for marker in _DATE_MARKERS)
+    asks_time = any(marker in normalized for marker in _TIME_MARKERS) or bool(re.search(r"\btime\s+(?:now\s+)?in\b|\bwhat\s+time\b", normalized))
+    asks_date = any(marker in normalized for marker in _DATE_MARKERS) or "date today" in normalized
     if location and (asks_time or asks_date):
         city_form, timezone_name = location
         now = datetime.now(ZoneInfo(timezone_name))
