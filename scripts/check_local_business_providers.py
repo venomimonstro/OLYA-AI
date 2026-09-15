@@ -5,6 +5,7 @@ import sys
 from collections import Counter
 from time import perf_counter
 
+from app.services.indexed_business_discovery import discover_indexed_businesses
 from app.services.russian_maps_discovery import RussianMapsDiscovery
 from app.services.yell_discovery import discover_yell
 from app.services.zoon_discovery import discover_zoon
@@ -26,6 +27,7 @@ async def main() -> int:
     maps = RussianMapsDiscovery(timeout_seconds=4.0)
 
     results = await asyncio.gather(
+        timed("indexed_cards", discover_indexed_businesses(query, discovery, limit=10)),
         timed("yandex_2gis", maps.search(query)),
         timed("zoon", discover_zoon(query, discovery, limit=8)),
         timed("yell", discover_yell(query, limit=8)),
@@ -41,12 +43,13 @@ async def main() -> int:
         print("rows:", len(rows))
         print("error:", error or "none")
         print("kinds:", dict(Counter(getattr(row, "provider", "unknown") for row in rows)) or "none")
-        for index, row in enumerate(rows[:8], 1):
+        for index, row in enumerate(rows[:10], 1):
             print(f"{index}. {row.name}")
             print("   card:", row.card_url)
             print("   address:", row.address or "-")
             print("   rating:", row.rating if row.rating is not None else "-", "reviews:", row.reviews if row.reviews is not None else "-")
             print("   phone:", row.phone or "-")
+            print("   source:", row.source_url or "-")
 
     print("\ntotal:", total)
     return 0 if total else 2
