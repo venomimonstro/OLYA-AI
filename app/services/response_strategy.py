@@ -40,12 +40,17 @@ _SHOPPING_LOOKUP_RE = re.compile(
 _LOCAL_LOOKUP_RE = re.compile(
     r"(?:\bгде\s+(?:поесть|покушать|перекусить|выпить\s+кофе|остановиться|припарковаться)\b|"
     r"\bкуда\s+сходить\b|\bчто\s+посмотреть\s+в\s+[а-яёa-z-]+|"
-    r"\b(?:кафе|ресторан\w*|кофейн\w*|аптек\w*|отел\w*|гостиниц\w*)\b.{0,35}\b(?:рядом|поблизости|недалеко|в\s+[а-яёa-z-]+)|"
+    r"\b(?:кафе|ресторан\w*|кофейн\w*|аптек\w*|отел\w*|гостиниц\w*)\b.{0,45}\b(?:рядом|поблизости|недалеко|в\s+[а-яёa-z-]+)|"
+    r"\b(?:ближайш\w*|где\s+рядом)\s+(?:кафе|ресторан\w*|кофейн\w*|аптек\w*|отел\w*|гостиниц\w*)\b|"
     r"\b(?:restaurant|cafe|hotel|pharmacy)\s+(?:near\s+me|nearby|in\s+[a-z-]+))", re.I,
 )
 _REGULATED_LOOKUP_RE = re.compile(
-    r"(?:\b(?:какие|какой|сколько|размер|ставк\w*|правил\w*|услови\w*)\b.{0,45}\b(?:налог\w*|ндс|ндфл|штраф\w*|пошлин\w*|пенси\w*)\b|"
-    r"\b(?:налог\w*|ндс|ндфл|штраф\w*|самозанят\w*|усн|коап|трудов\w*\s+законодательств\w*)\b.{0,45}\b(?:платить|действует|ставк\w*|правил\w*|требован\w*)\b|"
+    r"(?:\b(?:какие|какой|сколько|размер|ставк\w*|правил\w*|услови\w*)\b.{0,55}\b(?:налог\w*|ндс|ндфл|штраф\w*|пошлин\w*|пенси\w*)\b|"
+    r"\b(?:налог\w*|ндс|ндфл|штраф\w*|самозанят\w*|усн|коап|трудов\w*\s+законодательств\w*)\b.{0,55}\b(?:платить|действует|ставк\w*|правил\w*|требован\w*)\b|"
+    r"\bкак\s+(?:работает|оформить|перейти\s+на|платить|рассчитать)\s+(?:усн|самозанят\w*|ндс|ндфл|налог\w*)\b|"
+    r"\b(?:трудов\w*\s+(?:кодекс|законодательств\w*)|тк\s*рф)\b.{0,70}\b(?:дистанционн\w*|увольнен\w*|отпуск\w*|больничн\w*|работ\w*)\b|"
+    r"\bправил\w*\s+(?:въезд\w*|виз\w*|проведен\w*\s+(?:огэ|егэ)|индексац\w*\s+пенси\w*)\b|"
+    r"\bкомисси\w*\s+(?:ozon|озон|wildberries|вайлдберриз|wb|яндекс\s+маркет\w*)\b|"
     r"\bможно\s+ли\s+(?:вернуть\s+товар|уволить|не\s+платить|получить\s+вычет)\b)", re.I,
 )
 _DYNAMIC_LOOKUP_RE = re.compile(
@@ -130,7 +135,15 @@ def requires_fresh_data(text: str) -> bool:
         return False
     if _TRANSFORM_RE.search(value) and _has_self_contained_payload(text) and not _URL_RE.search(value):
         return False
-    if _STABLE_EXPLANATION_RE.search(value) and not _EXPLICIT_RECENCY_RE.search(value) and not _CURRENT_ROLE_RE.search(value) and not _DYNAMIC_LOOKUP_RE.search(value):
+    if (
+        _STABLE_EXPLANATION_RE.search(value)
+        and not _EXPLICIT_RECENCY_RE.search(value)
+        and not _CURRENT_ROLE_RE.search(value)
+        and not _DYNAMIC_LOOKUP_RE.search(value)
+        and not _SHOPPING_LOOKUP_RE.search(value)
+        and not _LOCAL_LOOKUP_RE.search(value)
+        and not _REGULATED_LOOKUP_RE.search(value)
+    ):
         return False
     return bool(
         _URL_RE.search(value) or _FRESH_RE.search(value) or _CURRENT_ROLE_RE.search(value) or
