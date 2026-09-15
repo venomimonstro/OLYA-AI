@@ -11,6 +11,7 @@ from app.services.public_maps_discovery import MapPlace
 from app.services.response_strategy import normalized_question
 from app.services.russian_maps_discovery import RussianMapsDiscovery
 from app.services.yandex_medicine_discovery import discover_yandex_medicine, is_yandex_medicine_url
+from app.services.yell_discovery import discover_yell
 from app.services.zoon_discovery import discover_zoon
 
 
@@ -22,15 +23,9 @@ _LOCATION_RE = re.compile(
     r"\b(?:в|во|рядом|поблизости|около)\s+[а-яёa-z][а-яёa-z-]{2,}(?:\s+[а-яёa-z][а-яёa-z-]{2,}){0,2}\b",
     re.I,
 )
-_BUSINESS_HINT_RE = re.compile(
-    r"\b(?:компани\w*|центр\w*|клиник\w*|сервис\w*|магазин\w*|салон\w*|"
-    r"стоматолог\w*|слухопротезирован\w*|аптек\w*|ресторан\w*|кафе|бар\w*|отел\w*|гостиниц\w*|"
-    r"школ\w*|курс\w*|студи\w*|агентств\w*|юрист\w*|адвокат\w*|автосервис\w*|автосалон\w*|"
-    r"фитнес\w*|спортзал\w*|парикмах\w*|барбершоп\w*|ремонт\w*|мастер\w*|ветеринар\w*|"
-    r"лаборатор\w*|медицин\w*|риелтор\w*|недвижимост\w*|бухгалтер\w*|банк\w*|страхов\w*|"
-    r"турагент\w*|туроператор\w*|строительн\w*|доставк\w*|типограф\w*|фотограф\w*|коворкинг\w*|"
-    r"саун\w*|бан[яи]\w*|оптик\w*|автомойк\w*|шиномонтаж\w*|детейлинг\w*|нотариус\w*|"
-    r"образован\w*|учебн\w*|детсад\w*|детск\w+\s+сад\w*|ателье\w*|химчистк\w*)\b",
+_NON_BUSINESS_LOCAL_RE = re.compile(
+    r"\b(?:погод\w*|район\w*|улиц\w*|проспект\w*|метро\b|маршрут\w*|"
+    r"достопримечательност\w*|что\s+посмотреть|куда\s+сходить|прогул\w*|истори\w*)\b",
     re.I,
 )
 _MEDICAL_RE = re.compile(
@@ -39,7 +34,7 @@ _MEDICAL_RE = re.compile(
     re.I,
 )
 _GENERIC_TITLE = re.compile(
-    r"\b(?:яндекс\s*карты|yandex\s*maps|яндекс\s*медицина|2гис|2gis|zoon|зун|карты|maps|"
+    r"\b(?:яндекс\s*карты|yandex\s*maps|яндекс\s*медицина|2гис|2gis|zoon|зун|yell|карты|maps|"
     r"официальный\s*сайт|отзывы|адрес|телефон|москва|moscow)\b",
     re.I,
 )
@@ -73,9 +68,9 @@ class LocalBusinessResult:
 
 def is_local_business_question(question: str) -> bool:
     text = normalized_question(question)
-    if not text:
+    if not text or _NON_BUSINESS_LOCAL_RE.search(text):
         return False
-    return bool(_SELECTION_RE.search(text) and _LOCATION_RE.search(text) and _BUSINESS_HINT_RE.search(text))
+    return bool(_SELECTION_RE.search(text) and _LOCATION_RE.search(text))
 
 
 def _host(url: str) -> str:
@@ -94,6 +89,8 @@ def _kind(url: str) -> str:
         return "2gis"
     if host == "zoon.ru":
         return "zoon"
+    if host == "yell.ru":
+        return "yell"
     return "web"
 
 
@@ -189,14 +186,14 @@ async def _empty_places() -> list[MapPlace]:
 
 def _entity_score(row: dict) -> float:
     map_evidence = sum(bool(row.get(k)) for k in ("yandex_maps", "2gis"))
-    zoon_evidence = 1 if row.get("zoon") else 0
-    independent = map_evidence + zoon_evidence + (1 if row.get("web") else 0)
+    directory_evidence = sum(bool(row.get(k)) for k in ("zoon", "yell"))
+    independent = map_evidence + directory_evidence + (1 if row.get("web") else 0)
     best_rating = max((value for value in row.get("ratings", {}).values() if isinstance(value, (int, float))), default=0.0)
     best_reviews = max((value for value in row.get("reviews", {}).values() if isinstance(value, int)), default=0)
     review_confidence = min(math.log1p(best_reviews) / math.log(1001), 1.0) if best_reviews > 0 else 0.0
     rating_quality = max(0.0, min((best_rating - 3.5) / 1.5, 1.0)) if best_rating else 0.0
     completeness = sum(bool(row.get(k)) for k in ("address", "phone", "website", "web")) / 4.0
-    return map_evidence * 2.2 + zoon_evidence * 1.35 + min(independent, 3) * 0.3 + rating_quality * 1.5 + review_confidence + completeness * 0.5
+    return map_evidence * 2.2 + directory_evidence * 1.3 + min(independent, 4) * 0.3 + rating_quality * 1.5 + review_confidence + completeness * 0.5
 
 
 def _empty_entity(name: str) -> dict:
@@ -209,6 +206,7 @@ def _empty_entity(name: str) -> dict:
         "yandex_maps": "",
         "2gis": "",
         "zoon": "",
+        "yell": "",
         "ratings": {},
         "reviews": {},
     }
@@ -226,7 +224,7 @@ def _merge_place(entities: dict[str, dict], place: MapPlace) -> None:
         row["phone"] = place.phone
     if place.website and not row["website"]:
         row["website"] = place.website
-    if place.provider in {"yandex_maps", "2gis", "zoon"}:
+    if place.provider in {"yandex_maps", "2gis", "zoon", "yell"}:
         row[place.provider] = row[place.provider] or place.card_url
     if place.rating is not None:
         row["ratings"][place.provider] = place.rating
@@ -241,8 +239,8 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
     city_slug = _city_slug(question)
     medical = bool(_MEDICAL_RE.search(normalized_question(question)))
 
-    # Independent Russian sources run concurrently. Yandex Medicine is a
-    # specialization used only for medical queries; Zoon is category-agnostic.
+    # Independent Russian sources run concurrently. Yandex Medicine is only a
+    # medical specialization; Zoon and Yell are generic directories.
     queries = (
         question,
         f"site:yandex.ru/maps/org/ {question}",
@@ -250,16 +248,16 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
     )
     maps_task = asyncio.create_task(_RU_MAPS.search(question))
     zoon_task = asyncio.create_task(discover_zoon(question, discovery, limit=8))
+    yell_task = asyncio.create_task(discover_yell(question, limit=8))
     medicine_task = asyncio.create_task(discover_yandex_medicine(question, discovery, limit=8) if medical else _empty_places())
     serp_tasks = [asyncio.create_task(_search(discovery, q)) for q in queries]
-    public_rows, zoon_rows, medicine_rows, *serp_batches = await asyncio.gather(
-        maps_task, zoon_task, medicine_task, *serp_tasks
+    public_rows, zoon_rows, yell_rows, medicine_rows, *serp_batches = await asyncio.gather(
+        maps_task, zoon_task, yell_task, medicine_task, *serp_tasks
     )
 
     entities: dict[str, dict] = {}
     source_rows: list[dict] = []
 
-    # Prefer structured/direct sources before generic SERP rows.
     for place in medicine_rows:
         _merge_place(entities, place)
         source_rows.append(place.public_source())
@@ -267,6 +265,9 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
         _merge_place(entities, place)
         source_rows.append(place.public_source())
     for place in zoon_rows:
+        _merge_place(entities, place)
+        source_rows.append(place.public_source())
+    for place in yell_rows:
         _merge_place(entities, place)
         source_rows.append(place.public_source())
 
@@ -286,7 +287,7 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
                 continue
             row = entities.setdefault(key, _empty_entity(name))
             kind = _kind(hit.url)
-            if kind in {"yandex_maps", "2gis", "zoon"}:
+            if kind in {"yandex_maps", "2gis", "zoon", "yell"}:
                 row[kind] = row[kind] or hit.url
             elif not row["web"]:
                 row["web"] = hit.url
@@ -295,14 +296,14 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
                 row["yandex_maps"] = hit.url
 
     rows = list(entities.values())
-    rows = [row for row in rows if row.get("yandex_maps") or row.get("2gis") or row.get("zoon") or row.get("web")]
+    rows = [row for row in rows if row.get("yandex_maps") or row.get("2gis") or row.get("zoon") or row.get("yell") or row.get("web")]
     rows.sort(key=_entity_score, reverse=True)
     rows = rows[:7]
 
     if not rows:
         return LocalBusinessResult(
             text=(
-                "Не удалось получить подтверждённые организации из Яндекса, 2ГИС, Zoon или поисковой выдачи. "
+                "Не удалось получить подтверждённые организации из Яндекса, 2ГИС, Zoon, Yell или поисковой выдачи. "
                 "Я не буду придумывать компании."
             ),
             sources=[],
@@ -310,7 +311,7 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
         )
 
     out = [
-        "Подобрал подтверждённые варианты по Яндексу, 2ГИС, Zoon и открытой поисковой выдаче. "
+        "Подобрал подтверждённые варианты по Яндексу, 2ГИС, Zoon, Yell и открытой поисковой выдаче. "
         "Прямые карточки показываю только когда они реально найдены; иначе даю поиск на карте по подтверждённому названию."
     ]
 
@@ -332,12 +333,16 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
         drc = row["reviews"].get("2gis")
         zr = row["ratings"].get("zoon")
         zrc = row["reviews"].get("zoon")
+        ylr = row["ratings"].get("yell")
+        ylrc = row["reviews"].get("yell")
         if yr is not None:
             out.append(f"Яндекс: {yr:g}" + (f" · {yrc} отзывов" if yrc is not None else ""))
         if dr is not None:
             out.append(f"2ГИС: {dr:g}" + (f" · {drc} отзывов" if drc is not None else ""))
         if zr is not None:
             out.append(f"Zoon: {zr:g}" + (f" · {zrc} отзывов/оценок" if zrc is not None else ""))
+        if ylr is not None:
+            out.append(f"Yell: {ylr:g}" + (f" · {ylrc} отзывов" if ylrc is not None else ""))
 
         out.append(
             "Яндекс: " + _md("карточка" if row["yandex_maps"] else "поиск на карте", row["yandex_maps"] or fallback["yandex"])
@@ -347,9 +352,11 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
         )
         if row.get("zoon"):
             out.append("Zoon: " + _md("карточка", row["zoon"]))
+        if row.get("yell"):
+            out.append("Yell: " + _md("карточка", row["yell"]))
 
     return LocalBusinessResult(
         text="\n".join(out),
-        sources=source_rows[:15],
+        sources=source_rows[:18],
         searched=len(source_rows),
     )
