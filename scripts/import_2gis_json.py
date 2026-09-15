@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.services.business_quality import save_business_quality
 from app.services.local_search_store import get_local_search_store
 
 
@@ -35,6 +36,27 @@ _CATEGORY_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"банк\b", re.I), "bank"),
 )
 
+_CITY_SLUGS = {
+    "Москва": "moscow",
+    "Санкт-Петербург": "spb",
+    "Казань": "kazan",
+    "Екатеринбург": "ekaterinburg",
+    "Новосибирск": "novosibirsk",
+    "Самара": "samara",
+    "Челябинск": "chelyabinsk",
+    "Красноярск": "krasnoyarsk",
+    "Тюмень": "tyumen",
+    "Уфа": "ufa",
+    "Пермь": "perm",
+    "Сочи": "sochi",
+    "Калининград": "kaliningrad",
+    "Воронеж": "voronezh",
+    "Краснодар": "krasnodar",
+    "Омск": "omsk",
+    "Нижний Новгород": "nnovgorod",
+    "Ростов-на-Дону": "rostov",
+}
+
 
 @dataclass(frozen=True)
 class LoadReport:
@@ -57,13 +79,7 @@ def _first(*values: Any) -> str:
 
 
 def _load_recoverable_array(path: Path) -> LoadReport:
-    """Load parser-2gis JSON, salvaging complete records from a truncated tail.
-
-    parser-2gis writes a JSON array incrementally. If Chrome/parser crashes while
-    writing the last card, the whole file becomes invalid even though all earlier
-    objects are complete. We first try strict JSON and, on failure, decode array
-    elements one-by-one and stop only at the first incomplete/corrupt tail.
-    """
+    """Load parser-2gis JSON and salvage complete records from a truncated tail."""
     text = path.read_text(encoding="utf-8-sig")
     try:
         payload = json.loads(text)
@@ -78,7 +94,6 @@ def _load_recoverable_array(path: Path) -> LoadReport:
         index += 1
         items: list[dict[str, Any]] = []
         error_offset: int | None = None
-
         while index < length:
             while index < length and (text[index].isspace() or text[index] == ","):
                 index += 1
@@ -92,11 +107,9 @@ def _load_recoverable_array(path: Path) -> LoadReport:
             if isinstance(value, dict):
                 items.append(value)
             index = end
-
         if not items:
             raise SystemExit(
-                f"2GIS JSON is corrupted and no complete records could be recovered; "
-                f"parse error at char {strict_error.pos}"
+                f"2GIS JSON is corrupted and no complete records could be recovered; parse error at char {strict_error.pos}"
             ) from strict_error
         stop = error_offset if error_offset is not None else index
         return LoadReport(
@@ -105,7 +118,6 @@ def _load_recoverable_array(path: Path) -> LoadReport:
             error_offset=error_offset if error_offset is not None else strict_error.pos,
             trailing_chars=max(0, length - stop),
         )
-
     if not isinstance(payload, list):
         raise SystemExit("2GIS JSON must contain a list")
     return LoadReport(
@@ -188,6 +200,32 @@ def _city(item: dict[str, Any], fallback: str) -> str:
     return fallback
 
 
+def _review_metrics(item: dict[str, Any]) -> tuple[float | None, int | None]:
+    reviews = item.get("reviews")
+    if not isinstance(reviews, dict):
+        return None, None
+    raw_rating = reviews.get("general_rating")
+    raw_count = reviews.get("general_review_count")
+    try:
+        rating = float(raw_rating) if raw_rating is not None else None
+    except (TypeError, ValueError):
+        rating = None
+    if rating is not None and not 0.0 <= rating <= 5.0:
+        rating = None
+    try:
+        review_count = max(0, int(raw_count)) if raw_count is not None else None
+    except (TypeError, ValueError):
+        review_count = None
+    return rating, review_count
+
+
+def _source_updated_at(item: dict[str, Any]) -> str:
+    dates = item.get("dates")
+    if not isinstance(dates, dict):
+        return ""
+    return _clean(dates.get("updated_at"))[:80]
+
+
 def _record(item: dict[str, Any], *, city: str, category_override: str) -> dict[str, Any] | None:
     branch_id = _clean(item.get("id"))
     if "_" in branch_id:
@@ -195,7 +233,11 @@ def _record(item: dict[str, Any], *, city: str, category_override: str) -> dict[
     if not branch_id:
         branch_id = _clean((item.get("org") or {}).get("id")) if isinstance(item.get("org"), dict) else ""
     name_ex = item.get("name_ex") if isinstance(item.get("name_ex"), dict) else {}
-    name = _first(name_ex.get("primary"), item.get("name"), (item.get("org") or {}).get("name") if isinstance(item.get("org"), dict) else "")
+    name = _first(
+        name_ex.get("primary"),
+        item.get("name"),
+        (item.get("org") or {}).get("name") if isinstance(item.get("org"), dict) else "",
+    )
     if len(name) < 2:
         return None
 
@@ -203,7 +245,11 @@ def _record(item: dict[str, Any], *, city: str, category_override: str) -> dict[
     point = item.get("point") if isinstance(item.get("point"), dict) else {}
     phone, website, email = _contacts(item)
     resolved_city = _city(item, city)
-    address = _first(item.get("address_name"), (item.get("address") or {}).get("name") if isinstance(item.get("address"), dict) else "")
+    rating, review_count = _review_metrics(item)
+    address = _first(
+        item.get("address_name"),
+        (item.get("address") or {}).get("name") if isinstance(item.get("address"), dict) else "",
+    )
     if address and resolved_city and resolved_city.casefold() not in address.casefold():
         address = f"{resolved_city}, {address}"
 
@@ -214,17 +260,25 @@ def _record(item: dict[str, Any], *, city: str, category_override: str) -> dict[
     if email:
         aliases.append(email)
 
+    city_slug = _clean(item.get("city_alias")) or _CITY_SLUGS.get(resolved_city, "moscow")
     return {
         "source_key": f"2gis:{branch_id}" if branch_id else "",
         "source": "2gis",
         "source_id": branch_id,
-        "source_url": f"https://2gis.ru/moscow/firm/{branch_id}" if branch_id else "",
+        "source_url": f"https://2gis.ru/{city_slug}/firm/{branch_id}" if branch_id else "",
         "name": name,
         "aliases": aliases,
         "category": category_override or detected_category,
         "subcategory": rubrics[0] if rubrics else "",
         "country": "Россия",
-        "region": next((_clean(row.get("name")) for row in item.get("adm_div") or [] if isinstance(row, dict) and _clean(row.get("type")).casefold() == "region"), ""),
+        "region": next(
+            (
+                _clean(row.get("name"))
+                for row in item.get("adm_div") or []
+                if isinstance(row, dict) and _clean(row.get("type")).casefold() == "region"
+            ),
+            "",
+        ),
         "city": resolved_city,
         "address": address,
         "lat": point.get("lat"),
@@ -232,7 +286,10 @@ def _record(item: dict[str, Any], *, city: str, category_override: str) -> dict[
         "phone": phone,
         "website": website,
         "opening_hours": _schedule(item),
-        "confidence": 0.93 if address and (phone or website) else 0.86,
+        "rating": rating,
+        "review_count": review_count,
+        "source_updated_at": _source_updated_at(item),
+        "confidence": 0.95 if rating is not None and address and (phone or website) else (0.93 if address and (phone or website) else 0.86),
     }
 
 
@@ -245,9 +302,8 @@ def main() -> int:
 
     path = Path(args.path)
     report = _load_recoverable_array(path)
-
     store = get_local_search_store()
-    written = skipped = 0
+    written = skipped = ratings_imported = reviews_imported = 0
     category_counts: dict[str, int] = {}
     for item in report.items:
         record = _record(item, city=args.city, category_override=args.category)
@@ -255,25 +311,44 @@ def main() -> int:
             skipped += 1
             continue
         try:
-            store.upsert_business(record)
+            business_id = store.upsert_business(record)
+            save_business_quality(
+                business_id,
+                rating=record.get("rating"),
+                reviews=record.get("review_count"),
+                source_updated_at=str(record.get("source_updated_at") or ""),
+                store=store,
+            )
         except Exception:
             skipped += 1
             continue
         written += 1
+        if record.get("rating") is not None:
+            ratings_imported += 1
+        if record.get("review_count") is not None:
+            reviews_imported += 1
         category = str(record.get("category") or "unknown")
         category_counts[category] = category_counts.get(category, 0) + 1
 
-    print(json.dumps({
-        "source": str(path),
-        "input_records": len(report.items),
-        "recovered_truncated_json": report.recovered,
-        "json_error_offset": report.error_offset,
-        "trailing_chars_ignored": report.trailing_chars,
-        "written": written,
-        "skipped": skipped,
-        "categories": category_counts,
-        "store": store.stats(),
-    }, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "source": str(path),
+                "input_records": len(report.items),
+                "recovered_truncated_json": report.recovered,
+                "json_error_offset": report.error_offset,
+                "trailing_chars_ignored": report.trailing_chars,
+                "written": written,
+                "skipped": skipped,
+                "ratings_imported": ratings_imported,
+                "reviews_imported": reviews_imported,
+                "categories": category_counts,
+                "store": store.stats(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0 if written else 2
 
 
