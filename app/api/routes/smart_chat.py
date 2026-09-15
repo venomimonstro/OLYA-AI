@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app import user_ui as _base_user_ui
 from app.api.routes import chat as legacy_chat
 from app.db import SessionLocal, get_db
+from app.inference.router import choose_route
 from app.models import ChatRun, Message, UsageEvent, User
 from app.schemas.chat import ChatRequest, ChatResponse, ChatRunStatus, ChatUsage
 from app.services.auth import get_current_user
@@ -84,11 +85,11 @@ def _structured_metadata(execution) -> dict:
 
 def _local_business_metadata(execution) -> dict:
     sources = list(getattr(execution, "sources", []) or [])[:10]
-    return {"kind": "local_business", "web_used": False, "searched_results": int(getattr(execution, "searched", len(sources)) or len(sources)), "fetched_sources": len(sources), "failed_fetches": 0, "sources": sources, "warnings": [] if sources else ["Локальный каталог пока не содержит подходящих организаций"], "steps": ["Проверяю собственный индекс OLYA", "При необходимости использую внешнее обогащение", "Возвращаю подтверждённые организации"]}
+    return {"kind": "local_business", "web_used": False, "searched_results": int(getattr(execution, "searched", len(sources)) or len(sources)), "fetched_sources": len(sources), "failed_fetches": 0, "sources": sources, "warnings": [] if sources else ["Локальный каталог пока не содержит подходящих организаций"], "steps": ["Проверяю собственный индекс OLYA", "При необходимости использую внешнее обогащение", "Сравниваю варианты и формирую рекомендацию"]}
 
 
 def _instant_metadata(kind: str, *, cached: bool = False) -> dict:
-    return {"kind": kind, "web_used": False, "searched_results": 0, "fetched_sources": 0, "failed_fetches": 0, "sources": [], "warnings": [], "steps": ["Быстрый точный ответ" if not cached else "Ответ из проверенного кеша GigaChat"]}
+    return {"kind": kind, "web_used": False, "searched_results": 0, "fetched_sources": 0, "failed_fetches": 0, "sources": [], "warnings": [], "steps": ["Быстрый точный ответ" if not cached else "Ответ из проверенного кеша"]}
 
 
 def _persist_fast_answer(*, db: Session, request: Request, user: User, payload: ChatRequest, job: ActiveChatJob, text: str, mode: str, started: float, task_execution: dict) -> ChatResponse:
@@ -125,8 +126,16 @@ def _repair_is_better(question: str, original: str, candidate: str) -> bool:
         return False
     if not needs_expansion(question, candidate):
         return True
-    minimum_growth = max(180, int(len(original) * 0.60))
-    return len(candidate) - len(original) >= minimum_growth and len(candidate) >= 360
+    minimum_growth = max(180, int(len(original) * 0.45))
+    return len(candidate) - len(original) >= minimum_growth and len(candidate) >= 420
+
+
+def _effective_verification(requested: str, route_mode: str) -> str:
+    if requested == "off":
+        return "off"
+    if route_mode == "deep" and requested == "auto":
+        return "strict"
+    return requested
 
 
 async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id: str, job: ActiveChatJob) -> ChatResponse:
@@ -150,15 +159,9 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
                 result = _persist_fast_answer(db=job_db, request=request, user=job_user, payload=payload, job=job, text=answer, mode="structured_fact", started=started, task_execution=_structured_metadata(execution))
                 await job.token(answer); return result
 
-        # Owned geo search is local storage, not "the web". Keep it available
-        # even when the user disables external internet access.
         if is_local_business_question(question):
-            job._publish_nowait("status", {"state": "lookup", "message": "Ищу в локальном каталоге OLYA…", "task_kind": "local_business"})
-            execution = await resolve_local_business(
-                question,
-                request.app.state.discovery,
-                allow_external=payload.web_mode != "off",
-            )
+            job._publish_nowait("status", {"state": "lookup", "message": "Собираю и сравниваю подходящие варианты…", "task_kind": "local_business"})
+            execution = await resolve_local_business(question, request.app.state.discovery, allow_external=payload.web_mode != "off")
             if execution is not None:
                 result = _persist_fast_answer(db=job_db, request=request, user=job_user, payload=payload, job=job, text=execution.text, mode="local_business", started=started, task_execution=_local_business_metadata(execution))
                 await job.token(execution.text); return result
@@ -169,11 +172,16 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
             result = _persist_fast_answer(db=job_db, request=request, user=job_user, payload=payload, job=job, text=cached, mode="atomic_cache", started=started, task_execution=_instant_metadata("stable_fact", cached=True))
             await job.token(cached); return result
 
-        deep = payload.mode == "deep"; atomic = atomic_key is not None
-        job._publish_nowait("status", {"state": "thinking" if atomic else ("researching" if payload.web_mode == "always" else "working"), "message": "Проверяю факт…" if atomic else ("Ищу актуальные данные…" if payload.web_mode == "always" else "Формирую ответ…"), "task_kind": "atomic_knowledge" if atomic else "clean_chat"})
+        settings = request.app.state.settings
+        route = choose_route(question, payload.mode, settings.max_context_tokens, settings.deep_context_tokens)
+        deep = route.mode == "deep"; atomic = atomic_key is not None
+        verification = _effective_verification(payload.verification, route.mode)
+        status_message = "Проверяю факт…" if atomic else ("Ищу и проверяю актуальные данные…" if payload.web_mode == "always" else ("Разбираю задачу и проверяю решение…" if deep else "Формирую содержательный ответ…"))
+        job._publish_nowait("status", {"state": "thinking" if atomic else ("researching" if payload.web_mode == "always" else "working"), "message": status_message, "task_kind": f"{route.mode}_answer", "complexity_score": route.complexity_score})
+
         web = await build_clean_web_context(discovery=request.app.state.discovery, fetcher=request.app.state.research, question=question, web_mode=payload.web_mode, deep=deep)
         if web.used:
-            job._publish_nowait("status", {"state": "synthesizing", "message": "Источники собраны. Формирую ответ…", "task_kind": "web_research", "fetched_sources": web.fetched, "search_results": web.searched})
+            job._publish_nowait("status", {"state": "synthesizing", "message": "Данные собраны. Сопоставляю источники и формирую вывод…", "task_kind": "web_research", "fetched_sources": web.fetched, "search_results": web.searched})
 
         context_messages = list(web.context_messages)
         completeness = guidance_message(question)
@@ -185,16 +193,22 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
             if memory_message is not None: context_messages.append(memory_message)
 
         context_token = set_task_solver_context(context_messages) if context_messages else None
-        managed_payload = payload.model_copy(update={"client_request_id": job.client_request_id, "verification": "off", "research_source_ids": []})
+        managed_payload = payload.model_copy(update={
+            "client_request_id": job.client_request_id,
+            "mode": route.mode,
+            "verification": verification,
+            "research_source_ids": [],
+        })
         try:
             result = await legacy_chat._chat_impl(managed_payload, request, job_user, job_db, on_token=job.token, on_replace=job.replace)
             if needs_expansion(question, result.text):
-                job._publish_nowait("status", {"state": "verifying", "message": "Ответ недостаточно полный. Дорабатываю…", "task_kind": "completeness_repair"})
+                job._publish_nowait("status", {"state": "verifying", "message": "Проверяю полноту и улучшаю ответ…", "task_kind": "quality_repair"})
                 repair = expansion_messages(question, result.text)
                 repair_context = [item for item in context_messages if item is not completeness]
                 repair_messages = [repair[0], *repair_context, repair[1]] if repair_context else repair
+                repair_tokens = 2800 if route.mode == "deep" else (2000 if route.mode == "work" else 1300)
                 try:
-                    expanded = (await request.app.state.llama.chat(repair_messages, max_tokens=1300 if payload.mode != "deep" else 2000, reasoning=False)).strip()
+                    expanded = (await request.app.state.llama.chat(repair_messages, max_tokens=repair_tokens, reasoning=False)).strip()
                 except Exception:
                     expanded = ""
                 if _repair_is_better(question, result.text, expanded):
@@ -205,7 +219,11 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
             if context_token is not None: reset_task_solver_context(context_token)
 
         if atomic_key and not web.used: _atomic_cache_put(atomic_key, result.text)
-        result.run_id = job.run_id; result.client_request_id = job.client_request_id; result.task_execution = web.public_metadata()
+        metadata = web.public_metadata()
+        metadata["answer_mode"] = route.mode
+        metadata["complexity_score"] = route.complexity_score
+        metadata["verification"] = verification
+        result.run_id = job.run_id; result.client_request_id = job.client_request_id; result.task_execution = metadata
         return result
 
 
