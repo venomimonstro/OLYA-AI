@@ -163,7 +163,7 @@ def _render(question: str, places: list[MapPlace], source_rows: list[dict], *, c
     rows = [row for row in entities.values() if any(row.get(key) for key in ("yandex_maps", "2gis", "zoon", "yell", "osm", "web"))]
     rows.sort(key=_entity_score, reverse=True); rows = rows[:7]
     if not rows:
-        return LocalBusinessResult(text="Локальный индекс пока пуст для этой категории, а внешние источники сейчас недоступны. Я не буду придумывать компании.", sources=[], searched=0)
+        return LocalBusinessResult(text="Локальный индекс пока пуст для этой категории. Я не буду придумывать компании.", sources=[], searched=0)
     out = [("Использую проверенные данные из локального индекса OLYA." if cache_only else "Подобрал подтверждённые организации из локального индекса и доступных внешних источников.") + " Рейтинги показываю только когда источник реально их публикует."]
     for index, row in enumerate(rows, 1):
         name = row["name"]; fallback = _map_search_links(name, city_slug=city_slug, address=row.get("address", "")); out.append(f"\n{index}. **{name}**")
@@ -181,25 +181,30 @@ def _render(question: str, places: list[MapPlace], source_rows: list[dict], *, c
     return LocalBusinessResult(text="\n".join(out), sources=source_rows[:20], searched=len(source_rows))
 
 
-async def resolve_local_business(question: str, discovery) -> LocalBusinessResult | None:
+async def resolve_local_business(question: str, discovery, *, allow_external: bool = True) -> LocalBusinessResult | None:
     if not is_local_business_question(question): return None
 
-    # Permanent SQLite snapshot is the true offline source. It is created by
-    # sync_local_business_catalog.py and survives app/container restarts via /app/data.
+    # OLYA's persistent SQLite FTS5/RTree catalog is authoritative at request
+    # time. It works even when web access is disabled or every external catalog
+    # is unavailable.
     snapshot_rows = search_local_catalog(question, limit=30)
     cached_rows = load_places(question, limit=30)
     if snapshot_rows:
-        # Warm the lightweight JSON index as a secondary cache and answer without
-        # waiting on any network provider. Ratings can be added by later refreshes.
         store_places(question, snapshot_rows)
         merged = [*snapshot_rows, *cached_rows]
         return _render(question, merged, [place.public_source() for place in merged], cache_only=True)
 
-    # Legacy persisted live cache remains useful if a previous network refresh
-    # succeeded before the SQLite snapshot was installed.
     if len(cached_rows) >= 5:
         return _render(question, cached_rows, [place.public_source() for place in cached_rows], cache_only=True)
 
+    if not allow_external:
+        return LocalBusinessResult(
+            text="Локальный каталог OLYA пока не содержит подходящих организаций для этого запроса. Внешний интернет отключён; вымышленные компании не добавляю.",
+            sources=[], searched=0,
+        )
+
+    # External providers are enrichment/bootstrap only. A successful result is
+    # persisted immediately, so future chats stop depending on that provider.
     city_slug = _city_slug(question); medical = bool(_MEDICAL_RE.search(normalized_question(question)))
     queries = (question, f"site:yandex.ru/maps/org/ {question}", f"site:2gis.ru/{city_slug}/firm/ {question}", f"site:yell.ru/{city_slug}/com/ {question}")
     provider_tasks = (
@@ -228,4 +233,4 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
             if is_yandex_medicine_url(hit.url) and not row["yandex_maps"]: row["yandex_maps"] = hit.url
     if merged_places:
         return _render(question, merged_places, source_rows, cache_only=False)
-    return LocalBusinessResult(text="Локальная база для этой категории ещё не построена, а внешние источники сейчас недоступны. Я не буду придумывать компании. Запусти синхронизацию локального каталога OSM; после неё поиск будет работать без интернета.", sources=[], searched=0)
+    return LocalBusinessResult(text="Локальная база для этой категории ещё не построена, а внешние источники сейчас недоступны. Я не буду придумывать компании. После первичного OSM-bootstrap поиск будет работать локально без зависимости от внешних карт.", sources=[], searched=0)
