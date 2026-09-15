@@ -42,6 +42,21 @@ class Import2GISJSONTests(unittest.TestCase):
         self.assertEqual(row["review_count"], 327)
         self.assertEqual(row["source_updated_at"], "2026-09-14T12:00:00.000Z")
         self.assertEqual(row["source_url"], "https://2gis.ru/moscow/firm/70000001012345678")
+        self.assertEqual(row["lat"], 55.8)
+        self.assertEqual(row["lon"], 37.5)
+
+    def test_invalid_coordinates_are_dropped(self) -> None:
+        item = {
+            "id": "70000001012345679",
+            "name": "Тест Без Гео",
+            "point": {"lat": 999, "lon": 999},
+            "rubrics": [{"name": "Автосервисы"}],
+        }
+        row = _record(item, city="Москва", category_override="")
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertIsNone(row["lat"])
+        self.assertIsNone(row["lon"])
 
 
 if __name__ == "__main__":
