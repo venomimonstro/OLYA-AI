@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from app.services.local_search_store import BusinessHit, get_local_search_store
+from app.services.business_quality import (
+    ensure_business_quality_schema,
+    load_business_quality,
+    quality_score,
+)
+from app.services.local_search_store import BusinessHit, LocalSearchStore, get_local_search_store
 from app.services.public_maps_discovery import MapPlace
 from app.services.response_strategy import normalized_question
 
@@ -76,6 +82,7 @@ _NOISE = re.compile(
     r"покажи\w*|выбрать|отзыв\w*|недорог\w*|хорош\w*)\b",
     re.I,
 )
+_QUALITY_RE = re.compile(r"\b(?:лучши\w*|топ|рейтинг\w*|хорош\w*|отзыв\w*|рекоменду\w*|посовет\w*)\b", re.I)
 
 
 def city_from_question(question: str) -> str:
@@ -108,20 +115,108 @@ def _city_match(hit: BusinessHit, city: str) -> bool:
     return hit.city.casefold().replace("ё", "е") == city.casefold().replace("ё", "е")
 
 
-def _hit_to_place(hit: BusinessHit) -> MapPlace:
-    source = hit.source if hit.source in {"osm", "yandex_maps", "2gis", "zoon", "yell"} else "local_index"
-    card = hit.source_url or hit.website
-    if not card and hit.lat is not None and hit.lon is not None:
-        card = f"https://www.openstreetmap.org/?mlat={hit.lat:.6f}&mlon={hit.lon:.6f}#map=17/{hit.lat:.6f}/{hit.lon:.6f}"
+def _provider(value: str) -> str:
+    return value if value in {"osm", "yandex_maps", "2gis", "zoon", "yell"} else "local_index"
+
+
+def _card(source_url: str, website: str, business_id: int, lat: float | None, lon: float | None) -> str:
+    card = source_url or website
+    if not card and lat is not None and lon is not None:
+        card = f"https://www.openstreetmap.org/?mlat={lat:.6f}&mlon={lon:.6f}#map=17/{lat:.6f}/{lon:.6f}"
+    return card or f"local://business/{business_id}"
+
+
+def _hit_to_place(hit: BusinessHit, *, rating: float | None = None, reviews: int | None = None) -> MapPlace:
+    card = _card(hit.source_url, hit.website, hit.id, hit.lat, hit.lon)
     return MapPlace(
-        provider=source,
+        provider=_provider(hit.source),
         name=hit.name,
-        card_url=card or f"local://business/{hit.id}",
+        card_url=card,
         address=hit.address,
         phone=hit.phone,
         website=hit.website,
+        rating=rating,
+        reviews=reviews,
         source_url=hit.source_url or card,
     )
+
+
+def _ranked_quality_places(
+    store: LocalSearchStore,
+    *,
+    city: str,
+    category: str,
+    limit: int,
+) -> list[MapPlace]:
+    """Rank one local vertical by rating confidence, fully on local SQLite data."""
+    ensure_business_quality_schema(store)
+    connection = sqlite3.connect(str(store.path), timeout=15.0)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            """
+            SELECT id,name,address,phone,website,source,source_url,lat,lon,
+                   confidence,rating,review_count,source_updated_at
+            FROM businesses
+            WHERE city=? AND category=?
+            ORDER BY
+                CASE WHEN rating IS NULL THEN 1 ELSE 0 END ASC,
+                rating DESC,
+                COALESCE(review_count,0) DESC,
+                confidence DESC
+            LIMIT 1000
+            """,
+            (city, category),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    def rank(row: sqlite3.Row) -> tuple[float, int, float, int, str]:
+        rating = float(row["rating"]) if row["rating"] is not None else None
+        reviews = int(row["review_count"]) if row["review_count"] is not None else None
+        completeness = sum(bool(row[key]) for key in ("address", "phone", "website"))
+        return (
+            quality_score(rating, reviews),
+            int(reviews or 0),
+            float(row["confidence"] or 0.0),
+            completeness,
+            str(row["name"] or "").casefold(),
+        )
+
+    ranked = sorted(rows, key=rank, reverse=True)
+    result: list[MapPlace] = []
+    seen: set[str] = set()
+    for row in ranked:
+        name = " ".join(str(row["name"] or "").split()).strip()
+        if len(name) < 2:
+            continue
+        dedupe = name.casefold()
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        rating = float(row["rating"]) if row["rating"] is not None else None
+        reviews = int(row["review_count"]) if row["review_count"] is not None else None
+        lat = float(row["lat"]) if row["lat"] is not None else None
+        lon = float(row["lon"]) if row["lon"] is not None else None
+        source_url = str(row["source_url"] or "")
+        website = str(row["website"] or "")
+        card = _card(source_url, website, int(row["id"]), lat, lon)
+        result.append(
+            MapPlace(
+                provider=_provider(str(row["source"] or "")),
+                name=name,
+                card_url=card,
+                address=str(row["address"] or ""),
+                phone=str(row["phone"] or ""),
+                website=website,
+                rating=rating,
+                reviews=reviews,
+                source_url=source_url or card,
+            )
+        )
+        if len(result) >= max(1, limit):
+            break
+    return result
 
 
 def discover_local_businesses(question: str, *, limit: int = 12) -> list[MapPlace]:
@@ -129,26 +224,35 @@ def discover_local_businesses(question: str, *, limit: int = 12) -> list[MapPlac
     city = city_from_question(question)
     category, _category_label = category_from_question(question)
     query = search_text_from_question(question)
-    fetch_limit = max(50, limit * 8)
+    quality_requested = bool(_QUALITY_RE.search(normalized_question(question)))
 
-    # Known verticals are selected by canonical category first. This prevents
-    # morphology from breaking queries such as "лучшие автосервисы Москвы":
-    # the index stores canonical `car_repair`, not every Russian inflection.
+    if quality_requested and city and category:
+        ranked = _ranked_quality_places(store, city=city, category=category, limit=limit)
+        if ranked:
+            return ranked
+
+    fetch_limit = max(50, limit * 8)
     if category:
         candidates = store.search_businesses("", category=category, limit=fetch_limit)
     else:
         candidates = store.search_businesses(query, limit=fetch_limit)
     hits = [hit for hit in candidates if _city_match(hit, city)]
 
-    # For unknown categories/named businesses use FTS and then enforce the city
-    # in Python, avoiding SQLite's ASCII-only lower()/NOCASE behaviour for Cyrillic.
     if len(hits) < min(5, limit) and query:
         extra = store.search_businesses(query, limit=fetch_limit)
         seen = {item.id for item in hits}
         hits.extend(item for item in extra if item.id not in seen and _city_match(item, city))
 
+    quality = load_business_quality((hit.id for hit in hits), store=store)
     hits.sort(key=lambda item: (-item.confidence, item.score, item.name.casefold()))
-    return [_hit_to_place(hit) for hit in hits[:limit]]
+    return [
+        _hit_to_place(
+            hit,
+            rating=quality.get(hit.id).rating if hit.id in quality else None,
+            reviews=quality.get(hit.id).reviews if hit.id in quality else None,
+        )
+        for hit in hits[:limit]
+    ]
 
 
 def persist_places(question: str, places: list[MapPlace]) -> int:
@@ -169,7 +273,7 @@ def persist_places(question: str, places: list[MapPlace]) -> int:
         if match:
             source_id = match.group(1)
         try:
-            store.upsert_business(
+            business_id = store.upsert_business(
                 {
                     "name": place.name,
                     "category": category,
@@ -185,8 +289,18 @@ def persist_places(question: str, places: list[MapPlace]) -> int:
                     "stale_after": stale_after,
                 }
             )
+            if place.rating is not None or place.reviews is not None:
+                from app.services.business_quality import save_business_quality
+
+                save_business_quality(
+                    business_id,
+                    rating=place.rating,
+                    reviews=place.reviews,
+                    source_updated_at=now.isoformat(),
+                    store=store,
+                )
             written += 1
-        except (ValueError, OSError):
+        except (ValueError, OSError, sqlite3.Error):
             continue
     return written
 
