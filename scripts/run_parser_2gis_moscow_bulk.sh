@@ -9,12 +9,82 @@ MAX_RECORDS="${PARSER_2GIS_MAX_RECORDS:-50000}"
 CHROME_MEMORY="${PARSER_2GIS_CHROME_MEMORY_MB:-650}"
 CONTAINER_MEMORY="${PARSER_2GIS_CONTAINER_MEMORY_MB:-900}"
 DELAY_MS="${PARSER_2GIS_DELAY_MS:-0}"
+PROGRESS_INTERVAL="${PARSER_2GIS_PROGRESS_INTERVAL:-15}"
 
 ROOT="data/2gis/moscow_bulk"
 CHUNKS="$ROOT/chunks"
 RESULTS="$ROOT/results"
 RUBRICS="$ROOT/rubrics.tsv"
+IMPORT_LOCK="$ROOT/import.lock"
 mkdir -p "$CHUNKS" "$RESULTS"
+
+progress_snapshot() {
+  local total done json_count active percent bytes
+  total=$(find "$CHUNKS" -maxdepth 1 -type f -name '*.urls' 2>/dev/null | wc -l | tr -d ' ')
+  done=$(find "$RESULTS" -maxdepth 1 -type f -name '*.done' 2>/dev/null | wc -l | tr -d ' ')
+  json_count=$(find "$RESULTS" -maxdepth 1 -type f -name '*.json' -size +2c 2>/dev/null | wc -l | tr -d ' ')
+  active=$(docker ps --filter label=com.docker.compose.service=parser-2gis --format '{{.Names}}' 2>/dev/null | wc -l | tr -d ' ')
+  bytes=$(find "$RESULTS" -maxdepth 1 -type f -name '*.json' -printf '%s\n' 2>/dev/null | awk '{s+=$1} END{print s+0}')
+  percent=$(python3 - "$done" "$total" <<'PY'
+import sys
+done=int(sys.argv[1] or 0); total=int(sys.argv[2] or 0)
+print(f"{(done*100/total):.1f}" if total else "0.0")
+PY
+)
+  echo "[progress] chunks=${done}/${total} (${percent}%) active_workers=${active} json_files=${json_count} raw_mb=$((bytes/1024/1024))"
+
+  local log base expected completed errors outbytes
+  for log in "$RESULTS"/*.log; do
+    [[ -e "$log" ]] || continue
+    base=$(basename "$log" .log)
+    [[ -f "$RESULTS/$base.done" ]] && continue
+    expected=$(grep -cve '^\s*$' "$CHUNKS/$base.urls" 2>/dev/null || true)
+    completed=$(grep -c "Парсинг ссылки завершён" "$log" 2>/dev/null || true)
+    errors=$(grep -c "Ошибка во время работы парсера" "$log" 2>/dev/null || true)
+    outbytes=0
+    [[ -f "$RESULTS/$base.json" ]] && outbytes=$(stat -c %s "$RESULTS/$base.json" 2>/dev/null || echo 0)
+    if (( completed > 0 || outbytes > 0 )); then
+      echo "           $base urls=${completed}/${expected:-0} errors=${errors} json_mb=$((outbytes/1024/1024))"
+    fi
+  done
+}
+
+monitor_progress() {
+  while true; do
+    sleep "$PROGRESS_INTERVAL"
+    progress_snapshot
+  done
+}
+
+incremental_import() {
+  local outfile="$1"
+  local base="$2"
+  [[ -s "$outfile" ]] || return 0
+  local import_log="$RESULTS/${base}.import.log"
+  local lock_fd
+  # SQLite supports concurrent readers, but serialize the four bulk writers so
+  # the LLM/app never sees avoidable SQLITE_BUSY spikes during a turbo run.
+  exec {lock_fd}>"$IMPORT_LOCK"
+  flock "$lock_fd"
+  if docker compose exec -T -e PYTHONPATH=/app app \
+      python /app/scripts/import_2gis_json.py "/app/data/2gis/moscow_bulk/results/${base}.json" --city "Москва" \
+      >"$import_log" 2>&1; then
+    python3 - "$import_log" "$base" <<'PY'
+import json, sys
+from pathlib import Path
+p=Path(sys.argv[1]); base=sys.argv[2]
+try:
+    d=json.loads(p.read_text(encoding='utf-8'))
+    print(f"[import] {base}: written={d.get('written',0)} total_businesses={(d.get('store') or {}).get('businesses','?')} ratings={d.get('ratings_imported',0)}")
+except Exception:
+    print(f"[import] {base}: completed")
+PY
+  else
+    echo "[import-warning] $base import failed; final bulk import will retry it"
+  fi
+  flock -u "$lock_fd"
+  exec {lock_fd}>&-
+}
 
 echo "[1/5] Building parser image..."
 docker compose -f docker-compose.2gis.yml --profile 2gis build parser-2gis
@@ -76,6 +146,7 @@ run_chunk() {
 
   if [[ -s "$outfile" && -f "$donefile" ]]; then
     echo "[skip] $base"
+    incremental_import "$outfile" "$base"
     return 0
   fi
 
@@ -85,7 +156,7 @@ run_chunk() {
     return 0
   fi
 
-  echo "[parse] $base ($expected rubrics)"
+  echo "[parse] $base started ($expected rubrics)"
   rm -f "$outfile" "$donefile" "$logfile"
 
   local rc=0
@@ -121,14 +192,21 @@ run_chunk() {
     touch "$donefile"
     echo "[done] $base ($completed/$expected)"
   elif [[ -s "$outfile" ]]; then
-    echo "[partial] $base rc=$rc completed=$completed/$expected errors=$errors; partial JSON kept and will be imported"
+    echo "[partial] $base rc=$rc completed=$completed/$expected errors=$errors; keeping recoverable JSON"
   else
     echo "[failed] $base rc=$rc completed=$completed/$expected errors=$errors; see $logfile"
   fi
+
+  incremental_import "$outfile" "$base"
   return 0
 }
 
 echo "[3/5] Parsing Moscow with $WORKERS parallel Chrome workers..."
+echo "      Live progress will print every ${PROGRESS_INTERVAL}s. You can also run: bash scripts/check_parser_2gis_moscow_progress.sh"
+monitor_progress &
+MONITOR_PID=$!
+trap 'kill "$MONITOR_PID" 2>/dev/null || true' EXIT INT TERM
+
 running=0
 for urlfile in "$CHUNKS"/chunk_s"$(printf '%03d' "$CHUNK_SIZE")"_*.urls; do
   [[ -e "$urlfile" ]] || continue
@@ -140,8 +218,10 @@ for urlfile in "$CHUNKS"/chunk_s"$(printf '%03d' "$CHUNK_SIZE")"_*.urls; do
   fi
 done
 wait || true
+kill "$MONITOR_PID" 2>/dev/null || true
+progress_snapshot
 
-echo "[4/5] Importing all completed and recoverable partial JSON files..."
+echo "[4/5] Final idempotent import of every completed/recoverable JSON file..."
 docker compose exec -T -e PYTHONPATH=/app app \
   python /app/scripts/import_2gis_directory.py \
   /app/data/2gis/moscow_bulk/results \
