@@ -22,27 +22,45 @@ def audit() -> dict:
     checks: dict[str, object] = {}
 
     tokyo = utility_reply("Какое время в Токио сейчас?")
-    checks["tokyo"] = None if tokyo is None else {"kind": tokyo.kind, "text": tokyo.text}
-    if tokyo is None or tokyo.kind != "local_time" or not re.search(r"\b\d{2}:\d{2}\b", tokyo.text):
-        errors.append("tokyo_not_instant_local_time")
+    tokyo_natural = utility_reply("Подскажите, пожалуйста, сколько в Токио времени? 🙏")
+    checks["tokyo"] = {
+        "canonical": None if tokyo is None else {"kind": tokyo.kind, "text": tokyo.text},
+        "natural": None if tokyo_natural is None else {"kind": tokyo_natural.kind, "text": tokyo_natural.text},
+    }
+    for value in (tokyo, tokyo_natural):
+        if value is None or value.kind != "local_time" or not re.search(r"\b\d{2}:\d{2}\b", value.text):
+            errors.append("tokyo_not_instant_local_time")
+            break
 
     calc = utility_reply("Сколько будет 17 * 23? Ответь только числом.")
-    checks["calculator"] = None if calc is None else {"kind": calc.kind, "text": calc.text}
-    if calc is None or calc.kind != "calculator" or calc.text != "391":
+    polite_calc = utility_reply("Подскажи, пожалуйста, сколько будет 17 * 23? Ответь только числом. 🙏")
+    checks["calculator"] = {
+        "canonical": None if calc is None else {"kind": calc.kind, "text": calc.text},
+        "polite": None if polite_calc is None else {"kind": polite_calc.kind, "text": polite_calc.text},
+    }
+    if any(value is None or value.kind != "calculator" or value.text != "391" for value in (calc, polite_calc)):
         errors.append("calculator_fast_path_invalid")
 
+    conversion = utility_reply("5 км в м")
+    checks["conversion"] = None if conversion is None else {"kind": conversion.kind, "text": conversion.text}
+    if conversion is None or conversion.kind != "unit_conversion" or "5000" not in conversion.text:
+        errors.append("unit_conversion_fast_path_invalid")
+
     writer = "Кто написал роман Мастер и Маргарита?"
+    polite_writer = "Подскажи, пожалуйста, кто написал роман Мастер и Маргарита?"
     writer_atomic = is_atomic_knowledge_question(writer)
+    writer_polite_atomic = is_atomic_knowledge_question(polite_writer)
     writer_cap = atomic_output_cap(writer)
     writer_route = choose_route(writer, "auto", 4096, 4096)
     checks["writer"] = {
         "atomic": writer_atomic,
+        "polite_atomic": writer_polite_atomic,
         "web": should_use_web(writer, "auto"),
         "route_mode": writer_route.mode,
         "max_output_tokens": writer_route.max_output_tokens,
         "reason": writer_route.reason,
     }
-    if not writer_atomic or should_use_web(writer, "auto") or writer_cap is None or writer_cap > 96:
+    if not writer_atomic or not writer_polite_atomic or should_use_web(writer, "auto") or writer_cap is None or writer_cap > 96:
         errors.append("writer_not_fast_atomic")
     if writer_route.mode != "fast" or writer_route.max_output_tokens > 96:
         errors.append("writer_route_not_latency_bounded")
@@ -145,7 +163,7 @@ def audit() -> dict:
         errors.append("fast_prompt_warmup_missing")
 
     return {
-        "format": "olya-latency-path-audit-v3",
+        "format": "olya-latency-path-audit-v4",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "checks": checks,
