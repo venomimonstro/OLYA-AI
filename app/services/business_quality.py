@@ -3,10 +3,13 @@ from __future__ import annotations
 import math
 import sqlite3
 from dataclasses import dataclass
-from pathlib import Path
+from threading import RLock
 from typing import Iterable
 
 from app.services.local_search_store import LocalSearchStore, get_local_search_store
+
+
+_SCHEMA_LOCK = RLock()
 
 
 @dataclass(frozen=True)
@@ -23,27 +26,24 @@ def _store(value: LocalSearchStore | None = None) -> LocalSearchStore:
 
 
 def ensure_business_quality_schema(store: LocalSearchStore | None = None) -> None:
-    """Add ranking metadata to existing owned-search databases in place.
-
-    OLYA already has persistent installations with populated `businesses` rows,
-    so this is intentionally an additive SQLite migration rather than a rebuild.
-    """
+    """Add ranking metadata to existing owned-search databases in place."""
     target = _store(store)
-    connection = sqlite3.connect(str(target.path), timeout=15.0)
-    try:
-        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(businesses)")}
-        if "rating" not in columns:
-            connection.execute("ALTER TABLE businesses ADD COLUMN rating REAL")
-        if "review_count" not in columns:
-            connection.execute("ALTER TABLE businesses ADD COLUMN review_count INTEGER")
-        if "source_updated_at" not in columns:
-            connection.execute("ALTER TABLE businesses ADD COLUMN source_updated_at TEXT NOT NULL DEFAULT ''")
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_business_rating ON businesses(city, category, rating DESC, review_count DESC)"
-        )
-        connection.commit()
-    finally:
-        connection.close()
+    with _SCHEMA_LOCK:
+        connection = sqlite3.connect(str(target.path), timeout=15.0)
+        try:
+            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(businesses)")}
+            if "rating" not in columns:
+                connection.execute("ALTER TABLE businesses ADD COLUMN rating REAL")
+            if "review_count" not in columns:
+                connection.execute("ALTER TABLE businesses ADD COLUMN review_count INTEGER")
+            if "source_updated_at" not in columns:
+                connection.execute("ALTER TABLE businesses ADD COLUMN source_updated_at TEXT NOT NULL DEFAULT ''")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_business_rating ON businesses(city, category, rating DESC, review_count DESC)"
+            )
+            connection.commit()
+        finally:
+            connection.close()
 
 
 def _rating(value: object) -> float | None:
@@ -129,9 +129,8 @@ def quality_score(rating: float | None, reviews: int | None) -> float:
     """Conservative Bayesian score for 'best/top' queries.
 
     A 5.0 based on one review must not outrank a 4.8 based on hundreds of
-    reviews. The prior is deliberately strong enough to suppress tiny samples,
-    while a small logarithmic volume bonus separates mature businesses with
-    similar adjusted ratings.
+    reviews. The prior suppresses tiny samples; the bounded logarithmic volume
+    bonus only separates otherwise similar mature businesses.
     """
     if rating is None:
         return -1.0
