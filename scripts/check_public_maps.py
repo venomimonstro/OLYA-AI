@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from time import perf_counter
 
@@ -9,6 +10,14 @@ from app.services.discovery import BraveSearchDiscovery, DisabledDiscovery, Prov
 from app.services.russian_maps_discovery import RussianMapsDiscovery
 from app.services.searxng_discovery import SearxngDiscovery
 from app.services.yandex_medicine_discovery import discover_yandex_medicine
+from app.services.zoon_discovery import discover_zoon
+
+
+_MEDICAL_RE = re.compile(
+    r"\b(?:медицин\w*|клиник\w*|стоматолог\w*|врач\w*|доктор\w*|сурдолог\w*|"
+    r"слухопротезирован\w*|слухов\w+\s+аппарат\w*|лаборатор\w*|диагност\w*)\b",
+    re.I,
+)
 
 
 def _discovery():
@@ -42,6 +51,10 @@ def _print_rows(label: str, rows) -> None:
         print("source:", row.source_url)
 
 
+async def _empty():
+    return []
+
+
 async def main() -> int:
     query = " ".join(sys.argv[1:]).strip() or "лучшие центры слухопротезирования в москве"
     started = perf_counter()
@@ -49,16 +62,21 @@ async def main() -> int:
     search = _discovery()
 
     direct_task = asyncio.create_task(maps.search(query))
-    medicine_task = asyncio.create_task(discover_yandex_medicine(query, search, limit=10))
-    direct_rows, medicine_rows = await asyncio.gather(direct_task, medicine_task)
+    zoon_task = asyncio.create_task(discover_zoon(query, search, limit=10))
+    medicine_task = asyncio.create_task(
+        discover_yandex_medicine(query, search, limit=10) if _MEDICAL_RE.search(query) else _empty()
+    )
+    direct_rows, zoon_rows, medicine_rows = await asyncio.gather(direct_task, zoon_task, medicine_task)
     elapsed = perf_counter() - started
 
     print(f"query: {query}")
     print(f"elapsed: {elapsed:.2f}s")
     _print_rows("direct_yandex_2gis", direct_rows)
+    _print_rows("zoon", zoon_rows)
     _print_rows("yandex_medicine", medicine_rows)
 
-    unique = {(row.provider, row.card_url) for row in [*medicine_rows, *direct_rows]}
+    all_rows = [*direct_rows, *zoon_rows, *medicine_rows]
+    unique = {(row.provider, row.card_url) for row in all_rows}
     print(f"\ntotal_unique_cards: {len(unique)}")
     return 0 if unique else 2
 
