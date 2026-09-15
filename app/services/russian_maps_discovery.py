@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from urllib.parse import quote, quote_plus
 
@@ -22,6 +23,21 @@ from app.services.twogis_ssr_discovery import discover_twogis_ssr
 
 _CACHE: dict[str, tuple[float, list[MapPlace]]] = {}
 _CACHE_TTL = 10 * 60.0
+_CITY_FORMS_RE = re.compile(
+    r"\b(?:москв\w*|санкт[-\s]?петербург\w*|петербург\w*|спб|казан\w*|екатеринбург\w*|"
+    r"новосибирск\w*|самар\w*|челябинск\w*|красноярск\w*|тюмен\w*|уф\w*|перм\w*|сочи|"
+    r"калининград\w*|воронеж\w*|краснодар\w*|омск\w*|нижн\w*\s+новгород\w*|ростов\w*(?:-на-дону)?)\b",
+    re.I,
+)
+
+
+def _provider_question(question: str, city_name: str) -> str:
+    """Keep one canonical city token regardless of user case/preposition."""
+    text = " ".join(str(question or "").split())
+    text = _CITY_FORMS_RE.sub(" ", text)
+    text = re.sub(r"\b(?:в|во)\s+(?=$|[,.;])", " ", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip(" ,.-")
+    return f"{text} {city_name}".strip()
 
 
 class RussianMapsDiscovery:
@@ -42,7 +58,8 @@ class RussianMapsDiscovery:
             return list(cached[1])
 
         city_slug, region_id, city_name = _city_profile(question)
-        query = _normalized_map_query(question, city_name)
+        provider_question = _provider_question(question, city_name)
+        query = _normalized_map_query(provider_question, city_name)
         encoded_path = quote(query, safe="")
         encoded_qs = quote_plus(query)
         urls = (
@@ -51,11 +68,11 @@ class RussianMapsDiscovery:
             ("2gis", f"https://2gis.ru/{city_slug}/search/{encoded_path}"),
         )
 
-        # The independent 2GIS SSR parser runs concurrently. It covers current
-        # server-rendered pages where firm IDs live in escaped SSR state rather
-        # than the legacy JSON/link shapes handled below.
+        # The independent 2GIS SSR parser runs concurrently. Pass a canonical
+        # city form so queries like "сервис Москвы" do not become
+        # "сервис Москвы Москва" inside provider normalization.
         twogis_ssr_task = asyncio.create_task(
-            discover_twogis_ssr(question, timeout_seconds=self.timeout_seconds, limit=12)
+            discover_twogis_ssr(provider_question, timeout_seconds=self.timeout_seconds, limit=12)
         )
 
         headers = {
@@ -79,7 +96,6 @@ class RussianMapsDiscovery:
             responses = await asyncio.gather(*(fetch(provider, url) for provider, url in urls))
 
         rows: list[MapPlace] = []
-        legacy_twogis_found = False
         for provider, url, body in responses:
             if not body:
                 continue
@@ -88,7 +104,6 @@ class RussianMapsDiscovery:
                 found = _yandex_from_json(payloads, url) or _yandex_from_links(body, url)
             else:
                 found = _twogis_from_json(payloads, city_slug, url) or _twogis_from_links(body, city_slug, url)
-                legacy_twogis_found = legacy_twogis_found or bool(found)
             rows.extend(found)
 
         try:
@@ -96,8 +111,6 @@ class RussianMapsDiscovery:
         except Exception:
             ssr_rows = []
 
-        # Merge both representations. Even when the legacy parser found a few
-        # rows, SSR can contribute current firm URLs/rating metadata.
         if ssr_rows:
             rows.extend(ssr_rows)
 
