@@ -4,11 +4,13 @@ import asyncio
 import math
 import re
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import quote, quote_plus, urlsplit
 
 from app.services.discovery import DiscoveryError, SearchHit, canonical_result_url
-from app.services.public_maps_discovery import MapPlace, PublicMapsDiscovery, map_search_links
+from app.services.public_maps_discovery import MapPlace
 from app.services.response_strategy import normalized_question
+from app.services.russian_maps_discovery import RussianMapsDiscovery
+from app.services.yandex_medicine_discovery import discover_yandex_medicine, is_yandex_medicine_url
 
 
 _LOCAL_RE = re.compile(
@@ -21,7 +23,7 @@ _LOCAL_RE = re.compile(
     re.I,
 )
 _GENERIC_TITLE = re.compile(
-    r"\b(?:яндекс\s*карты|yandex\s*maps|google\s*maps|2гис|2gis|карты|maps|"
+    r"\b(?:яндекс\s*карты|yandex\s*maps|яндекс\s*медицина|2гис|2gis|карты|maps|"
     r"официальный\s*сайт|отзывы|адрес|телефон|москва|moscow)\b",
     re.I,
 )
@@ -40,7 +42,7 @@ _CITY_SLUGS = {
     "челябинск": "chelyabinsk", "челябинске": "chelyabinsk", "красноярск": "krasnoyarsk", "красноярске": "krasnoyarsk",
     "тюмень": "tyumen", "тюмени": "tyumen", "уфа": "ufa", "уфе": "ufa", "пермь": "perm", "перми": "perm", "сочи": "sochi",
 }
-_PUBLIC_MAPS = PublicMapsDiscovery(timeout_seconds=4.2)
+_RU_MAPS = RussianMapsDiscovery(timeout_seconds=3.8)
 
 
 @dataclass(frozen=True)
@@ -62,12 +64,12 @@ def _kind(url: str) -> str:
     parsed = urlsplit(str(url or ""))
     host = (parsed.hostname or "").casefold().removeprefix("www.")
     path = (parsed.path or "").casefold()
-    if host.endswith(("yandex.ru", "yandex.com")) and path.startswith("/maps"):
+    if host.endswith(("yandex.ru", "yandex.com")) and (
+        path.startswith("/maps") or path.startswith("/profile/") or path.startswith("/medicine/clinic/")
+    ):
         return "yandex_maps"
     if host.endswith("2gis.ru"):
         return "2gis"
-    if "google." in host and path.startswith("/maps"):
-        return "google_maps"
     return "web"
 
 
@@ -124,6 +126,14 @@ def _city_slug(question: str) -> str:
     return "moscow"
 
 
+def _map_search_links(name: str, *, city_slug: str, address: str = "") -> dict[str, str]:
+    query = " ".join(part for part in (name, address) if part).strip()
+    return {
+        "yandex": f"https://yandex.ru/maps/?text={quote_plus(query)}",
+        "2gis": f"https://2gis.ru/{city_slug}/search/{quote(query, safe='')}",
+    }
+
+
 def _source_row(hit: SearchHit) -> dict:
     return {
         "title": _clean_title(hit.title) or hit.title or _host(hit.url),
@@ -139,10 +149,10 @@ def _md(label: str, url: str) -> str:
     return f"[{label}]({safe})"
 
 
-async def _search(discovery, query: str, *, timeout: float = 3.0) -> list[SearchHit]:
+async def _search(discovery, query: str, *, timeout: float = 3.4) -> list[SearchHit]:
     try:
         return await asyncio.wait_for(
-            discovery.search(query, count=8, country="RU", language="ru"),
+            discovery.search(query, count=10, country="RU", language="ru"),
             timeout=timeout,
         )
     except (DiscoveryError, TimeoutError, asyncio.TimeoutError):
@@ -150,21 +160,17 @@ async def _search(discovery, query: str, *, timeout: float = 3.0) -> list[Search
 
 
 def _entity_score(row: dict) -> float:
-    direct_maps = sum(bool(row.get(k)) for k in ("yandex_maps", "2gis", "google_maps"))
+    direct_maps = sum(bool(row.get(k)) for k in ("yandex_maps", "2gis"))
     best_rating = max((value for value in row.get("ratings", {}).values() if isinstance(value, (int, float))), default=0.0)
     best_reviews = max((value for value in row.get("reviews", {}).values() if isinstance(value, int)), default=0)
     review_confidence = min(math.log1p(best_reviews) / math.log(1001), 1.0) if best_reviews > 0 else 0.0
     rating_quality = max(0.0, min((best_rating - 3.5) / 1.5, 1.0)) if best_rating else 0.0
     completeness = sum(bool(row.get(k)) for k in ("address", "phone", "website", "web")) / 4.0
-    return direct_maps * 2.0 + rating_quality * 1.5 + review_confidence + completeness * 0.5
+    return direct_maps * 2.2 + rating_quality * 1.5 + review_confidence + completeness * 0.5
 
 
-def _merge_place(entities: dict[str, dict], place: MapPlace) -> None:
-    name = _clean_title(place.name)
-    key = _entity_key(name)
-    if not key:
-        return
-    row = entities.setdefault(key, {
+def _empty_entity(name: str) -> dict:
+    return {
         "name": name,
         "address": "",
         "phone": "",
@@ -172,17 +178,24 @@ def _merge_place(entities: dict[str, dict], place: MapPlace) -> None:
         "web": "",
         "yandex_maps": "",
         "2gis": "",
-        "google_maps": "",
         "ratings": {},
         "reviews": {},
-    })
+    }
+
+
+def _merge_place(entities: dict[str, dict], place: MapPlace) -> None:
+    name = _clean_title(place.name)
+    key = _entity_key(name)
+    if not key:
+        return
+    row = entities.setdefault(key, _empty_entity(name))
     if place.address and not row["address"]:
         row["address"] = place.address
     if place.phone and not row["phone"]:
         row["phone"] = place.phone
     if place.website and not row["website"]:
         row["website"] = place.website
-    if place.provider in {"yandex_maps", "2gis", "google_maps"}:
+    if place.provider in {"yandex_maps", "2gis"}:
         row[place.provider] = row[place.provider] or place.card_url
     if place.rating is not None:
         row["ratings"][place.provider] = place.rating
@@ -194,24 +207,31 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
     if not is_local_business_question(question):
         return None
 
-    # Direct public map pages and ordinary SERP run in parallel. This keeps the
-    # whole local-business path bounded by the slower of the two, rather than
-    # making the user wait for one fallback after another.
+    city_slug = _city_slug(question)
+    # Three independent Russian routes run in parallel:
+    # 1) direct Yandex Maps + 2GIS public pages;
+    # 2) indexed Yandex Medicine pages, which expose the organization OID and
+    #    server-rendered rating/reviews/address data;
+    # 3) ordinary SERP as a bounded fallback.
     queries = (
         question,
-        f'site:yandex.ru/maps/org/ {question}',
-        f'site:2gis.ru/ {question}',
-        f'site:google.com/maps/place/ {question}',
+        f"site:yandex.ru/maps/org/ {question}",
+        f"site:2gis.ru/{city_slug}/firm/ {question}",
     )
-    public_task = asyncio.create_task(_PUBLIC_MAPS.search(question))
+    maps_task = asyncio.create_task(_RU_MAPS.search(question))
+    medicine_task = asyncio.create_task(discover_yandex_medicine(question, discovery, limit=8))
     serp_tasks = [asyncio.create_task(_search(discovery, q)) for q in queries]
-    public_rows, *serp_batches = await asyncio.gather(public_task, *serp_tasks)
+    public_rows, medicine_rows, *serp_batches = await asyncio.gather(maps_task, medicine_task, *serp_tasks)
 
     entities: dict[str, dict] = {}
     source_rows: list[dict] = []
 
-    # Direct-map entities are authoritative for card URLs: their IDs came from
-    # the map page itself, so no LLM guessing or synthetic card URLs are needed.
+    # Yandex Medicine is intentionally merged first: on Russian VPS it is often
+    # more stable than the JS-heavy Maps search page, while still exposing the
+    # same organization OID and direct Yandex profile/card.
+    for place in medicine_rows:
+        _merge_place(entities, place)
+        source_rows.append(place.public_source())
     for place in public_rows:
         _merge_place(entities, place)
         source_rows.append(place.public_source())
@@ -230,48 +250,41 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
             key = _entity_key(name)
             if not key:
                 continue
-            row = entities.setdefault(key, {
-                "name": name,
-                "address": "",
-                "phone": "",
-                "website": "",
-                "web": "",
-                "yandex_maps": "",
-                "2gis": "",
-                "google_maps": "",
-                "ratings": {},
-                "reviews": {},
-            })
+            row = entities.setdefault(key, _empty_entity(name))
             kind = _kind(hit.url)
-            if kind in {"yandex_maps", "2gis", "google_maps"}:
+            if kind in {"yandex_maps", "2gis"}:
                 row[kind] = row[kind] or hit.url
             elif not row["web"]:
                 row["web"] = hit.url
 
+            # A Yandex Medicine URL is itself a verified Yandex organization
+            # card even if parsing its embedded state failed on this request.
+            if is_yandex_medicine_url(hit.url) and not row["yandex_maps"]:
+                row["yandex_maps"] = hit.url
+
     rows = list(entities.values())
-    rows = [row for row in rows if row.get("yandex_maps") or row.get("2gis") or row.get("google_maps") or row.get("web")]
+    rows = [row for row in rows if row.get("yandex_maps") or row.get("2gis") or row.get("web")]
     rows.sort(key=_entity_score, reverse=True)
     rows = rows[:6]
 
     if not rows:
         return LocalBusinessResult(
             text=(
-                "Не удалось получить подтверждённые карточки организаций из Яндекс Карт, Google Maps, 2ГИС или поисковой выдачи. "
-                "Я не буду придумывать компании. Попробуйте повторить запрос позже."
+                "Не удалось получить подтверждённые организации из Яндекса, 2ГИС или поисковой выдачи. "
+                "Я не буду придумывать компании."
             ),
             sources=[],
             searched=0,
         )
 
-    city_slug = _city_slug(question)
     out = [
-        "Подобрал варианты по публичным данным карт и поисковой выдачи. "
-        "Ссылка «карточка» ведёт прямо на найденную карточку организации; «поиск на карте» используется только когда прямой ID получить не удалось."
+        "Подобрал варианты по публичным данным Яндекса и 2ГИС. "
+        "Ссылка «карточка» ведёт на реально найденную карточку организации; «поиск на карте» используется только если прямой ID не получен."
     ]
 
     for index, row in enumerate(rows, start=1):
         name = row["name"]
-        fallback = map_search_links(name, city_slug=city_slug, address=row.get("address", ""))
+        fallback = _map_search_links(name, city_slug=city_slug, address=row.get("address", ""))
         out.append(f"\n{index}. **{name}**")
         if row.get("address"):
             out.append(f"Адрес: {row['address']}")
@@ -279,26 +292,19 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
             out.append(f"Телефон: {row['phone']}")
         website = row.get("website") or row.get("web")
         if website:
-            out.append("Сайт: " + _md("открыть", website))
+            out.append("Сайт/источник: " + _md("открыть", website))
 
         yr = row["ratings"].get("yandex_maps")
         yrc = row["reviews"].get("yandex_maps")
         dr = row["ratings"].get("2gis")
         drc = row["reviews"].get("2gis")
-        gr = row["ratings"].get("google_maps")
-        grc = row["reviews"].get("google_maps")
         if yr is not None:
             out.append(f"Яндекс: {yr:g}" + (f" · {yrc} отзывов" if yrc is not None else ""))
         if dr is not None:
             out.append(f"2ГИС: {dr:g}" + (f" · {drc} отзывов" if drc is not None else ""))
-        if gr is not None:
-            out.append(f"Google: {gr:g}" + (f" · {grc} отзывов" if grc is not None else ""))
 
         out.append(
-            "Яндекс Карты: " + _md("карточка" if row["yandex_maps"] else "поиск на карте", row["yandex_maps"] or fallback["yandex"])
-        )
-        out.append(
-            "Google Maps: " + _md("карточка" if row["google_maps"] else "поиск на карте", row["google_maps"] or fallback["google"])
+            "Яндекс: " + _md("карточка" if row["yandex_maps"] else "поиск на карте", row["yandex_maps"] or fallback["yandex"])
         )
         out.append(
             "2ГИС: " + _md("карточка" if row["2gis"] else "поиск на карте", row["2gis"] or fallback["2gis"])
