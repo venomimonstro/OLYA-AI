@@ -47,6 +47,11 @@ _EDGE_CASES: tuple[tuple[str, str, str | None], ...] = (
     ("Что посмотреть рядом?", "instant", "location_clarification"),
     ("Где поесть рядом с Красной площадью в Москве?", "web", None),
     ("Куда сходить сегодня в Москве?", "web", None),
+    ("100 долларов в рублях", "structured", None),
+    ("10 000 рублей в долларах", "structured", None),
+    ("$100 в рублях", "structured", None),
+    ("100€ в рублях", "structured", None),
+    ("10 000 ₽ в долларах", "structured", None),
     ("Как работает УСН?", "web", None),
     ("Какие налоги платит самозанятый в России?", "web", None),
     ("Какие основные требования трудового законодательства к дистанционной работе?", "web", None),
@@ -109,7 +114,7 @@ def audit() -> dict:
     failed = sum(persona_fail.values())
     passed = len(POPULATION) - failed
     return {
-        "format": "olya-real-user-routing-10000-v3",
+        "format": "olya-real-user-routing-10000-v4",
         "status": "passed" if failed == 0 and edge_failed == 0 else "failed",
         "population": len(POPULATION),
         "passed": passed,
