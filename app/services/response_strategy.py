@@ -10,6 +10,16 @@ _FRESH_RE = re.compile(
     r"\bprice\b|\bweather\b)",
     re.I,
 )
+_EXPLICIT_RECENCY_RE = re.compile(
+    r"(?:\bсейчас\b|\bсегодня\b|\bвчера\b|\bзавтра\b|\bпоследн\w*\b|\bактуальн\w*\b|\bтекущ\w*\b|"
+    r"\bнынешн\w*\b|\bnow\b|\btoday\b|\blatest\b|\bcurrent\b|\bnews\b)",
+    re.I,
+)
+_STABLE_EXPLANATION_RE = re.compile(
+    r"^\s*(?:что\s+(?:такое|значит|означает)|как\s+работает|объясни(?:\s+простыми\s+словами)?(?:\s*,?\s+что\s+такое)?|"
+    r"в\s+ч[её]м\s+смысл|what\s+is|what\s+does|how\s+does|explain)\b",
+    re.I,
+)
 _CURRENT_ROLE_RE = re.compile(
     r"(?:^|[?.!\s])(?:кто\s+(?:же\s+)?(?:президент|премьер(?:-министр)?|губернатор|мэр|"
     r"генеральный\s+директор|директор|ceo|cto)\b|"
@@ -86,7 +96,11 @@ def _has_self_contained_payload(text: str) -> bool:
 
 def requires_fresh_data(text: str) -> bool:
     value = normalized_question(text)
-    return bool(value and (_URL_RE.search(value) or _FRESH_RE.search(value) or _CURRENT_ROLE_RE.search(value) or _DYNAMIC_LOOKUP_RE.search(value)))
+    if not value:
+        return False
+    if _STABLE_EXPLANATION_RE.search(value) and not _EXPLICIT_RECENCY_RE.search(value) and not _CURRENT_ROLE_RE.search(value) and not _DYNAMIC_LOOKUP_RE.search(value):
+        return False
+    return bool(_URL_RE.search(value) or _FRESH_RE.search(value) or _CURRENT_ROLE_RE.search(value) or _DYNAMIC_LOOKUP_RE.search(value))
 
 
 def requires_memory_context(text: str) -> bool:
