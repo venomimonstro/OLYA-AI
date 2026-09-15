@@ -9,6 +9,7 @@ from urllib.parse import quote, quote_plus, urlsplit
 from app.services.business_local_index import load_places, store_places
 from app.services.discovery import DiscoveryError, SearchHit, canonical_result_url
 from app.services.indexed_business_discovery import discover_indexed_businesses
+from app.services.local_business_catalog import search_local_catalog
 from app.services.osm_business_discovery import discover_osm_businesses
 from app.services.public_maps_discovery import MapPlace
 from app.services.response_strategy import normalized_question
@@ -182,9 +183,20 @@ def _render(question: str, places: list[MapPlace], source_rows: list[dict], *, c
 
 async def resolve_local_business(question: str, discovery) -> LocalBusinessResult | None:
     if not is_local_business_question(question): return None
+
+    # Permanent SQLite snapshot is the true offline source. It is created by
+    # sync_local_business_catalog.py and survives app/container restarts via /app/data.
+    snapshot_rows = search_local_catalog(question, limit=30)
     cached_rows = load_places(question, limit=30)
-    # Warm index is authoritative for availability: answer immediately and do not
-    # make user latency depend on live websites. Refresh is an explicit bootstrap/update job.
+    if snapshot_rows:
+        # Warm the lightweight JSON index as a secondary cache and answer without
+        # waiting on any network provider. Ratings can be added by later refreshes.
+        store_places(question, snapshot_rows)
+        merged = [*snapshot_rows, *cached_rows]
+        return _render(question, merged, [place.public_source() for place in merged], cache_only=True)
+
+    # Legacy persisted live cache remains useful if a previous network refresh
+    # succeeded before the SQLite snapshot was installed.
     if len(cached_rows) >= 5:
         return _render(question, cached_rows, [place.public_source() for place in cached_rows], cache_only=True)
 
@@ -214,8 +226,6 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
             if kind in {"yandex_maps", "2gis", "zoon", "yell", "osm"}: row[kind] = row[kind] or hit.url
             elif not row["web"]: row["web"] = hit.url
             if is_yandex_medicine_url(hit.url) and not row["yandex_maps"]: row["yandex_maps"] = hit.url
-    # Render MapPlace-backed results first. SERP-only evidence is deliberately not
-    # converted into invented cards; local index will absorb structured sources.
     if merged_places:
         return _render(question, merged_places, source_rows, cache_only=False)
-    return LocalBusinessResult(text="Локальный индекс пока пуст для этой категории, а внешние источники сейчас недоступны. Запусти bootstrap локальной базы: после этого поиск будет работать офлайн и не зависеть от каталогов.", sources=[], searched=0)
+    return LocalBusinessResult(text="Локальная база для этой категории ещё не построена, а внешние источники сейчас недоступны. Я не буду придумывать компании. Запусти синхронизацию локального каталога OSM; после неё поиск будет работать без интернета.", sources=[], searched=0)
