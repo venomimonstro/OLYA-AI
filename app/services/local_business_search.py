@@ -16,16 +16,37 @@ from app.services.zoon_discovery import discover_zoon
 
 
 _SELECTION_RE = re.compile(
-    r"\b(?:лучши\w*|топ|рейтинг\w*|найди\w*|подбер\w*|посовет\w*|порекоменду\w*|покажи\w*)\b",
+    r"\b(?:лучши\w*|топ|рейтинг\w*|найди\w*|найти|подбер\w*|посовет\w*|порекоменду\w*|рекоменду\w*|покажи\w*|выбер\w*|выбрать)\b",
     re.I,
 )
 _LOCATION_RE = re.compile(
     r"\b(?:в|во|рядом|поблизости|около)\s+[а-яёa-z][а-яёa-z-]{2,}(?:\s+[а-яёa-z][а-яёa-z-]{2,}){0,2}\b",
     re.I,
 )
+_CITY_MENTION_RE = re.compile(
+    r"\b(?:москв\w*|санкт[-\s]?петербург\w*|петербург\w*|спб|казан\w*|екатеринбург\w*|"
+    r"новосибирск\w*|самар\w*|челябинск\w*|красноярск\w*|тюмен\w*|уф\w*|перм\w*|сочи|"
+    r"калининград\w*|воронеж\w*|краснодар\w*|омск\w*|нижн\w*\s+новгород\w*|ростов\w*(?:-на-дону)?)\b",
+    re.I,
+)
+_LOCAL_ACTION_RE = re.compile(
+    r"\b(?:отзыв\w*|цен\w*|стоимост\w*|адрес\w*|телефон\w*|контакт\w*|рядом|недорог\w*|"
+    r"где\s+(?:найти|купить|заказать|обратиться)|куда\s+обратиться)\b",
+    re.I,
+)
+_BUSINESS_GENERIC_RE = re.compile(
+    r"\b(?:компани\w*|фирм\w*|сервис\w*|автосервис\w*|центр\w*|клиник\w*|магазин\w*|салон\w*|"
+    r"студи\w*|агентств\w*|школ\w*|курс\w*|ресторан\w*|кафе|бар\w*|отел\w*|гостиниц\w*|"
+    r"юрист\w*|адвокат\w*|нотариус\w*|фитнес\w*|спортзал\w*|ремонт\w*|мастер\w*|доставк\w*|"
+    r"пекар\w*|цветоч\w*|мебел\w*|стоматолог\w*|аптек\w*|лаборатор\w*|ветеринар\w*|"
+    r"страхов\w*|банк\w*|риелтор\w*|риэлтор\w*|строител\w*|типограф\w*|ателье\w*|"
+    r"химчист\w*|шиномонтаж\w*|автомойк\w*|детейлинг\w*|слухопротезирован\w*)\b",
+    re.I,
+)
 _NON_BUSINESS_LOCAL_RE = re.compile(
-    r"\b(?:погод\w*|район\w*|улиц\w*|проспект\w*|метро\b|маршрут\w*|"
-    r"достопримечательност\w*|что\s+посмотреть|куда\s+сходить|прогул\w*|истори\w*)\b",
+    r"\b(?:погод\w*|район\w*|улиц\w*|проспект\w*|метро\b|маршрут\w*|населени\w*|"
+    r"мэр\w*|губернатор\w*|новост\w*|истори\w*|экономик\w*|достопримечательност\w*|"
+    r"что\s+посмотреть|куда\s+сходить|прогул\w*)\b",
     re.I,
 )
 _MEDICAL_RE = re.compile(
@@ -41,7 +62,7 @@ _GENERIC_TITLE = re.compile(
 _WORD = re.compile(r"[a-zа-яё0-9]+", re.I)
 _SPACE = re.compile(r"\s+")
 _STOP = {
-    "лучшие", "лучший", "лучших", "топ", "рейтинг", "найди", "подбери", "посоветуй", "порекомендуй", "покажи",
+    "лучшие", "лучший", "лучших", "топ", "рейтинг", "найди", "найти", "подбери", "посоветуй", "порекомендуй", "покажи",
     "компания", "компании", "компаний", "центр", "центры", "центров", "клиника", "клиники",
     "в", "во", "на", "рядом", "поблизости", "около", "москва", "москве", "москвы",
 }
@@ -70,7 +91,19 @@ def is_local_business_question(question: str) -> bool:
     text = normalized_question(question)
     if not text or _NON_BUSINESS_LOCAL_RE.search(text):
         return False
-    return bool(_SELECTION_RE.search(text) and _LOCATION_RE.search(text))
+
+    has_location = bool(_CITY_MENTION_RE.search(text) or _LOCATION_RE.search(text))
+    if not has_location:
+        return False
+
+    # Selection/recommendation requests should always enter local discovery,
+    # regardless of whether the user writes "в Москве", "Москва" or "Москвы".
+    if _SELECTION_RE.search(text):
+        return True
+
+    # Also route compact commercial queries such as "автосервисы Москва" or
+    # "стоматологии Москвы отзывы" without requiring a recommendation word.
+    return bool(_BUSINESS_GENERIC_RE.search(text) and (_CITY_MENTION_RE.search(text) or _LOCAL_ACTION_RE.search(text)))
 
 
 def _host(url: str) -> str:
@@ -95,7 +128,7 @@ def _kind(url: str) -> str:
 
 
 def _clean_title(value: str) -> str:
-    text = _SPACE.sub(" ", str(value or "")).strip(" -–—|·:,.\t\n")
+    text = _SPACE.sub(" ", str(value or "")).strip(" -–—|·:,.	\n")
     for sep in (" — ", " | ", " - ", " · "):
         if sep in text:
             left, right = text.split(sep, 1)
@@ -103,7 +136,7 @@ def _clean_title(value: str) -> str:
                 text = left.strip()
                 break
     text = _GENERIC_TITLE.sub(" ", text)
-    text = _SPACE.sub(" ", text).strip(" -–—|·:,.\t\n")
+    text = _SPACE.sub(" ", text).strip(" -–—|·:,.	\n")
     return text[:140]
 
 
