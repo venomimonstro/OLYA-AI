@@ -237,10 +237,17 @@ def sync(cities: list[str], *, force_download: bool = False) -> dict[str, object
             pbf = _download(source['url'], DOWNLOAD_ROOT / source['filename'], force=force_download)
             filtered = tmp / f'{source["filename"]}.businesses.pbf'
             exported = tmp / f'{source["filename"]}.geojsonseq'
+            node_index = tmp / f'{source["filename"]}.nodes.idx'
             _run('osmium', 'tags-filter', str(pbf), *BUSINESS_FILTERS, '-o', str(filtered), '--overwrite')
-            # Osmium export does not include original object identity by default.
-            # The catalog needs stable type/id to produce real OSM card links.
-            _run('osmium', 'export', str(filtered), '-f', 'geojsonseq', '-a', 'type,id', '-o', str(exported), '--overwrite')
+            # Original OSM identity is required for deterministic card links.
+            # sparse_file_array keeps the node-location index on disk instead of
+            # consuming the app container's limited RAM during this one-off build.
+            _run(
+                'osmium', 'export', str(filtered),
+                '-f', 'geojsonseq', '-a', 'type,id',
+                '-i', f'sparse_file_array,{node_index}',
+                '-o', str(exported), '--overwrite',
+            )
             exports.append((city, exported))
 
         staging = DATA_ROOT / 'local_businesses.sqlite3.tmp'
