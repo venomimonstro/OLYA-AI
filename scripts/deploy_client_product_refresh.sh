@@ -36,6 +36,7 @@ python3 -m py_compile \
   scripts/real_user_population_10000.py \
   scripts/real_user_routing_audit_10000.py \
   scripts/real_user_live_simulation_10000.py \
+  scripts/real_user_live_weighted_10000.py \
   scripts/real_user_simulation_orchestrator.py
 bash -n scripts/start_app.sh
 bash -n scripts/run_real_user_simulation_100.sh
