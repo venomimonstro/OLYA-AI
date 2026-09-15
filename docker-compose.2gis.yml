@@ -1,0 +1,17 @@
+services:
+  parser-2gis:
+    profiles: ["2gis"]
+    build:
+      context: .
+      dockerfile: Dockerfile.parser-2gis
+    init: true
+    shm_size: "1gb"
+    mem_limit: ${X1_2GIS_PARSER_MEMORY_LIMIT_MB:-1800}m
+    volumes:
+      - ./data/2gis:/data
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: ${X1_2GIS_PARSER_MEMORY_LIMIT_MB:-1800}M
