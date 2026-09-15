@@ -7,6 +7,8 @@ import httpx
 
 from app.services.discovery import DiscoveryError, SearchHit, canonical_result_url
 from app.services.free_serp_discovery import FreeSerpDiscovery
+from app.services.local_search_discovery import LocalSearchDiscovery
+from app.services.response_strategy import requires_fresh_data
 
 
 _SITE_FILTER = re.compile(r"(?:^|\s)site:([a-z0-9.-]+)", re.IGNORECASE)
@@ -15,8 +17,7 @@ _STOPWORDS = {
     "кто", "что", "где", "когда", "какой", "какая", "какие", "какое", "сейчас", "сегодня",
     "текущий", "текущая", "текущие", "последний", "последняя", "последние", "найди", "покажи",
     "лучший", "лучшие", "рейтинг", "отзывы", "компания", "компании", "центр", "центры",
-    "яндекс", "карты", "2гис", "адрес", "телефон", "сайт",
-    "это", "для", "или", "как", "его", "ее", "её", "при", "про", "из", "по",
+    "яндекс", "карты", "2гис", "адрес", "телефон", "сайт", "это", "для", "или", "как", "его", "ее", "её", "при", "про", "из", "по",
     "who", "what", "where", "when", "which", "current", "latest", "today", "now", "the", "of", "for",
     "and", "is", "are", "show", "find", "site", "version", "best", "reviews", "rating",
 }
@@ -63,11 +64,9 @@ def _relevant(query: str, title: str, url: str, snippet: str) -> bool:
     required = _site_constraint(query)
     if required and not (host == required or host.endswith("." + required)):
         return False
-
     tokens = _meaningful_tokens(query)
     if not tokens:
         return True
-
     haystack = " ".join((title, snippet, host, parsed.path)).casefold()
     matches = sum(1 for token in tokens if token in haystack)
     required_matches = 1 if len(tokens) <= 2 else 2
@@ -75,7 +74,12 @@ def _relevant(query: str, title: str, url: str, snippet: str) -> bool:
 
 
 class SearxngDiscovery:
-    """Self-hosted keyless metasearch with a direct free-SERP safety net."""
+    """Local-index-first search with self-hosted/public network failover.
+
+    Stable queries use OLYA's own on-disk FTS index whenever it has results.
+    Fresh/current queries deliberately bypass that shortcut and keep the
+    external search path so stale local pages cannot masquerade as current.
+    """
 
     name = "searxng"
     primary_engines = ("google", "yandex", "duckduckgo", "bing")
@@ -87,61 +91,59 @@ class SearxngDiscovery:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = max(1.0, float(timeout_seconds))
         self.free_fallback = FreeSerpDiscovery(timeout_seconds=min(self.timeout_seconds, 6.0))
+        self.local_index = LocalSearchDiscovery()
 
     async def _request(self, client: httpx.AsyncClient, query: str, engines: tuple[str, ...], language: str | None) -> list[SearchHit]:
         params: dict[str, object] = {
-            "q": query,
-            "format": "json",
-            "safesearch": 1,
-            "pageno": 1,
-            "categories": "general",
-            "engines": ",".join(engines),
+            "q": query, "format": "json", "safesearch": 1, "pageno": 1,
+            "categories": "general", "engines": ",".join(engines),
         }
         if language:
             params["language"] = language
         response = await client.get(f"{self.base_url}/search", params=params, headers={"Accept": "application/json"})
         response.raise_for_status()
         payload = response.json()
-        relevant_rows: list[SearchHit] = []
-        seen: set[str] = set()
+        relevant_rows: list[SearchHit] = []; seen: set[str] = set()
         for row in payload.get("results") or []:
-            if not isinstance(row, dict):
-                continue
+            if not isinstance(row, dict): continue
             url = str(row.get("url") or "").strip()
-            if not url.startswith(("http://", "https://")):
-                continue
+            if not url.startswith(("http://", "https://")): continue
             key = canonical_result_url(url)
-            if not key or key in seen:
-                continue
+            if not key or key in seen: continue
             title = str(row.get("title") or "")[:320]
             snippet = str(row.get("content") or row.get("snippet") or "")[:1000]
-            if not _relevant(query, title, url, snippet):
-                continue
+            if not _relevant(query, title, url, snippet): continue
             seen.add(key)
             source_engines = row.get("engines") or row.get("engine") or []
-            if isinstance(source_engines, str):
-                provider = source_engines
-            elif isinstance(source_engines, list):
-                provider = ",".join(str(item) for item in source_engines[:4])
-            else:
-                provider = ""
+            if isinstance(source_engines, str): provider = source_engines
+            elif isinstance(source_engines, list): provider = ",".join(str(item) for item in source_engines[:4])
+            else: provider = ""
             relevant_rows.append(SearchHit(
-                query=query,
-                title=title,
-                url=url,
-                snippet=snippet,
-                rank=len(relevant_rows) + 1,
-                provider="searxng:" + (provider or "mixed"),
+                query=query, title=title, url=url, snippet=snippet,
+                rank=len(relevant_rows) + 1, provider="searxng:" + (provider or "mixed"),
             ))
-            if len(relevant_rows) >= self.max_results:
-                break
+            if len(relevant_rows) >= self.max_results: break
         return relevant_rows
 
     async def search(self, query: str, *, count: int = 10, country: str | None = None, language: str | None = None) -> list[SearchHit]:
         effective_query = _rewrite_map_query(query)
         limit = min(max(int(count), 1), self.max_results)
-        rows: list[SearchHit] = []
 
+        # Stable knowledge should be nearly free after the crawler has indexed
+        # it. Fresh queries continue to network search until the freshness layer
+        # gains per-document TTL enforcement.
+        if not requires_fresh_data(effective_query):
+            try:
+                local = await self.local_index.search(
+                    effective_query, count=limit, country=country, language=language
+                )
+            except Exception:
+                local = []
+            local = [item for item in local if _relevant(effective_query, item.title, item.url, item.snippet)]
+            if local:
+                return local[:limit]
+
+        rows: list[SearchHit] = []
         if self.base_url:
             timeout = min(self.timeout_seconds, 5.5)
             try:
@@ -153,23 +155,25 @@ class SearxngDiscovery:
                         for item in fallback:
                             key = canonical_result_url(item.url)
                             if key and key not in known:
-                                known.add(key)
-                                rows.append(item)
-                            if len(rows) >= limit:
-                                break
+                                known.add(key); rows.append(item)
+                            if len(rows) >= limit: break
             except (httpx.HTTPError, ValueError, TypeError):
                 rows = []
 
         if not rows:
             try:
-                rows = await self.free_fallback.search(
-                    effective_query,
-                    count=limit,
-                    country=country,
-                    language=language,
-                )
+                rows = await self.free_fallback.search(effective_query, count=limit, country=country, language=language)
             except DiscoveryError as exc:
-                raise DiscoveryError("Self-hosted and free SERP search returned no relevant results") from exc
+                # If network search failed, a local stable result is still more
+                # useful than total failure, including for site: constrained
+                # queries that were indexed earlier.
+                try:
+                    local = await self.local_index.search(effective_query, count=limit, country=country, language=language)
+                except Exception:
+                    local = []
+                if local:
+                    return local[:limit]
+                raise DiscoveryError("Local, self-hosted and free SERP search returned no relevant results") from exc
 
         rows = [item for item in rows if _relevant(effective_query, item.title, item.url, item.snippet)]
         if not rows:
