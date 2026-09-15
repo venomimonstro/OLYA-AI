@@ -15,6 +15,7 @@ _STOPWORDS = {
     "кто", "что", "где", "когда", "какой", "какая", "какие", "какое", "сейчас", "сегодня",
     "текущий", "текущая", "текущие", "последний", "последняя", "последние", "найди", "покажи",
     "лучший", "лучшие", "рейтинг", "отзывы", "компания", "компании", "центр", "центры",
+    "яндекс", "карты", "2гис", "адрес", "телефон", "сайт",
     "это", "для", "или", "как", "его", "ее", "её", "при", "про", "из", "по",
     "who", "what", "where", "when", "which", "current", "latest", "today", "now", "the", "of", "for",
     "and", "is", "are", "show", "find", "site", "version", "best", "reviews", "rating",
@@ -26,11 +27,20 @@ def _site_constraint(query: str) -> str:
     return str(match.group(1) if match else "").casefold().strip(".")
 
 
+def _rewrite_map_query(query: str) -> str:
+    value = " ".join(str(query or "").split())
+    low = value.casefold()
+    if "яндекс карт" in low and "site:" not in low:
+        value = re.sub(r"яндекс\s+карт\w*", " ", value, flags=re.IGNORECASE)
+        return f"site:yandex.ru/maps {value}".strip()
+    if "2гис" in low and "site:" not in low:
+        value = re.sub(r"2гис", " ", value, flags=re.IGNORECASE)
+        return f"site:2gis.ru {value}".strip()
+    return value
+
+
 def _stem(value: str) -> str:
     value = value.casefold().strip("._-+")
-    # We only need a conservative lexical stem for SERP validation, not a
-    # linguistic stemmer. Seven characters safely catches Russian inflection
-    # such as Москва/Москве and слухопротезирование/слухопротезирования.
     return value[:7] if len(value) >= 7 else value
 
 
@@ -60,22 +70,12 @@ def _relevant(query: str, title: str, url: str, snippet: str) -> bool:
 
     haystack = " ".join((title, snippet, host, parsed.path)).casefold()
     matches = sum(1 for token in tokens if token in haystack)
-
-    # One lexical match is enough for a very small query. Rich/local queries
-    # must match at least two independent concepts. This prevents unrelated
-    # foreign SERP pages from leaking into a Russian local-business answer.
     required_matches = 1 if len(tokens) <= 2 else 2
     return matches >= required_matches
 
 
 class SearxngDiscovery:
-    """Self-hosted keyless metasearch with a direct free-SERP safety net.
-
-    SearXNG queries Google/Yandex/DDG/Bing. If the instance/engines are blocked,
-    empty or time out, a bounded keyless HTML fallback attempts public SERPs.
-    CAPTCHA/anti-bot pages are never bypassed. Irrelevant rows are rejected;
-    populated-but-unrelated SERPs are treated as unusable, not as evidence.
-    """
+    """Self-hosted keyless metasearch with a direct free-SERP safety net."""
 
     name = "searxng"
     primary_engines = ("google", "yandex", "duckduckgo", "bing")
@@ -113,11 +113,11 @@ class SearxngDiscovery:
             key = canonical_result_url(url)
             if not key or key in seen:
                 continue
-            seen.add(key)
             title = str(row.get("title") or "")[:320]
             snippet = str(row.get("content") or row.get("snippet") or "")[:1000]
             if not _relevant(query, title, url, snippet):
                 continue
+            seen.add(key)
             source_engines = row.get("engines") or row.get("engine") or []
             if isinstance(source_engines, str):
                 provider = source_engines
@@ -138,6 +138,7 @@ class SearxngDiscovery:
         return relevant_rows
 
     async def search(self, query: str, *, count: int = 10, country: str | None = None, language: str | None = None) -> list[SearchHit]:
+        effective_query = _rewrite_map_query(query)
         limit = min(max(int(count), 1), self.max_results)
         rows: list[SearchHit] = []
 
@@ -145,9 +146,9 @@ class SearxngDiscovery:
             timeout = min(self.timeout_seconds, 5.5)
             try:
                 async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-                    rows = await self._request(client, query, self.primary_engines, language)
+                    rows = await self._request(client, effective_query, self.primary_engines, language)
                     if len(rows) < min(3, limit):
-                        fallback = await self._request(client, query, self.fallback_engines, language)
+                        fallback = await self._request(client, effective_query, self.fallback_engines, language)
                         known = {canonical_result_url(item.url) for item in rows}
                         for item in fallback:
                             key = canonical_result_url(item.url)
@@ -162,7 +163,7 @@ class SearxngDiscovery:
         if not rows:
             try:
                 rows = await self.free_fallback.search(
-                    query,
+                    effective_query,
                     count=limit,
                     country=country,
                     language=language,
@@ -170,7 +171,7 @@ class SearxngDiscovery:
             except DiscoveryError as exc:
                 raise DiscoveryError("Self-hosted and free SERP search returned no relevant results") from exc
 
-        rows = [item for item in rows if _relevant(query, item.title, item.url, item.snippet)]
+        rows = [item for item in rows if _relevant(effective_query, item.title, item.url, item.snippet)]
         if not rows:
             raise DiscoveryError("Search returned no relevant results")
         return rows[:limit]
