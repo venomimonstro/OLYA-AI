@@ -6,10 +6,13 @@ import html
 import ipaddress
 import re
 import socket
+import sqlite3
 import urllib.robotparser
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
+from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
@@ -85,10 +88,12 @@ class _TextExtractor(HTMLParser):
 
     def result(self, base_url: str) -> ParsedPage:
         raw_text = ' '.join(self.text_parts)
-        text = _clean(raw_text, _MAX_TEXT_CHARS)
-        title = _clean(' '.join(self.title_parts), 500)
-        canonical = urljoin(base_url, self.canonical) if self.canonical else base_url
-        return ParsedPage(title=title, description=self.description, text=text, canonical=canonical)
+        return ParsedPage(
+            title=_clean(' '.join(self.title_parts), 500),
+            description=self.description,
+            text=_clean(raw_text, _MAX_TEXT_CHARS),
+            canonical=urljoin(base_url, self.canonical) if self.canonical else base_url,
+        )
 
 
 def _clean(value: str, limit: int) -> str:
@@ -109,13 +114,11 @@ def _canonical_http_url(value: str) -> str:
     netloc = host
     if port and not ((parsed.scheme == 'https' and port == 443) or (parsed.scheme == 'http' and port == 80)):
         netloc += f':{port}'
-    path = parsed.path or '/'
-    return urlunsplit((parsed.scheme.casefold(), netloc, path, parsed.query, ''))
+    return urlunsplit((parsed.scheme.casefold(), netloc, parsed.path or '/', parsed.query, ''))
 
 
 def _allowed_path(url: str) -> bool:
-    path = urlsplit(url).path.casefold()
-    return not any(path.endswith(suffix) for suffix in _BLOCKED_SUFFIXES)
+    return not any(urlsplit(url).path.casefold().endswith(suffix) for suffix in _BLOCKED_SUFFIXES)
 
 
 def _public_ip(address: str) -> bool:
@@ -123,16 +126,12 @@ def _public_ip(address: str) -> bool:
         ip = ipaddress.ip_address(address)
     except ValueError:
         return False
-    return not (
-        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified
-    )
+    return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified)
 
 
 async def _host_is_public(host: str) -> bool:
     try:
-        infos = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-        )
+        infos = await asyncio.get_running_loop().run_in_executor(None, lambda: socket.getaddrinfo(host, None, type=socket.SOCK_STREAM))
     except OSError:
         return False
     addresses = {str(item[4][0]) for item in infos if item and item[4]}
@@ -180,10 +179,8 @@ def _sitemap_urls(body: bytes, content_encoding: str = '') -> list[tuple[str, st
         lastmod = ''
         for child in node:
             child_tag = child.tag.rsplit('}', 1)[-1].casefold()
-            if child_tag == 'loc':
-                loc = (child.text or '').strip()
-            elif child_tag == 'lastmod':
-                lastmod = (child.text or '').strip()
+            if child_tag == 'loc': loc = (child.text or '').strip()
+            elif child_tag == 'lastmod': lastmod = (child.text or '').strip()
         if loc:
             rows.append((loc, lastmod))
     return rows
@@ -196,6 +193,44 @@ def _parse_html(body: str, url: str) -> ParsedPage:
     except Exception:
         pass
     return parser.result(url)
+
+
+def _date(value: str) -> datetime | None:
+    raw = str(value or '').strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+    except ValueError:
+        # RFC 1123 Last-Modified headers are handled by the next crawl; they do
+        # not need to block sitemap scheduling when parsing is ambiguous.
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _page_is_fresh(db_path: Path, url: str, sitemap_lastmod: str, *, fallback_days: int = 7) -> bool:
+    """Skip unchanged sitemap URLs without loading page bodies into memory."""
+    if not db_path.is_file():
+        return False
+    connection = sqlite3.connect(str(db_path), timeout=5.0)
+    connection.row_factory = sqlite3.Row
+    try:
+        row = connection.execute('SELECT fetched_at,modified_at FROM pages WHERE url=? LIMIT 1', (url,)).fetchone()
+    except sqlite3.Error:
+        row = None
+    finally:
+        connection.close()
+    if row is None:
+        return False
+    fetched = _date(str(row['fetched_at'] or ''))
+    if fetched is None:
+        return False
+    source_modified = _date(sitemap_lastmod)
+    if source_modified is not None:
+        return fetched >= source_modified
+    return fetched >= datetime.now(timezone.utc) - timedelta(days=max(1, fallback_days))
 
 
 class LocalWebCrawler:
@@ -229,131 +264,90 @@ class LocalWebCrawler:
                     return response.status_code, b'', dict(response.headers), current
                 current = next_url
                 continue
-            body = response.content[:max_bytes]
-            return response.status_code, body, {k.casefold(): v for k, v in response.headers.items()}, current
+            return response.status_code, response.content[:max_bytes], {k.casefold(): v for k, v in response.headers.items()}, current
         return 0, b'', {}, ''
 
     async def seed_domain(self, value: str, *, max_sitemaps: int = 20, max_urls: int = 5000) -> dict[str, int | str]:
         base = _canonical_http_url(value if '://' in value else 'https://' + value.strip('/'))
         if not base:
             raise ValueError('valid public http(s) domain/url is required')
-        parsed = urlsplit(base)
-        host = (parsed.hostname or '').casefold()
+        parsed = urlsplit(base); host = (parsed.hostname or '').casefold()
         if not await _host_is_public(host):
             raise ValueError('domain does not resolve exclusively to public IP addresses')
 
         robots_url = f'{parsed.scheme}://{parsed.netloc}/robots.txt'
         async with await self._client() as client:
-            _status, robots_body, _headers, _final = await self._fetch(
-                client, robots_url, expected_host=host, max_bytes=500_000, accept='text/plain,*/*;q=0.1'
-            )
+            _status, robots_body, _headers, _final = await self._fetch(client, robots_url, expected_host=host, max_bytes=500_000, accept='text/plain,*/*;q=0.1')
             robots_text = robots_body.decode('utf-8', 'replace') if robots_body else ''
             robots = _robots_parser(robots_text, base)
             sitemap_candidates: list[str] = []
             for line in robots_text.splitlines():
                 if line.casefold().startswith('sitemap:'):
                     candidate = line.split(':', 1)[1].strip()
-                    if candidate:
-                        sitemap_candidates.append(candidate)
-            sitemap_candidates.extend([
-                f'{parsed.scheme}://{parsed.netloc}/sitemap.xml',
-                f'{parsed.scheme}://{parsed.netloc}/sitemap_index.xml',
-            ])
+                    if candidate: sitemap_candidates.append(candidate)
+            sitemap_candidates.extend([f'{parsed.scheme}://{parsed.netloc}/sitemap.xml', f'{parsed.scheme}://{parsed.netloc}/sitemap_index.xml'])
 
-            seen_sitemaps: set[str] = set()
-            queued_urls = 0
-            sitemap_count = 0
-            pending = sitemap_candidates[:]
+            seen_sitemaps: set[str] = set(); queued_urls = 0; skipped_fresh = 0; sitemap_count = 0; pending = sitemap_candidates[:]
             while pending and sitemap_count < max_sitemaps and queued_urls < max_urls:
-                raw = pending.pop(0)
-                sitemap = await _safe_url(raw, expected_host=host)
-                if not sitemap or sitemap in seen_sitemaps:
-                    continue
+                raw = pending.pop(0); sitemap = await _safe_url(raw, expected_host=host)
+                if not sitemap or sitemap in seen_sitemaps: continue
                 seen_sitemaps.add(sitemap)
-                status, body, headers, final_url = await self._fetch(
-                    client, sitemap, expected_host=host, max_bytes=_MAX_SITEMAP_BYTES,
-                    accept='application/xml,text/xml,application/gzip,*/*;q=0.2',
-                )
-                if status != 200 or not body:
-                    continue
+                status, body, headers, final_url = await self._fetch(client, sitemap, expected_host=host, max_bytes=_MAX_SITEMAP_BYTES, accept='application/xml,text/xml,application/gzip,*/*;q=0.2')
+                if status != 200 or not body: continue
                 sitemap_count += 1
                 for loc, lastmod in _sitemap_urls(body, headers.get('content-encoding', '')):
                     target = await _safe_url(loc, expected_host=host)
-                    if not target:
-                        continue
+                    if not target: continue
                     if target.casefold().endswith(('.xml', '.xml.gz', '.gz')) and len(pending) < max_sitemaps * 4:
-                        pending.append(target)
-                        continue
-                    if not robots.can_fetch(self.user_agent, target):
-                        continue
+                        pending.append(target); continue
+                    if not robots.can_fetch(self.user_agent, target): continue
+                    if _page_is_fresh(self.store.path, target, lastmod):
+                        skipped_fresh += 1; continue
                     self.store.enqueue(target, discovered_from=final_url or sitemap, priority=50, next_fetch_at='')
                     queued_urls += 1
-                    if queued_urls >= max_urls:
-                        break
+                    if queued_urls >= max_urls: break
 
-        return {'domain': host, 'sitemaps': sitemap_count, 'queued': queued_urls}
+        return {'domain': host, 'sitemaps': sitemap_count, 'queued': queued_urls, 'fresh_skipped': skipped_fresh}
 
     async def crawl_one(self, row: dict) -> bool:
-        url = str(row.get('url') or '')
-        parsed = urlsplit(url)
-        host = (parsed.hostname or '').casefold()
+        url = str(row.get('url') or ''); parsed = urlsplit(url); host = (parsed.hostname or '').casefold()
         if not host:
-            self.store.queue_failed(url, 'invalid_host')
-            return False
+            self.store.queue_failed(url, 'invalid_host'); return False
         robots_url = f'{parsed.scheme}://{parsed.netloc}/robots.txt'
         async with await self._client() as client:
-            _rs, robots_body, _rh, _rf = await self._fetch(
-                client, robots_url, expected_host=host, max_bytes=500_000, accept='text/plain,*/*;q=0.1'
-            )
+            _rs, robots_body, _rh, _rf = await self._fetch(client, robots_url, expected_host=host, max_bytes=500_000, accept='text/plain,*/*;q=0.1')
             robots = _robots_parser(robots_body.decode('utf-8', 'replace') if robots_body else '', url)
             if not robots.can_fetch(self.user_agent, url):
-                self.store.queue_done(url)
-                return False
-            status, body, headers, final_url = await self._fetch(
-                client, url, expected_host=host, max_bytes=_MAX_HTML_BYTES,
-                accept='text/html,application/xhtml+xml;q=0.9,*/*;q=0.1',
-            )
+                self.store.queue_done(url); return False
+            status, body, headers, final_url = await self._fetch(client, url, expected_host=host, max_bytes=_MAX_HTML_BYTES, accept='text/html,application/xhtml+xml;q=0.9,*/*;q=0.1')
         if status != 200 or not body:
-            self.store.queue_failed(url, f'http_{status or 0}')
-            return False
+            self.store.queue_failed(url, f'http_{status or 0}'); return False
         content_type = headers.get('content-type', '').casefold()
         if 'html' not in content_type and '<html' not in body[:2000].decode('utf-8', 'ignore').casefold():
-            self.store.queue_done(url)
-            return False
-        encoding = 'utf-8'
-        match = re.search(r'charset=([A-Za-z0-9._-]+)', content_type)
-        if match:
-            encoding = match.group(1)
-        try:
-            text = body.decode(encoding, 'replace')
-        except LookupError:
-            text = body.decode('utf-8', 'replace')
+            self.store.queue_done(url); return False
+        encoding = 'utf-8'; match = re.search(r'charset=([A-Za-z0-9._-]+)', content_type)
+        if match: encoding = match.group(1)
+        try: text = body.decode(encoding, 'replace')
+        except LookupError: text = body.decode('utf-8', 'replace')
         parsed_page = _parse_html(text, final_url or url)
         if len(parsed_page.text) < 120 and not parsed_page.title:
-            self.store.queue_done(url)
-            return False
-        canonical = await _safe_url(parsed_page.canonical, expected_host=host)
-        target = canonical or final_url or url
+            self.store.queue_done(url); return False
+        canonical = await _safe_url(parsed_page.canonical, expected_host=host); target = canonical or final_url or url
         self.store.upsert_page(
-            url=target,
-            title=parsed_page.title,
-            description=parsed_page.description,
-            content=parsed_page.text,
-            status=status,
+            url=target, title=parsed_page.title, description=parsed_page.description,
+            content=parsed_page.text, modified_at=headers.get('last-modified', ''), status=status,
         )
         self.store.queue_done(url)
         return True
 
     async def crawl_batch(self, *, limit: int = 20, concurrency: int = 3) -> dict[str, int]:
         rows = self.store.queue_batch(limit=limit)
-        if not rows:
-            return {'attempted': 0, 'indexed': 0}
+        if not rows: return {'attempted': 0, 'indexed': 0}
         semaphore = asyncio.Semaphore(max(1, min(int(concurrency), 8)))
 
         async def run(row: dict) -> bool:
             async with semaphore:
-                try:
-                    return await self.crawl_one(row)
+                try: return await self.crawl_one(row)
                 except Exception as exc:
                     self.store.queue_failed(str(row.get('url') or ''), f'{type(exc).__name__}:{exc}')
                     return False
