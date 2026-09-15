@@ -47,7 +47,7 @@ async def audit_async() -> dict:
         errors.append("advice_source_count")
     if advice.fetched > 1:
         errors.append("advice_fetch_count")
-    if advice_chars > 950:
+    if advice_chars > 620:
         errors.append(f"advice_prompt_too_large:{advice_chars}")
 
     fresh = await build_clean_web_context(
@@ -60,7 +60,7 @@ async def audit_async() -> dict:
     fresh_chars = sum(len(item.content) for item in fresh.context_messages)
     if fresh.fetched != 0:
         errors.append("fresh_query_should_not_fetch_pages")
-    if fresh_chars > 950:
+    if fresh_chars > 620:
         errors.append(f"fresh_prompt_too_large:{fresh_chars}")
 
     if should_use_web("Объясни разницу между компетенциями, навыками и требованиями вакансии.", "auto"):
@@ -69,7 +69,7 @@ async def audit_async() -> dict:
         errors.append("vacancy_lookup_missed_web")
 
     return {
-        "format": "olya-web-prompt-budget-audit-v1",
+        "format": "olya-web-prompt-budget-audit-v2",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "checks": {
