@@ -16,6 +16,10 @@ _SCRIPT_JSON_RE = re.compile(
     r"<script[^>]+(?:type=[\"']application/json[\"']|id=[\"'][^\"']*(?:state|data)[^\"']*[\"'])[^>]*>(.*?)</script>",
     re.I | re.S,
 )
+_JSON_PARSE_RE = re.compile(
+    r"JSON\.parse\(\s*(?P<value>\"(?:\\.|[^\"\\])*\")\s*\)",
+    re.I | re.S,
+)
 _YANDEX_LINK_RE = re.compile(
     r"href=[\"'](?P<href>(?:https?://(?:www\.)?yandex\.(?:ru|com))?/maps/org/[^\"']+)[\"'][^>]*>(?P<body>.*?)</a>",
     re.I | re.S,
@@ -160,6 +164,8 @@ def _balanced_json_after(text: str, marker: str) -> str | None:
 def _json_payloads(body: str) -> list[object]:
     payloads: list[object] = []
     seen: set[str] = set()
+
+    # Yandex and other SSR pages often expose a plain object assignment.
     for marker in (
         "window.__INITIAL_STATE__",
         "window.__PRELOADED_STATE__",
@@ -174,6 +180,26 @@ def _json_payloads(body: str) -> list[object]:
                 payloads.append(json.loads(raw))
             except (json.JSONDecodeError, ValueError):
                 pass
+
+    # 2GIS currently server-renders search state in forms such as:
+    # var initialState = JSON.parse("{...escaped JSON...}"). Decode both the
+    # JavaScript string literal and the JSON it contains.
+    for match in _JSON_PARSE_RE.finditer(body):
+        quoted = match.group("value")
+        if len(quoted) > 8_000_000:
+            continue
+        try:
+            decoded = json.loads(quoted)
+            if not isinstance(decoded, str) or decoded in seen:
+                continue
+            seen.add(decoded)
+            payloads.append(json.loads(decoded))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            continue
+        if len(payloads) >= 24:
+            break
+
+    # Next.js/application-json state is another common 2GIS representation.
     for match in _SCRIPT_JSON_RE.finditer(body):
         raw = html.unescape(match.group(1)).strip()
         if not raw or raw in seen or len(raw) > 8_000_000:
@@ -412,6 +438,7 @@ class PublicMapsDiscovery:
         urls = (
             ("yandex", f"https://yandex.com/maps/{region_id}/{city_slug}/search/{encoded_path}/"),
             ("yandex", f"https://yandex.com/maps/?text={encoded_qs}"),
+            ("yandex", f"https://yandex.com/maps/search?text={encoded_qs}"),
             ("2gis", f"https://2gis.ru/{city_slug}/search/{encoded_path}"),
             ("google", f"https://www.google.com/maps/search/{encoded_path}?hl=ru"),
         )
