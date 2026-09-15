@@ -131,6 +131,7 @@ def search_local_catalog(question: str, *, path: Path | str = _DEFAULT_PATH, lim
         return []
     categories = requested_categories(question)
     keywords = _keywords(question)
+    connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True, timeout=1.0)
         connection.row_factory = sqlite3.Row
@@ -155,10 +156,11 @@ def search_local_catalog(question: str, *, path: Path | str = _DEFAULT_PATH, lim
     except sqlite3.Error:
         return []
     finally:
-        try:
-            connection.close()
-        except Exception:
-            pass
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     ranked = sorted(rows, key=lambda row: _score_row(row, categories=categories, keywords=keywords), reverse=True)
     result: list[MapPlace] = []
@@ -179,8 +181,11 @@ def search_local_catalog(question: str, *, path: Path | str = _DEFAULT_PATH, lim
         website = str(row['website'] or '').strip()
         if website and not urlsplit(website).scheme:
             website = 'https://' + website.lstrip('/')
+        # Provider stays "osm" so the existing entity renderer treats the
+        # persistent snapshot exactly like live OSM evidence, while runtime I/O
+        # remains fully local.
         result.append(MapPlace(
-            provider='local_catalog',
+            provider='osm',
             name=name[:140],
             card_url=card_url,
             address=str(row['address'] or '')[:220],
@@ -197,6 +202,7 @@ def catalog_status(*, path: Path | str = _DEFAULT_PATH) -> dict[str, object]:
     db_path = Path(path)
     if not db_path.is_file():
         return {'ready': False, 'path': str(db_path), 'businesses': 0, 'cities': 0, 'updated_at': ''}
+    connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True, timeout=1.0)
         businesses = int(connection.execute('SELECT COUNT(*) FROM businesses').fetchone()[0])
@@ -206,8 +212,9 @@ def catalog_status(*, path: Path | str = _DEFAULT_PATH) -> dict[str, object]:
     except sqlite3.Error:
         return {'ready': False, 'path': str(db_path), 'businesses': 0, 'cities': 0, 'updated_at': ''}
     finally:
-        try:
-            connection.close()
-        except Exception:
-            pass
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
     return {'ready': businesses > 0, 'path': str(db_path), 'businesses': businesses, 'cities': cities, 'updated_at': updated_at}
