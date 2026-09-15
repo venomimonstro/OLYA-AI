@@ -118,6 +118,19 @@ def _replace_persisted_assistant(db: Session, conversation_id: str | None, text:
         db.commit()
 
 
+def _repair_is_better(question: str, original: str, candidate: str) -> bool:
+    candidate = str(candidate or "").strip()
+    original = str(original or "").strip()
+    if not candidate or len(candidate) <= len(original):
+        return False
+    if not needs_expansion(question, candidate):
+        return True
+    # Small local models can miss one mechanical threshold by a few characters.
+    # Accept only a material improvement, never a cosmetic sentence append.
+    minimum_growth = max(180, int(len(original) * 0.60))
+    return len(candidate) - len(original) >= minimum_growth and len(candidate) >= 360
+
+
 async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id: str, job: ActiveChatJob) -> ChatResponse:
     with SessionLocal() as job_db:
         job_user = job_db.get(User, user_id)
@@ -171,16 +184,16 @@ async def _smart_managed_runner(payload: ChatRequest, request: Request, user_id:
         managed_payload = payload.model_copy(update={"client_request_id": job.client_request_id, "verification": "off", "research_source_ids": []})
         try:
             result = await legacy_chat._chat_impl(managed_payload, request, job_user, job_db, on_token=job.token, on_replace=job.replace)
-            if not atomic and needs_expansion(question, result.text):
+            if needs_expansion(question, result.text):
                 job._publish_nowait("status", {"state": "verifying", "message": "Ответ недостаточно полный. Дорабатываю…", "task_kind": "completeness_repair"})
                 repair = expansion_messages(question, result.text)
                 repair_context = [item for item in context_messages if item is not completeness]
                 repair_messages = [repair[0], *repair_context, repair[1]] if repair_context else repair
                 try:
-                    expanded = (await request.app.state.llama.chat(repair_messages, max_tokens=1200 if payload.mode != "deep" else 1900, reasoning=False)).strip()
+                    expanded = (await request.app.state.llama.chat(repair_messages, max_tokens=1300 if payload.mode != "deep" else 2000, reasoning=False)).strip()
                 except Exception:
                     expanded = ""
-                if expanded and len(expanded) > len(result.text):
+                if _repair_is_better(question, result.text, expanded):
                     result.text = expanded
                     _replace_persisted_assistant(job_db, result.conversation_id, expanded)
                     await job.replace(expanded)
