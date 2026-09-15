@@ -8,16 +8,25 @@ from time import perf_counter
 
 import httpx
 
+from app.services.project_context import _FAST_SYSTEM_PROMPT
+
 
 async def main_async() -> int:
     base = str(os.getenv("X1_LLAMA_BASE_URL", "http://llama:8080") or "http://llama:8080").rstrip("/")
     model_name = str(os.getenv("X1_LLAMA_MODEL_NAME", "") or "")
     started = perf_counter()
+    # Warm the exact prefix used by ordinary fast chat. llama.cpp prompt caching
+    # can then reuse the system/Jinja prefix and evaluate mostly the new user
+    # suffix instead of paying the cold prefix cost on the first real question.
     payload = {
         "model": "local",
-        "messages": [{"role": "user", "content": "Ответь одним словом: готов."}],
+        "messages": [
+            {"role": "system", "content": _FAST_SYSTEM_PROMPT},
+            {"role": "user", "content": "Ответь одним словом: готов."},
+        ],
         "max_tokens": 4,
         "temperature": 0,
+        "tool_choice": "none",
         "stream": False,
     }
     last_error = ""
@@ -45,6 +54,7 @@ async def main_async() -> int:
                     "elapsed_ms": elapsed_ms,
                     "prompt_tokens_per_second": timings.get("prompt_per_second", 0),
                     "tokens_per_second": timings.get("predicted_per_second", 0),
+                    "prefix": "olya_fast_chat_v1",
                 }, ensure_ascii=False), flush=True)
                 return 0
             except (httpx.HTTPError, ValueError, TypeError, RuntimeError) as exc:
