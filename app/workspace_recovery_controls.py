@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-_MARKER = "OLYA_RECOVERY_CONTROLS_V5"
+_MARKER = "OLYA_RECOVERY_CONTROLS_V6"
 
 
 def _nonce(document: str) -> str:
@@ -15,17 +15,21 @@ def enhance_recovery_controls(document: str) -> str:
     if _MARKER in document or 'id="messages"' not in document or 'id="send"' not in document:
         return document
 
-    # Premium streaming used to re-parse and rebuild the whole accumulated
-    # Markdown roughly every 28 ms. That is visually unnecessary and can make
-    # long answers freeze the browser. Keep streaming smooth at ~11 FPS and let
-    # the normal final render produce the exact final Markdown once.
+    # Reduce repeated full-Markdown work and avoid nested smooth-scroll animations.
     document = document.replace("now-run.lastPaint>=28", "now-run.lastPaint>=90")
     document = document.replace("await new Promise(r=>setTimeout(r,18))", "await new Promise(r=>setTimeout(r,45))")
+    document = document.replace("performance.now()-started<260", "performance.now()-started<90")
+    # Yandex Metrica only needs direct message additions, not every nested Markdown mutation.
+    document = document.replace(
+        "observe(x1messages,{childList:true,subtree:true})",
+        "observe(x1messages,{childList:true})",
+    )
 
     nonce = _nonce(document)
     nonce_attr = f' nonce="{nonce}"' if nonce else ""
     css = r'''
-/* OLYA_RECOVERY_CONTROLS_V5 */
+/* OLYA_RECOVERY_CONTROLS_V6 */
+.messages{scroll-behavior:auto!important}
 .olya-turn-actions{display:flex;gap:3px;margin:5px 0 0;opacity:.66;align-items:center}
 .olya-turn-action{width:28px;height:28px;border:0;background:transparent;color:#777;font:16px/1 system-ui;padding:0;border-radius:8px;cursor:pointer;display:grid;place-items:center}
 .olya-turn-action:hover{background:#f0f0f2;color:#222}.olya-turn-action:focus-visible{outline:2px solid #aaa}
