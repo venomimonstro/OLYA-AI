@@ -29,6 +29,14 @@ _GREETING_RU = re.compile(r"^\s*(?:привет|здравствуй|здрав�
 _GREETING_EN = re.compile(r"^\s*(?:hi|hello|hey)\s*[!?.…]*\s*$", re.I)
 _TIME_MARKERS = ("который час", "сколько времени", "какое время", "текущее время", "время сейчас", "сейчас время", "щас время")
 _DATE_MARKERS = ("какая сегодня дата", "какое сегодня число", "текущая дата", "дата сегодня")
+_LOCATION_REQUIRED_RE = re.compile(
+    r"^(?:"
+    r"где\s+(?:поесть|покушать|перекусить|выпить\s+кофе)\s+(?:рядом|поблизости)(?:\s+со\s+мной)?|"
+    r"(?:кафе|ресторан\w*|кофейн\w*|аптек\w*|отел\w*|гостиниц\w*)\s+(?:рядом|поблизости)(?:\s+со\s+мной)?|"
+    r"(?:where\s+to\s+eat|restaurant|cafe|hotel|pharmacy)\s+near\s+me"
+    r")\s*[?!.…]*$",
+    re.I,
+)
 _CITY_TIMEZONES = {
     "москве": ("Москве", "Europe/Moscow"), "москва": ("Москве", "Europe/Moscow"), "москвы": ("Москве", "Europe/Moscow"),
     "санкт-петербурге": ("Санкт-Петербурге", "Europe/Moscow"), "петербурге": ("Санкт-Петербурге", "Europe/Moscow"), "спб": ("Санкт-Петербурге", "Europe/Moscow"),
@@ -174,6 +182,8 @@ def utility_reply(user_text: str) -> UtilityReply | None:
     if identity is not None: return UtilityReply(identity, "identity")
     if _GREETING_RU.fullmatch(text): return UtilityReply("Привет! Чем могу помочь?", "greeting")
     if _GREETING_EN.fullmatch(text): return UtilityReply("Hello! How can I help?", "greeting")
+    if _LOCATION_REQUIRED_RE.fullmatch(text):
+        return UtilityReply("Напишите город, район, метро или ориентир — тогда смогу найти варианты рядом.", "location_clarification")
     calculator = _calculator_reply(text)
     if calculator is not None: return calculator
     conversion = _conversion_reply(text)
