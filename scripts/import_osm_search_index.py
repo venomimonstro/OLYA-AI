@@ -44,12 +44,16 @@ def first_coord(geometry):
 
 
 def infer_city(tags, lat, lon):
-    explicit = str(tags.get('addr:city') or tags.get('addr:place') or tags.get('is_in:city') or '').strip()
-    if explicit: return explicit[:180]
-    if lat is None or lon is None: return ''
-    for city, min_lat, max_lat, min_lon, max_lon in CITY_BOXES:
-        if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon: return city
-    return ''
+    # addr:place is frequently a district/village/neighbourhood inside a large
+    # city. Prefer explicit city tags, then coordinate inference, and use
+    # addr:place only as a last resort so Moscow POIs are not silently excluded
+    # from Moscow searches.
+    explicit_city = str(tags.get('addr:city') or tags.get('is_in:city') or '').strip()
+    if explicit_city: return explicit_city[:180]
+    if lat is not None and lon is not None:
+        for city, min_lat, max_lat, min_lon, max_lon in CITY_BOXES:
+            if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon: return city
+    return str(tags.get('addr:place') or '').strip()[:180]
 
 
 def canonical_category(tags):
