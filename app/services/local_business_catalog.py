@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from app.services.local_business_index import discover_local_businesses, local_index_stats
 from app.services.public_maps_discovery import MapPlace
 from app.services.response_strategy import normalized_question
 
@@ -122,7 +123,7 @@ def _score_row(row: sqlite3.Row, *, categories: tuple[str, ...], keywords: tuple
     return score
 
 
-def search_local_catalog(question: str, *, path: Path | str = _DEFAULT_PATH, limit: int = 12) -> list[MapPlace]:
+def _legacy_search(question: str, *, path: Path | str, limit: int) -> list[MapPlace]:
     db_path = Path(path)
     if not db_path.is_file() or db_path.stat().st_size < 4096:
         return []
@@ -148,32 +149,26 @@ def search_local_catalog(question: str, *, path: Path | str = _DEFAULT_PATH, lim
                 keyword_clauses.append('(name_norm LIKE ? OR search_text LIKE ?)')
                 params.extend((f'%{keyword}%', f'%{keyword}%'))
             where.append('(' + ' OR '.join(keyword_clauses) + ')')
-        query = (
+        rows = list(connection.execute(
             'SELECT osm_type, osm_id, name, category, address, phone, website, search_text '
-            'FROM businesses WHERE ' + ' AND '.join(where) + ' LIMIT 250'
-        )
-        rows = list(connection.execute(query, params))
+            'FROM businesses WHERE ' + ' AND '.join(where) + ' LIMIT 250',
+            params,
+        ))
     except sqlite3.Error:
         return []
     finally:
         if connection is not None:
-            try:
-                connection.close()
-            except Exception:
-                pass
+            connection.close()
 
     ranked = sorted(rows, key=lambda row: _score_row(row, categories=categories, keywords=keywords), reverse=True)
     result: list[MapPlace] = []
     seen: set[str] = set()
     for row in ranked:
         name = ' '.join(str(row['name'] or '').split()).strip()
-        if len(name) < 2:
-            continue
         osm_type = str(row['osm_type'] or '')
         osm_id = str(row['osm_id'] or '')
-        if osm_type not in {'node', 'way', 'relation'} or not osm_id.isdigit():
+        if len(name) < 2 or osm_type not in {'node', 'way', 'relation'} or not osm_id.isdigit():
             continue
-        card_url = f'https://www.openstreetmap.org/{osm_type}/{osm_id}'
         key = name.casefold()
         if key in seen:
             continue
@@ -181,27 +176,51 @@ def search_local_catalog(question: str, *, path: Path | str = _DEFAULT_PATH, lim
         website = str(row['website'] or '').strip()
         if website and not urlsplit(website).scheme:
             website = 'https://' + website.lstrip('/')
-        # Provider stays "osm" so the existing entity renderer treats the
-        # persistent snapshot exactly like live OSM evidence, while runtime I/O
-        # remains fully local.
+        card_url = f'https://www.openstreetmap.org/{osm_type}/{osm_id}'
         result.append(MapPlace(
-            provider='osm',
-            name=name[:140],
-            card_url=card_url,
-            address=str(row['address'] or '')[:220],
-            phone=str(row['phone'] or '')[:80],
-            website=website[:500],
-            source_url=card_url,
+            provider='osm', name=name[:140], card_url=card_url,
+            address=str(row['address'] or '')[:220], phone=str(row['phone'] or '')[:80],
+            website=website[:500], source_url=card_url,
         ))
         if len(result) >= max(1, limit):
             break
     return result
 
 
+def search_local_catalog(question: str, *, path: Path | str = _DEFAULT_PATH, limit: int = 12) -> list[MapPlace]:
+    """Search the unified FTS/RTree core first, legacy snapshot second.
+
+    This keeps existing deployments working during migration while making
+    /app/data/olya_search.db the canonical low-RAM search backend.
+    """
+    try:
+        rows = discover_local_businesses(question, limit=limit)
+    except Exception:
+        rows = []
+    if rows:
+        return rows
+    return _legacy_search(question, path=path, limit=limit)
+
+
 def catalog_status(*, path: Path | str = _DEFAULT_PATH) -> dict[str, object]:
+    try:
+        unified = local_index_stats()
+    except Exception:
+        unified = {'businesses': 0, 'pages': 0, 'queued': 0, 'path': '/app/data/olya_search.db'}
+    if int(unified.get('businesses') or 0) > 0:
+        return {
+            'ready': True,
+            'path': str(unified.get('path') or ''),
+            'businesses': int(unified.get('businesses') or 0),
+            'pages': int(unified.get('pages') or 0),
+            'queued': int(unified.get('queued') or 0),
+            'backend': 'sqlite_fts5_rtree',
+            'updated_at': '',
+        }
+
     db_path = Path(path)
     if not db_path.is_file():
-        return {'ready': False, 'path': str(db_path), 'businesses': 0, 'cities': 0, 'updated_at': ''}
+        return {'ready': False, 'path': str(db_path), 'businesses': 0, 'cities': 0, 'updated_at': '', 'backend': 'legacy'}
     connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True, timeout=1.0)
@@ -210,11 +229,8 @@ def catalog_status(*, path: Path | str = _DEFAULT_PATH) -> dict[str, object]:
         row = connection.execute("SELECT value FROM metadata WHERE key='updated_at'").fetchone()
         updated_at = str(row[0]) if row else ''
     except sqlite3.Error:
-        return {'ready': False, 'path': str(db_path), 'businesses': 0, 'cities': 0, 'updated_at': ''}
+        return {'ready': False, 'path': str(db_path), 'businesses': 0, 'cities': 0, 'updated_at': '', 'backend': 'legacy'}
     finally:
         if connection is not None:
-            try:
-                connection.close()
-            except Exception:
-                pass
-    return {'ready': businesses > 0, 'path': str(db_path), 'businesses': businesses, 'cities': cities, 'updated_at': updated_at}
+            connection.close()
+    return {'ready': businesses > 0, 'path': str(db_path), 'businesses': businesses, 'cities': cities, 'updated_at': updated_at, 'backend': 'legacy'}
