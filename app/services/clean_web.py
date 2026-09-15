@@ -27,6 +27,12 @@ _DEEP_WEB_RE = re.compile(
     r"deep research|research|compare|analysis|review)",
     re.I,
 )
+_ADVICE_WEB_RE = re.compile(
+    r"(?:\bчто\s+нужно\s+знать\s+чтобы\b|\bкак\s+(?:лучше|правильно|чаще)\b|"
+    r"\bсовет\w*\b|\bрекомендац\w*\b|\bчто\s+делать\s+чтобы\b|"
+    r"\bhow\s+to\b|\badvice\b|\brecommend\w*\b)",
+    re.I,
+)
 _CYR = re.compile(r"[А-Яа-яЁё]")
 
 
@@ -121,7 +127,15 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
             "snippet": snippet,
         })
 
-    need_pages = bool(deep or _DEEP_WEB_RE.search(question or "") or _URL_RE.search(question or ""))
+    # Current one-line facts stay on snippets/structured providers. Advice,
+    # analysis, explicit URLs and Deep mode read up to three top pages in
+    # parallel, then keep only compact lexical excerpts for synthesis.
+    need_pages = bool(
+        deep
+        or _DEEP_WEB_RE.search(question or "")
+        or _ADVICE_WEB_RE.search(question or "")
+        or _URL_RE.search(question or "")
+    )
     if need_pages and unique:
         async def fetch_one(index: int, hit):
             try:
