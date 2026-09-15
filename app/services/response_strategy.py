@@ -5,8 +5,7 @@ import re
 _URL_RE = re.compile(r"https?://|www\.", re.I)
 _LEADING_FILLER_RE = re.compile(
     r"^\s*(?:(?:подскажи(?:те)?|скажи(?:те)?|слушай(?:те)?|можешь\s+подсказать|можете\s+подсказать|"
-    r"пожалуйста|please|tell\s+me|can\s+you\s+tell\s+me)\s*(?:,|:|-)?\s*)+",
-    re.I,
+    r"пожалуйста|please|tell\s+me|can\s+you\s+tell\s+me)\s*(?:,|:|-)?\s*)+", re.I,
 )
 _FRESH_RE = re.compile(
     r"(?:\bсейчас\b|\bщас\b|\bсегодня\b|\bвчера\b|\bзавтра\b|\bпоследн\w*\b|\bактуальн\w*\b|"
@@ -92,6 +91,12 @@ _ANALYTIC_RE = re.compile(
     r"(?:подробн\w*|проанализир\w*|сравни\w*|стратег\w*|архитектур\w*|аудит\w*|исследован\w*|"
     r"план\s+реализац\w*|разработай\w*|analy[sz]e|compare|strategy|audit|research)", re.I,
 )
+_EXPANSIVE_RE = re.compile(
+    r"(?:\bи\s+(?:как|почему|зачем|когда|где|что)\b|\bкак\s+(?:использовать|применять|настроить|сделать|выбрать|начать)\b|"
+    r"\bпочему\b|\bплюс\w*\b|\bминус\w*\b|\bпреимуществ\w*\b|\bнедостат\w*\b|\bпример\w*\b|"
+    r"\bвариант\w*\b|\bэтап\w*\b|\bшаг\w*\b|\bрекомендац\w*\b|\bпосовет\w*\b|"
+    r"\band\s+(?:how|why|when|where|what)\b|\bhow\s+to\b|\bpros?\b|\bcons?\b|\bexamples?\b|\brecommend\w*\b)", re.I,
+)
 
 
 def normalized_question(text: str) -> str:
@@ -104,51 +109,36 @@ def normalized_question(text: str) -> str:
 
 
 def _transform_payload_present(text: str) -> bool:
-    raw = str(text or "")
-    normalized = normalized_question(raw)
-    if not _TRANSFORM_RE.search(normalized):
-        return False
-    if "```" in raw and len(raw) >= 30:
-        return True
+    raw = str(text or ""); normalized = normalized_question(raw)
+    if not _TRANSFORM_RE.search(normalized): return False
+    if "```" in raw and len(raw) >= 30: return True
     for sep in ("\n", ":"):
-        if sep in raw and len(raw.split(sep, 1)[1].strip()) >= 8:
-            return True
+        if sep in raw and len(raw.split(sep, 1)[1].strip()) >= 8: return True
     return False
 
 
 def _has_self_contained_payload(text: str) -> bool:
     raw = str(text or "")
-    if _transform_payload_present(raw):
-        return True
-    if "```" in raw and len(raw) >= 80:
-        return True
-    if "\n" in raw and len(raw.split("\n", 1)[1].strip()) >= 60:
-        return True
-    if ":" in raw and len(raw.split(":", 1)[1].strip()) >= 60:
-        return True
+    if _transform_payload_present(raw): return True
+    if "```" in raw and len(raw) >= 80: return True
+    if "\n" in raw and len(raw.split("\n", 1)[1].strip()) >= 60: return True
+    if ":" in raw and len(raw.split(":", 1)[1].strip()) >= 60: return True
     return False
 
 
 def requires_fresh_data(text: str) -> bool:
     value = normalized_question(text)
-    if not value:
-        return False
-    if _TRANSFORM_RE.search(value) and _has_self_contained_payload(text) and not _URL_RE.search(value):
-        return False
+    if not value: return False
+    if _TRANSFORM_RE.search(value) and _has_self_contained_payload(text) and not _URL_RE.search(value): return False
     if (
-        _STABLE_EXPLANATION_RE.search(value)
-        and not _EXPLICIT_RECENCY_RE.search(value)
-        and not _CURRENT_ROLE_RE.search(value)
-        and not _DYNAMIC_LOOKUP_RE.search(value)
-        and not _SHOPPING_LOOKUP_RE.search(value)
-        and not _LOCAL_LOOKUP_RE.search(value)
-        and not _REGULATED_LOOKUP_RE.search(value)
-    ):
-        return False
+        _STABLE_EXPLANATION_RE.search(value) and not _EXPLICIT_RECENCY_RE.search(value) and not _CURRENT_ROLE_RE.search(value)
+        and not _DYNAMIC_LOOKUP_RE.search(value) and not _SHOPPING_LOOKUP_RE.search(value)
+        and not _LOCAL_LOOKUP_RE.search(value) and not _REGULATED_LOOKUP_RE.search(value)
+    ): return False
     return bool(
-        _URL_RE.search(value) or _FRESH_RE.search(value) or _CURRENT_ROLE_RE.search(value) or
-        _DYNAMIC_LOOKUP_RE.search(value) or _SHOPPING_LOOKUP_RE.search(value) or
-        _LOCAL_LOOKUP_RE.search(value) or _REGULATED_LOOKUP_RE.search(value)
+        _URL_RE.search(value) or _FRESH_RE.search(value) or _CURRENT_ROLE_RE.search(value)
+        or _DYNAMIC_LOOKUP_RE.search(value) or _SHOPPING_LOOKUP_RE.search(value)
+        or _LOCAL_LOOKUP_RE.search(value) or _REGULATED_LOOKUP_RE.search(value)
     )
 
 
@@ -158,15 +148,11 @@ def requires_memory_context(text: str) -> bool:
 
 def requires_conversation_context(text: str) -> bool:
     value = normalized_question(text)
-    if not value:
-        return False
-    if _MEMORY_REFERENCE_RE.search(value):
-        return True
-    if len(value) <= 120 and _SHORT_FOLLOWUP_RE.search(value):
-        return True
+    if not value: return False
+    if _MEMORY_REFERENCE_RE.search(value): return True
+    if len(value) <= 120 and _SHORT_FOLLOWUP_RE.search(value): return True
     matched = bool(_CONTEXT_RE.search(value))
-    if matched and _has_self_contained_payload(text):
-        return False
+    if matched and _has_self_contained_payload(text): return False
     return matched
 
 
@@ -176,25 +162,23 @@ def mentions_workspace_context(text: str) -> bool:
 
 def is_atomic_knowledge_question(text: str) -> bool:
     value = normalized_question(text)
-    if not value or len(value) > 240:
-        return False
-    if requires_fresh_data(value) or _URL_RE.search(value) or _ANALYTIC_RE.search(value):
-        return False
-    if requires_conversation_context(value) or requires_memory_context(value) or mentions_workspace_context(value):
-        return False
+    if not value or len(value) > 240: return False
+    if requires_fresh_data(value) or _URL_RE.search(value) or _ANALYTIC_RE.search(value) or _EXPANSIVE_RE.search(value): return False
+    if requires_conversation_context(value) or requires_memory_context(value) or mentions_workspace_context(value): return False
     return bool(_ATOMIC_RE.search(value))
 
 
 def is_independent_fast_question(text: str) -> bool:
     value = normalized_question(text)
-    if not value or len(value) > 420:
-        return False
-    return not (requires_conversation_context(value) or requires_memory_context(value) or mentions_workspace_context(value) or _ANALYTIC_RE.search(value) or _URL_RE.search(value))
+    if not value or len(value) > 420: return False
+    return not (
+        requires_conversation_context(value) or requires_memory_context(value) or mentions_workspace_context(value)
+        or _ANALYTIC_RE.search(value) or _EXPANSIVE_RE.search(value) or _URL_RE.search(value)
+    )
 
 
 def atomic_output_cap(text: str) -> int | None:
-    if not is_atomic_knowledge_question(text):
-        return None
+    if not is_atomic_knowledge_question(text): return None
     value = normalized_question(text)
     if re.match(r"^(?:кто\s+(?:написал|автор)|какая\s+столица|какой\s+столицей|when\s+was|what\s+is\s+the\s+capital|who\s+wrote)", value):
         return 96
