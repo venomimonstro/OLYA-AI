@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-_MARKER = "OLYA_RECOVERY_CONTROLS_V4"
+_MARKER = "OLYA_RECOVERY_CONTROLS_V5"
 
 
 def _nonce(document: str) -> str:
@@ -14,10 +14,18 @@ def enhance_recovery_controls(document: str) -> str:
     """Separate send/cancel, compact turn actions and a low-overhead thinking indicator."""
     if _MARKER in document or 'id="messages"' not in document or 'id="send"' not in document:
         return document
+
+    # Premium streaming used to re-parse and rebuild the whole accumulated
+    # Markdown roughly every 28 ms. That is visually unnecessary and can make
+    # long answers freeze the browser. Keep streaming smooth at ~11 FPS and let
+    # the normal final render produce the exact final Markdown once.
+    document = document.replace("now-run.lastPaint>=28", "now-run.lastPaint>=90")
+    document = document.replace("await new Promise(r=>setTimeout(r,18))", "await new Promise(r=>setTimeout(r,45))")
+
     nonce = _nonce(document)
     nonce_attr = f' nonce="{nonce}"' if nonce else ""
     css = r'''
-/* OLYA_RECOVERY_CONTROLS_V4 */
+/* OLYA_RECOVERY_CONTROLS_V5 */
 .olya-turn-actions{display:flex;gap:3px;margin:5px 0 0;opacity:.66;align-items:center}
 .olya-turn-action{width:28px;height:28px;border:0;background:transparent;color:#777;font:16px/1 system-ui;padding:0;border-radius:8px;cursor:pointer;display:grid;place-items:center}
 .olya-turn-action:hover{background:#f0f0f2;color:#222}.olya-turn-action:focus-visible{outline:2px solid #aaa}
