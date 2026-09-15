@@ -10,7 +10,7 @@ URL="https://2gis.ru/moscow/search/%D0%90%D0%B2%D1%82%D0%BE%D1%81%D0%B5%D1%80%D0
 echo "[1/4] Building isolated parser-2gis image..."
 docker compose -f docker-compose.2gis.yml --profile 2gis build parser-2gis
 
-echo "[2/4] Parsing Moscow autoservices into data/2gis/moscow_autoservices.json..."
+echo "[2/4] Parsing up to 50 Moscow autoservices into data/2gis/moscow_autoservices.json..."
 rm -f data/2gis/moscow_autoservices.json
 docker compose -f docker-compose.2gis.yml --profile 2gis run --rm parser-2gis \
   -i "$URL" \
@@ -23,7 +23,7 @@ docker compose -f docker-compose.2gis.yml --profile 2gis run --rm parser-2gis \
   --chrome.memory-limit 1200 \
   --parser.use-gc yes \
   --parser.gc-pages-interval 5 \
-  --parser.max-records 500 \
+  --parser.max-records 50 \
   --parser.delay_between_clicks 50 \
   --writer.verbose yes
 
