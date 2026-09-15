@@ -17,7 +17,7 @@ _WEB_RE = re.compile(
     r"\bцена\w*\b|\bстоимост\w*\b|\bкурс\w*\b|\bпогод\w*\b|\bрасписан\w*\b|"
     r"\bваканси\w*\b|\bотзыв\w*\b|\bрейтинг\w*\b|\bнайди\b|\bпоищи\b|"
     r"в интернете|в сети|проверь сайт|проанализируй сайт|\bлучши\w*\b|"
-    r"\bчто\s+нужно\s+знать\s+чтобы\b|\bсовет\w*\b|\bрекомендац\w*\b|"
+    r"\bчто\s+нужно\s+знать\s*,?\s+(?:чтобы|перед)\b|\bсовет\w*\b|\bрекомендац\w*\b|"
     r"\bnow\b|\btoday\b|\blatest\b|\bcurrent\b|\bnews\b|\bprice\w*\b|"
     r"\bweather\b|\bschedule\b|\breviews?\b|\brating\b|\bsearch\b|\bfind\b|\brecommend\w*\b)",
     re.I,
@@ -28,8 +28,8 @@ _DEEP_WEB_RE = re.compile(
     re.I,
 )
 _ADVICE_WEB_RE = re.compile(
-    r"(?:\bчто\s+нужно\s+знать\s+чтобы\b|\bкак\s+(?:лучше|правильно|чаще)\b|"
-    r"\bсовет\w*\b|\bрекомендац\w*\b|\bчто\s+делать\s+чтобы\b|"
+    r"(?:\bчто\s+нужно\s+знать\s*,?\s+(?:чтобы|перед)\b|\bкак\s+(?:лучше|правильно|чаще)\b|"
+    r"\bлучши\w*\b|\bсовет\w*\b|\bрекомендац\w*\b|\bчто\s+делать\s*,?\s+чтобы\b|"
     r"\bhow\s+to\b|\badvice\b|\brecommend\w*\b)",
     re.I,
 )
@@ -135,15 +135,7 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
             "snippet": snippet,
         })
 
-    # Current one-line facts stay on snippets/structured providers. Advice,
-    # analysis, explicit URLs and Deep mode read up to three top pages in
-    # parallel, then keep only compact lexical excerpts for synthesis.
-    need_pages = bool(
-        deep
-        or _DEEP_WEB_RE.search(question or "")
-        or advice
-        or _URL_RE.search(question or "")
-    )
+    need_pages = bool(deep or _DEEP_WEB_RE.search(question or "") or advice or _URL_RE.search(question or ""))
     if need_pages and unique:
         async def fetch_one(index: int, hit):
             try:
