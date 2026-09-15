@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
+from time import monotonic
 from urllib.parse import urlsplit
 
 from app.schemas.chat import ChatMessage
@@ -17,8 +18,6 @@ _TRANSFORM_RE = re.compile(
     r"translate|rewrite|shorten|proofread|edit|improve)\b",
     re.I,
 )
-# Discovery intent only. Time-sensitive facts are classified exclusively by
-# response_strategy.requires_fresh_data(), avoiding duplicated regex decisions.
 _WEB_RE = re.compile(
     r"(?:\bваканси\w*\b|\bотзыв\w*\b|\bрейтинг\w*\b|\bнайди\b|\bпоищи\b|"
     r"в интернете|в сети|проверь сайт|проанализируй сайт|\bлучши\w*\b|"
@@ -38,6 +37,15 @@ _ADVICE_WEB_RE = re.compile(
     re.I,
 )
 _CYR = re.compile(r"[А-Яа-яЁё]")
+_PRIVATE_CACHE_RE = re.compile(
+    r"(?:\b(?:мой|моя|мо[её]|мои|наш|наша|наше|наши|my|our)\b|"
+    r"[\w.+-]+@[\w.-]+\.[a-z]{2,}|(?:\+?\d[\d\s()\-]{8,}\d))",
+    re.I,
+)
+_CACHE_FRESH_TTL = 45.0
+_CACHE_STABLE_TTL = 300.0
+_CACHE_MAX_ENTRIES = 128
+_WEB_CACHE: dict[str, tuple[float, "CleanWebResult"]] = {}
 
 
 @dataclass
@@ -49,11 +57,13 @@ class CleanWebResult:
     fetched: int = 0
     failed_fetches: int = 0
     warning: str = ""
+    cache_hit: bool = False
 
     def public_metadata(self) -> dict:
         return {
             "kind": "web_research" if self.used else "direct",
             "web_used": self.used,
+            "web_cache_hit": self.cache_hit,
             "searched_results": self.searched,
             "fetched_sources": self.fetched,
             "failed_fetches": self.failed_fetches,
@@ -96,9 +106,62 @@ def _clean(text: str, limit: int) -> str:
     return value if len(value) <= limit else value[: limit - 1].rstrip() + "…"
 
 
+def _clone_result(source: CleanWebResult, *, cache_hit: bool) -> CleanWebResult:
+    return CleanWebResult(
+        used=source.used,
+        context_messages=[ChatMessage(role=item.role, content=item.content) for item in source.context_messages],
+        sources=[dict(item) for item in source.sources],
+        searched=source.searched,
+        fetched=source.fetched,
+        failed_fetches=source.failed_fetches,
+        warning=source.warning,
+        cache_hit=cache_hit,
+    )
+
+
+def _cache_key(question: str, web_mode: str, deep: bool) -> str | None:
+    raw = str(question or "").strip()
+    if web_mode != "auto" or not raw or len(raw) > 240 or _URL_RE.search(raw) or _PRIVATE_CACHE_RE.search(raw):
+        return None
+    value = normalized_question(raw)
+    value = re.sub(r"[^\w\s$€£₽₺₸%./:+-]+", " ", value, flags=re.UNICODE)
+    value = " ".join(value.split())
+    if len(value) < 4:
+        return None
+    return f"{'deep' if deep else 'normal'}:{value}"
+
+
+def _cache_get(key: str | None, ttl: float) -> CleanWebResult | None:
+    if key is None:
+        return None
+    row = _WEB_CACHE.get(key)
+    if row is None:
+        return None
+    created, result = row
+    if monotonic() - created > ttl:
+        _WEB_CACHE.pop(key, None)
+        return None
+    return _clone_result(result, cache_hit=True)
+
+
+def _cache_put(key: str | None, result: CleanWebResult) -> None:
+    if key is None or result.warning or not result.sources:
+        return
+    _WEB_CACHE[key] = (monotonic(), _clone_result(result, cache_hit=False))
+    if len(_WEB_CACHE) > _CACHE_MAX_ENTRIES:
+        oldest = min(_WEB_CACHE.items(), key=lambda item: item[1][0])[0]
+        _WEB_CACHE.pop(oldest, None)
+
+
 async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode: str, deep: bool = False) -> CleanWebResult:
     if not should_use_web(question, web_mode):
         return CleanWebResult()
+
+    key = _cache_key(question, web_mode, deep)
+    ttl = _CACHE_FRESH_TTL if requires_fresh_data(question) else _CACHE_STABLE_TTL
+    cached = _cache_get(key, ttl)
+    if cached is not None:
+        return cached
 
     language = "ru" if len(_CYR.findall(question or "")) >= 2 else "en"
     result = CleanWebResult(used=True)
@@ -121,10 +184,10 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
     unique = []
     seen: set[str] = set()
     for hit in hits:
-        key = canonical_result_url(hit.url)
-        if not key or key in seen:
+        canonical = canonical_result_url(hit.url)
+        if not canonical or canonical in seen:
             continue
-        seen.add(key)
+        seen.add(canonical)
         unique.append(hit)
         if len(unique) >= 5:
             break
@@ -176,4 +239,5 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
     if not unique:
         result.warning = "Поиск не вернул релевантных результатов; актуальные факты не подтверждены."
     result.context_messages = [ChatMessage(role="system", content="\n\n".join(blocks)[:4200])]
+    _cache_put(key, result)
     return result
