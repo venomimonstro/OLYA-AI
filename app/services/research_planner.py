@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.services.freshness import classify_freshness
+from app.services.local_business_search import is_local_business_question
 
 
 @dataclass(frozen=True)
@@ -31,8 +32,6 @@ def _software_queries(clean: str) -> list[str]:
     )
     primary = next((query for markers, query in official if any(marker in value for marker in markers)), "")
     if primary:
-        # Primary source first, then the user's natural wording for an independent
-        # cross-check. Keep a third changelog query only for deeper research.
         return [primary, clean, f"{clean} changelog"]
     return [clean, f"{clean} official release", f"{clean} changelog"]
 
@@ -65,6 +64,20 @@ def plan_research(question: str, *, intent: str = "general", location: str | Non
             freshness_reason="Локальные компании, репутация, специалисты, цены и доступность требуют актуальной проверки.",
             freshness_max_age_seconds=6 * 60 * 60,
             freshness_min_independent_hosts=2,
+        )
+
+    # The browser's automatic research preflight must not duplicate or block the
+    # dedicated local-business pipeline in smart_chat. Returning stable here
+    # makes auto mode skip legacy discover/collect and send the request directly
+    # to /v1/chat, where structured map/catalog discovery is authoritative.
+    if intent == "general" and is_local_business_question(clean):
+        return ResearchPlan(
+            intent="general",
+            queries=[clean],
+            freshness="stable",
+            source_mix=["maps_catalog", "directories", "official"],
+            freshness_category="stable",
+            freshness_reason="Локальный бизнес обрабатывается специализированным маршрутом чата.",
         )
 
     verdict = classify_freshness(clean)
