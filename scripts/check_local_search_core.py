@@ -22,6 +22,8 @@ def main() -> int:
     for index, row in enumerate(rows, 1):
         print(f'{index}. {row.name}')
         print('   provider:', row.provider)
+        print('   rating:', row.rating if row.rating is not None else '-')
+        print('   reviews:', row.reviews if row.reviews is not None else '-')
         print('   address:', row.address or '-')
         print('   phone:', row.phone or '-')
         print('   website:', row.website or '-')
