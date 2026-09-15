@@ -23,7 +23,13 @@ _GENERIC_TITLE = re.compile(
     r"официальный\s*сайт|отзывы|адрес|телефон|москва|moscow)\b",
     re.I,
 )
+_WORD = re.compile(r"[a-zа-яё0-9]+", re.I)
 _SPACE = re.compile(r"\s+")
+_STOP = {
+    "лучшие", "лучший", "лучших", "топ", "рейтинг", "найди", "подбери", "посоветуй",
+    "компания", "компании", "компаний", "центр", "центры", "центров", "клиника", "клиники",
+    "в", "во", "на", "рядом", "поблизости", "москва", "москве", "москвы",
+}
 
 
 @dataclass(frozen=True)
@@ -49,14 +55,13 @@ def _kind(url: str) -> str:
         return "yandex_maps"
     if host.endswith("2gis.ru"):
         return "2gis"
-    if host.endswith("google.com") and path.startswith("/maps"):
+    if (host.endswith("google.com") and path.startswith("/maps")) or host == "maps.google.com":
         return "google_maps"
     return "web"
 
 
 def _clean_title(value: str) -> str:
     text = _SPACE.sub(" ", str(value or "")).strip(" -–—|·:,.\t\n")
-    # Search result titles often append a map/catalog name after a separator.
     for sep in (" — ", " | ", " - ", " · "):
         if sep in text:
             left, right = text.split(sep, 1)
@@ -66,6 +71,34 @@ def _clean_title(value: str) -> str:
     text = _GENERIC_TITLE.sub(" ", text)
     text = _SPACE.sub(" ", text).strip(" -–—|·:,.\t\n")
     return text[:120]
+
+
+def _stem(value: str) -> str:
+    value = value.casefold()
+    return value[:7] if len(value) >= 7 else value
+
+
+def _query_terms(question: str) -> tuple[str, ...]:
+    terms: list[str] = []
+    for token in _WORD.findall(normalized_question(question)):
+        if len(token) < 4 or token in _STOP or token.isdigit():
+            continue
+        stem = _stem(token)
+        if stem not in terms:
+            terms.append(stem)
+    return tuple(terms[:6])
+
+
+def _relevant(hit: SearchHit, question: str) -> bool:
+    terms = _query_terms(question)
+    if not terms:
+        return True
+    haystack = " ".join((str(hit.title or ""), str(hit.snippet or ""), str(hit.url or ""))).casefold()
+    matches = sum(1 for term in terms if term in haystack)
+    # For map cards a single category/location concept may be enough because the
+    # URL itself is already constrained to a map provider. Ordinary web rows
+    # need stronger lexical agreement.
+    return matches >= (1 if _kind(hit.url) != "web" else min(2, len(terms)))
 
 
 def _entity_key(title: str) -> str:
@@ -94,6 +127,11 @@ def _source_row(hit: SearchHit) -> dict:
     }
 
 
+def _md(label: str, url: str) -> str:
+    safe = str(url or "").replace(")", "%29")
+    return f"[{label}]({safe})"
+
+
 async def _search(discovery, query: str, *, timeout: float = 4.5) -> list[SearchHit]:
     try:
         return await asyncio.wait_for(
@@ -108,9 +146,6 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
     if not is_local_business_question(question):
         return None
 
-    # Map-specific discovery is intentionally parallel and bounded. Direct card
-    # URLs are retained when search engines expose them; otherwise we provide a
-    # clearly labelled active map-search link rather than inventing a card ID.
     queries = (
         question,
         f'site:yandex.ru/maps/org/ {question}',
@@ -123,6 +158,8 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
     seen_urls: set[str] = set()
     for batch in batches:
         for hit in batch:
+            if not _relevant(hit, question):
+                continue
             url = canonical_result_url(hit.url)
             if not url or url in seen_urls:
                 continue
@@ -139,8 +176,6 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
             searched=0,
         )
 
-    # Maps first, then ordinary web results. Never emit a company that has no
-    # concrete search result behind it.
     priority = {"yandex_maps": 0, "2gis": 1, "google_maps": 2, "web": 3}
     hits.sort(key=lambda h: (priority.get(_kind(h.url), 9), int(getattr(h, "rank", 99))))
 
@@ -189,7 +224,7 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
 
     out = [
         "Нашёл подтверждённые варианты по поисковой выдаче и картам. "
-        "Ссылки на карточки даю только там, где поисковик вернул конкретную карточку; иначе — активный поиск на карте."
+        "Конкретную карточку показываю только когда она реально найдена; иначе даю активный поиск по названию на карте."
     ]
     for index, row in enumerate(rows, start=1):
         name = row["name"]
@@ -198,19 +233,14 @@ async def resolve_local_business(question: str, discovery) -> LocalBusinessResul
         if row["snippet"]:
             out.append(row["snippet"])
         if row["web"]:
-            out.append(f"Сайт/источник: {row['web']}")
-        out.append(
-            "Яндекс Карты: " + (row["yandex_maps"] or fallback["yandex_search"])
-            + ("" if row["yandex_maps"] else " (поиск на карте)")
-        )
-        out.append(
-            "Google Maps: " + (row["google_maps"] or fallback["google_search"])
-            + ("" if row["google_maps"] else " (поиск на карте)")
-        )
-        out.append(
-            "2ГИС: " + (row["2gis"] or fallback["twogis_search"])
-            + ("" if row["2gis"] else " (поиск на карте)")
-        )
+            out.append("Сайт/источник: " + _md("открыть", row["web"]))
 
-    out.append("\nРейтинг и число отзывов не указываю, если они не подтверждены в найденной карточке/сниппете.")
+        yandex_url = row["yandex_maps"] or fallback["yandex_search"]
+        google_url = row["google_maps"] or fallback["google_search"]
+        twogis_url = row["2gis"] or fallback["twogis_search"]
+        out.append("Яндекс Карты: " + _md("карточка" if row["yandex_maps"] else "поиск на карте", yandex_url))
+        out.append("Google Maps: " + _md("карточка" if row["google_maps"] else "поиск на карте", google_url))
+        out.append("2ГИС: " + _md("карточка" if row["2gis"] else "поиск на карте", twogis_url))
+
+    out.append("\nРейтинг и число отзывов не указываю, если они не подтверждены найденной карточкой или сниппетом.")
     return LocalBusinessResult(text="\n".join(out), sources=source_rows[:10], searched=len(source_rows))
