@@ -16,21 +16,21 @@ from app.services.task_solver import TaskExecution, TaskSolvePlan
 _CBR_XML_URL = "https://www.cbr.ru/scripts/XML_daily.asp"
 _CBR_HTML_URL = "https://www.cbr.ru/currency_base/daily/"
 _CYR = re.compile(r"[А-Яа-яЁё]")
-_RUBLE = re.compile(r"\b(?:rub|руб(?:л(?:ь|я|ей|ю|ем|и|ях|ями)|\.?|ля|лей)?|₽)\b", re.I)
+_RUBLE = re.compile(r"(?:\brub\b|\bруб(?:л(?:ь|я|ей|ю|ем|и|ях|ями)|\.?|ля|лей)?\b|₽)", re.I)
 _RATE = re.compile(r"\b(?:курс|сколько\s+стоит|цена|exchange\s+rate|rate|стоимост)\w*", re.I)
 _ROW = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.I | re.S)
 _CELL = re.compile(r"<td\b[^>]*>(.*?)</td>", re.I | re.S)
 _TAG = re.compile(r"<[^>]+>")
 
 _CURRENCY_PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
-    ("USD", "доллар США", re.compile(r"\b(?:usd|доллар(?:а|ов|у|ом|ы|е|ах|ами)?|долл(?:ар)?\.?)\b", re.I)),
-    ("EUR", "евро", re.compile(r"\b(?:eur|евро)\b", re.I)),
+    ("USD", "доллар США", re.compile(r"(?:\busd\b|\bдоллар(?:а|ов|у|ом|ы|е|ах|ами)?\b|\bдолл(?:ар)?\b|\$)", re.I)),
+    ("EUR", "евро", re.compile(r"(?:\beur\b|\bевро\b|€)", re.I)),
     ("CNY", "китайский юань", re.compile(r"\b(?:cny|юан(?:ь|я|ей|ю|ем|и|ях|ями)?)\b", re.I)),
-    ("GBP", "британский фунт", re.compile(r"\b(?:gbp|фунт(?:а|ов|у|ом|ы|е|ах|ами)?)\b", re.I)),
+    ("GBP", "британский фунт", re.compile(r"(?:\bgbp\b|\bфунт(?:а|ов|у|ом|ы|е|ах|ами)?\b|£)", re.I)),
     ("JPY", "японская иена", re.compile(r"\b(?:jpy|иен(?:а|ы|у|ой|е|ах|ами))\b", re.I)),
     ("CHF", "швейцарский франк", re.compile(r"\b(?:chf|франк(?:а|ов|у|ом|и|е|ах|ами)?)\b", re.I)),
-    ("TRY", "турецкая лира", re.compile(r"\b(?:try|лир(?:а|ы|у|ой|е|ах|ами))\b", re.I)),
-    ("KZT", "казахстанский тенге", re.compile(r"\b(?:kzt|тенге)\b", re.I)),
+    ("TRY", "турецкая лира", re.compile(r"(?:\btry\b|\bлир(?:а|ы|у|ой|е|ах|ами)\b|₺)", re.I)),
+    ("KZT", "казахстанский тенге", re.compile(r"(?:\bkzt\b|\bтенге\b|₸)", re.I)),
 )
 
 _MONTHS_RU = (
@@ -62,12 +62,15 @@ def _decimal(text: str) -> Decimal:
     return Decimal(str(text or "").strip().replace("\xa0", "").replace(" ", "").replace(",", "."))
 
 
-def _amount_before(text: str, pattern: re.Pattern[str]) -> Decimal | None:
+def _amount_near(text: str, pattern: re.Pattern[str]) -> Decimal | None:
     match = pattern.search(text)
     if match is None:
         return None
     prefix = text[:match.start()]
+    suffix = text[match.end():]
     number = re.search(r"([+-]?\d[\d\s]*(?:[.,]\d+)?)\s*$", prefix)
+    if number is None:
+        number = re.match(r"^\s*([+-]?\d[\d\s]*(?:[.,]\d+)?)", suffix)
     if number is None:
         return None
     try:
@@ -80,10 +83,10 @@ def _amount_before(text: str, pattern: re.Pattern[str]) -> Decimal | None:
 def _currency_amounts(question: str) -> tuple[dict[str, Decimal], Decimal | None]:
     foreign: dict[str, Decimal] = {}
     for code, _name, pattern in _CURRENCY_PATTERNS:
-        amount = _amount_before(question, pattern)
+        amount = _amount_near(question, pattern)
         if amount is not None:
             foreign[code] = amount
-    return foreign, _amount_before(question, _RUBLE)
+    return foreign, _amount_near(question, _RUBLE)
 
 
 def _date_ru(value: str) -> str:
