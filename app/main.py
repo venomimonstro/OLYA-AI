@@ -45,6 +45,7 @@ from app.api.routes.sandbox import router as sandbox_router
 from app.api.routes.git import router as git_router
 from app.api.routes.development_chat import router as development_chat_router
 from app.api.routes.operations_analytics import router as operations_router
+from app.api.routes.owned_search import router as owned_search_router
 from app.core.config import get_settings
 from app.db import init_db
 from app.inference.client import LlamaClient
@@ -85,7 +86,7 @@ def _production_configuration_errors(settings) -> list[str]:
     if str(settings.document_render_backend).lower() == "remote":
         token = str(settings.document_render_worker_token or "")
         if not token or token == "change-me-document-worker":
-            errors.append("document_worker_token_is_default")
+            errors.append("document_render_worker_token_is_default")
         if not str(settings.document_render_worker_url or "").startswith("http://"):
             errors.append("document_render_worker_url_invalid")
 
@@ -351,7 +352,7 @@ for router in (
     files_router, conversations_router, usage_router, diagnostics_router, documents_router,
     code_router, images_router, image_editing_router, media_admin_router, runtime_router, development_router,
     engineering_router, execution_router, sandbox_router, git_router, development_chat_router,
-    quality_router, research_router, tasks_router, chat_router,
+    quality_router, research_router, tasks_router, owned_search_router, chat_router,
 ):
     _include_router_eager(router)
 
