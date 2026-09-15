@@ -2,6 +2,8 @@ from dataclasses import dataclass
 import re
 from typing import Literal
 
+from app.services.response_strategy import atomic_output_cap
+
 Mode = Literal["fast", "work", "deep"]
 
 
@@ -80,7 +82,7 @@ def _complexity_score(normalized: str) -> tuple[int, list[str]]:
 
 
 def choose_route(text: str, requested_mode: str, normal_context: int, deep_context: int) -> RouteDecision:
-    """Choose one inference profile; long-form is opt-in and never slows routine chat."""
+    """Choose one inference profile; long-form is opt-in and simple factual questions stay tiny."""
     normalized = text.casefold().strip()
     deep_limit = max(1024, int(deep_context))
     normal_limit = min(max(1024, int(normal_context)), deep_limit)
@@ -88,10 +90,13 @@ def choose_route(text: str, requested_mode: str, normal_context: int, deep_conte
     score, reasons = _complexity_score(normalized)
     high_risk = next((marker for marker in HIGH_RISK_MARKERS if marker in normalized), None)
     long_form = bool(_LONG_FORM_RE.search(normalized))
+    atomic_cap = atomic_output_cap(text) if requested_mode in {"auto", "fast"} else None
     if high_risk:
         score = max(score, 7); reasons.append("high_risk_or_audit")
     if long_form:
         score = max(score, 3); reasons.append("explicit_long_form")
+    if atomic_cap is not None:
+        reasons.append("atomic_knowledge")
 
     if requested_mode == "fast":
         mode: Mode = "fast"; reasons.insert(0, "user_selected_simple")
@@ -106,13 +111,21 @@ def choose_route(text: str, requested_mode: str, normal_context: int, deep_conte
     else:
         mode = "fast"; reasons.insert(0, "auto_simple")
 
-    # Explicit long-form gets a large completion budget, while preserving enough
-    # of the 4K window for the user's brief and the compact OLYA system policy.
     if long_form and starter_4k:
         return RouteDecision(
             mode="work" if mode == "fast" else mode,
             max_context_tokens=deep_limit,
             max_output_tokens=3000,
+            reasoning=False,
+            complexity_score=score,
+            reason=",".join(reasons),
+        )
+
+    if atomic_cap is not None and mode == "fast":
+        return RouteDecision(
+            mode="fast",
+            max_context_tokens=min(normal_limit, 2048),
+            max_output_tokens=atomic_cap,
             reasoning=False,
             complexity_score=score,
             reason=",".join(reasons),
