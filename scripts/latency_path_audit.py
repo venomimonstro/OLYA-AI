@@ -12,6 +12,7 @@ from app.services.response_strategy import (
     is_atomic_knowledge_question,
     is_independent_fast_question,
     requires_fresh_data,
+    requires_memory_context,
 )
 from app.utility_chat import utility_reply
 
@@ -47,13 +48,17 @@ def audit() -> dict:
         errors.append("writer_route_not_latency_bounded")
 
     definition = "Что такое HTTP?"
-    checks["definition"] = {
-        "atomic": is_atomic_knowledge_question(definition),
-        "independent_fast": is_independent_fast_question(definition),
-        "cap": atomic_output_cap(definition),
+    stable_rate_definition = "Что такое курс валют?"
+    checks["definitions"] = {
+        "http_atomic": is_atomic_knowledge_question(definition),
+        "http_cap": atomic_output_cap(definition),
+        "rate_atomic": is_atomic_knowledge_question(stable_rate_definition),
+        "rate_web": should_use_web(stable_rate_definition, "auto"),
     }
     if not is_atomic_knowledge_question(definition) or (atomic_output_cap(definition) or 999) > 180:
         errors.append("definition_not_compact_ai")
+    if not is_atomic_knowledge_question(stable_rate_definition) or should_use_web(stable_rate_definition, "auto"):
+        errors.append("stable_definition_unnecessarily_uses_web")
 
     current_role = "Кто президент США?"
     historical_role = "Кто был первым президентом США?"
@@ -68,7 +73,7 @@ def audit() -> dict:
     if requires_fresh_data(historical_role) or should_use_web(historical_role, "auto"):
         errors.append("historical_role_unnecessarily_fresh")
 
-    chess = "Что нужно знать чтобы часто побеждать в шахматах?"
+    chess = "Что нужно знать, чтобы часто побеждать в шахматах?"
     import app.services.clean_web as clean_web
     advice_reads_pages = bool(clean_web._ADVICE_WEB_RE.search(chess))
     checks["chess_advice"] = {
@@ -80,6 +85,21 @@ def audit() -> dict:
     if not advice_reads_pages:
         errors.append("advice_page_reading_not_enabled")
 
+    memory_question = "Что ты помнишь обо мне?"
+    checks["memory"] = {"requires_memory": requires_memory_context(memory_question)}
+    if not requires_memory_context(memory_question):
+        errors.append("memory_query_not_detected")
+
+    long_form = "Напиши статью не менее 10000 символов про SEO-продвижение интернет-магазина."
+    long_route = choose_route(long_form, "auto", 4096, 4096)
+    checks["long_form"] = {
+        "mode": long_route.mode,
+        "max_output_tokens": long_route.max_output_tokens,
+        "reason": long_route.reason,
+    }
+    if long_route.max_output_tokens < 3000 or "explicit_long_form" not in long_route.reason:
+        errors.append("natural_long_form_not_detected")
+
     import app.api.routes.smart_chat as smart_chat
     smart_source = inspect.getsource(smart_chat._smart_managed_runner)
     order = {
@@ -90,6 +110,8 @@ def audit() -> dict:
     checks["runner_order"] = order
     if min(order.values()) < 0 or not (order["utility"] < order["structured"] < order["web"]):
         errors.append("fast_path_order_invalid")
+    if "retrieve_memories(" not in smart_source or "requires_memory_context(question)" not in smart_source:
+        errors.append("new_chat_memory_injection_missing")
 
     import app.services.project_context as project_context
     checks["prompt_chars"] = {
@@ -123,7 +145,7 @@ def audit() -> dict:
         errors.append("fast_prompt_warmup_missing")
 
     return {
-        "format": "olya-latency-path-audit-v2",
+        "format": "olya-latency-path-audit-v3",
         "status": "passed" if not errors else "failed",
         "errors": errors,
         "checks": checks,
