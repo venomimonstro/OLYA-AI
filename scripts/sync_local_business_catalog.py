@@ -17,9 +17,9 @@ DATA_ROOT = Path(os.environ.get('X1_DATA_ROOT', '/app/data'))
 CATALOG_PATH = DATA_ROOT / 'local_businesses.sqlite3'
 DOWNLOAD_ROOT = DATA_ROOT / 'osm-downloads'
 
-# Prefer compact BBBike city extracts where available. They are updated daily
-# and are much smaller than a federal-district PBF. Additional cities can be
-# added without changing the catalog format.
+# Compact daily city extracts keep bootstrap cheap enough for the low-memory
+# self-hosted deployment. The runtime catalog is independent from the network
+# after a successful sync.
 CITY_SOURCES = {
     'Москва': {
         'url': 'https://download.bbbike.org/osm/bbbike/Moscow/Moscow.osm.pbf',
@@ -48,7 +48,11 @@ CATEGORY_KEYS = (
 
 
 def _run(*args: str) -> None:
-    subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or '').strip()[-2000:]
+        raise RuntimeError(f"command failed ({' '.join(args[:3])}): {detail}") from exc
 
 
 def _download(url: str, destination: Path, *, force: bool) -> Path:
@@ -58,7 +62,7 @@ def _download(url: str, destination: Path, *, force: bool) -> Path:
     temporary = destination.with_suffix(destination.suffix + '.part')
     temporary.unlink(missing_ok=True)
     request = urllib.request.Request(url, headers={'User-Agent': 'OLYA-AI local catalog sync/1.0'})
-    with urllib.request.urlopen(request, timeout=90) as response, temporary.open('wb') as target:
+    with urllib.request.urlopen(request, timeout=120) as response, temporary.open('wb') as target:
         shutil.copyfileobj(response, target, length=1024 * 1024)
     if temporary.stat().st_size < 1_000_000:
         temporary.unlink(missing_ok=True)
@@ -97,7 +101,6 @@ def _phone(properties: dict) -> str:
 
 
 def _category(properties: dict) -> str:
-    # Keep the raw OSM value. Runtime maps user intent to these values.
     for keys in CATEGORY_KEYS:
         for key in keys:
             value = str(properties.get(key) or '').strip().casefold()
@@ -105,7 +108,6 @@ def _category(properties: dict) -> str:
                 if key == 'healthcare' and value == 'doctor':
                     return 'doctors'
                 return value[:80]
-    # cuisine/specialized service tags can still be found by text fallback.
     for key in ('cuisine', 'service:vehicle', 'service:vehicle:car_repair'):
         value = str(properties.get(key) or '').strip().casefold()
         if value:
@@ -202,18 +204,13 @@ def _build_database(city_exports: list[tuple[str, Path]], destination: Path) -> 
                     address, phone, website, _normal(' '.join(search_values)),
                 ))
                 if len(batch) >= 2000:
-                    connection.executemany(
-                        'INSERT OR REPLACE INTO businesses VALUES (?,?,?,?,?,?,?,?,?,?)', batch
-                    )
+                    connection.executemany('INSERT OR REPLACE INTO businesses VALUES (?,?,?,?,?,?,?,?,?,?)', batch)
                     total += len(batch)
                     batch.clear()
             if batch:
                 connection.executemany('INSERT OR REPLACE INTO businesses VALUES (?,?,?,?,?,?,?,?,?,?)', batch)
                 total += len(batch)
-        connection.execute(
-            'INSERT INTO metadata(key, value) VALUES (?, ?)',
-            ('updated_at', datetime.now(timezone.utc).isoformat()),
-        )
+        connection.execute('INSERT INTO metadata(key, value) VALUES (?, ?)', ('updated_at', datetime.now(timezone.utc).isoformat()))
         connection.execute('INSERT INTO metadata(key, value) VALUES (?, ?)', ('schema_version', '1'))
         connection.commit()
         connection.execute('PRAGMA optimize')
@@ -241,7 +238,9 @@ def sync(cities: list[str], *, force_download: bool = False) -> dict[str, object
             filtered = tmp / f'{source["filename"]}.businesses.pbf'
             exported = tmp / f'{source["filename"]}.geojsonseq'
             _run('osmium', 'tags-filter', str(pbf), *BUSINESS_FILTERS, '-o', str(filtered), '--overwrite')
-            _run('osmium', 'export', str(filtered), '-f', 'geojsonseq', '-o', str(exported), '--overwrite')
+            # Osmium export does not include original object identity by default.
+            # The catalog needs stable type/id to produce real OSM card links.
+            _run('osmium', 'export', str(filtered), '-f', 'geojsonseq', '-a', 'type,id', '-o', str(exported), '--overwrite')
             exports.append((city, exported))
 
         staging = DATA_ROOT / 'local_businesses.sqlite3.tmp'
