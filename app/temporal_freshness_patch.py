@@ -88,11 +88,29 @@ def install_temporal_freshness_patch() -> None:
 
     response_strategy.is_atomic_knowledge_question = stable_atomic_only
 
-    # 4) Every question classified as freshness-sensitive is forced through live web grounding.
-    # This is deliberately generic: current people/roles, news, prices, weather, schedules,
-    # software versions, laws/taxes, shopping/availability, local information and similar facts.
+    # 4) Fresh/local web lookups get enough wall-clock budget for the keyless
+    # metasearch + direct SERP fallback. Ordinary chat keeps its smaller budget.
     from app.services import clean_web
 
+    original_clean_search = clean_web._search
+
+    @wraps(original_clean_search)
+    async def resilient_clean_search(discovery, query: str, *, count: int, country: str, language: str, timeout: float):
+        effective_timeout = max(float(timeout), 7.0) if int(count) >= 7 else timeout
+        return await original_clean_search(
+            discovery,
+            query,
+            count=count,
+            country=country,
+            language=language,
+            timeout=effective_timeout,
+        )
+
+    clean_web._search = resilient_clean_search
+
+    # 5) Every question classified as freshness-sensitive is forced through live web grounding.
+    # This is deliberately generic: current people/roles, news, prices, weather, schedules,
+    # software versions, laws/taxes, shopping/availability, local information and similar facts.
     original_build_clean_web_context = clean_web.build_clean_web_context
 
     @wraps(original_build_clean_web_context)
