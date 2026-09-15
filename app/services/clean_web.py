@@ -205,13 +205,15 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
     result = CleanWebResult(used=True)
 
     if local_business:
+        # Three independent views, in parallel. The map searches are explicit
+        # site filters so random pages cannot masquerade as Yandex Maps/2GIS.
         search_queries = [
             question,
-            f"{question} Яндекс Карты рейтинг отзывы адрес телефон сайт",
-            f"{question} 2ГИС рейтинг отзывы адрес телефон сайт",
+            f"site:yandex.ru/maps {question}",
+            f"site:2gis.ru {question}",
         ]
         batches = await asyncio.gather(*(
-            _search(discovery, query, count=7, country="RU", language=language, timeout=3.2)
+            _search(discovery, query, count=8, country="RU", language=language, timeout=6.2)
             for query in search_queries
         ))
         hits = [hit for batch in batches for hit in batch]
@@ -239,7 +241,7 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
 
     unique = []
     seen: set[str] = set()
-    max_unique = 12 if local_business else 5
+    max_unique = 10 if local_business else 5
     for hit in hits:
         canonical = canonical_result_url(hit.url)
         if not canonical or canonical in seen:
@@ -256,22 +258,17 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
 
     if local_business:
         blocks.append(
-            "LOCAL BUSINESS RANKING MODE. Это запрос на подбор реальных организаций в конкретном месте. "
-            "Не отвечай одним-двумя названиями и не делай рейтинг по памяти модели. Сопоставь данные обычного веб-поиска, "
-            "Яндекс Карт, 2ГИС и официальных сайтов. При ранжировании учитывай одновременно среднюю оценку и количество отзывов: "
-            "оценка 5.0 по 3 отзывам не должна автоматически быть выше 4.8 по 800 отзывам. "
-            "Дай 5–8 вариантов, если источников достаточно. Для каждой организации укажи: название; рейтинг и число отзывов "
-            "в Яндекс Картах, если найдено; рейтинг и число отзывов в 2ГИС, если найдено; адрес; телефон; официальный сайт; "
-            "прямую ссылку на карточку Яндекс Карт; прямую ссылку на карточку 2ГИС. Если прямой карточки нет в источниках, "
-            "можно дать ссылку поиска по проверенному названию организации на соответствующей карте, явно подписав её «поиск на карте». "
-            "Не придумывай телефон, адрес, рейтинг, число отзывов или URL. Если поле не подтверждено, пиши «не найдено». "
-            "В начале кратко объясни критерий рейтинга, в конце дай 1–3 лучших выбора по совокупности оценки, числа отзывов и полноты данных."
+            "LOCAL BUSINESS MODE. Ответь обычным русским текстом/таблицей. Никогда не выводи <|function_call|>, tool_call, JSON вызова функции или псевдо-инструменты. "
+            "Используй только организации, реально подтверждённые источниками ниже. Сопоставь обычную выдачу, Яндекс Карты, 2ГИС и официальные сайты. "
+            "Ранжируй по совокупности рейтинга, количества отзывов и полноты подтверждённых данных; 5.0 по 3 отзывам не автоматически лучше 4.8 по 800. "
+            "Дай до 5 вариантов. Для каждой: название, рейтинг/отзывы Яндекс если есть, рейтинг/отзывы 2ГИС если есть, адрес, телефон, официальный сайт, ссылки на найденные карточки карт. "
+            "Ничего не выдумывай: неподтверждённое поле пометь «не найдено». Не создавай вымышленные URL карточек. В конце выбери 1–3 лучших по подтверждённым данным."
         )
     elif advice:
         blocks.append("Вывод + 5–8 практических пунктов; не пересказывай сайты.")
 
-    snippet_limit = 280 if local_business else 82
-    visible_snippets = 10 if local_business else 2
+    snippet_limit = 240 if local_business else 82
+    visible_snippets = 6 if local_business else 2
     for index, hit in enumerate(unique, start=1):
         snippet = _clean(hit.snippet, snippet_limit)
         domain = _host(hit.url)
@@ -285,13 +282,15 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
         if index <= visible_snippets:
             blocks.append(f"[{index}] {_clean(hit.title, 100 if local_business else 48)} | {domain}\nURL: {hit.url}\n{snippet}")
 
-    page_limit = 5 if local_business else (2 if deep_read else (1 if advice else 0))
+    # Local lookup must be useful but not turn a simple chat question into a
+    # two-minute research job on a CPU-only node. Three concurrent pages are
+    # enough to enrich snippets; the SERP itself remains the primary evidence.
+    page_limit = 3 if local_business else (2 if deep_read else (1 if advice else 0))
     if page_limit and unique:
-        page_timeout = 2.2 if local_business else (1.8 if deep_read else 0.65)
-        excerpt_window = 420 if local_business else (240 if deep_read else 120)
-        excerpt_limit = 650 if local_business else (340 if deep_read else 120)
+        page_timeout = 1.8 if local_business else (1.8 if deep_read else 0.65)
+        excerpt_window = 300 if local_business else (240 if deep_read else 120)
+        excerpt_limit = 420 if local_business else (340 if deep_read else 120)
 
-        # Prefer maps and directory pages for local lookups, then fill with other sources.
         fetch_candidates = unique
         if local_business:
             fetch_candidates = sorted(
@@ -302,7 +301,7 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
         async def fetch_one(index: int, hit):
             try:
                 page = await asyncio.wait_for(fetcher.fetch(hit.url), timeout=page_timeout)
-                excerpts = lexical_excerpts(page.content, question, limit=2 if local_business else 1, window=excerpt_window)
+                excerpts = lexical_excerpts(page.content, question, limit=1, window=excerpt_window)
                 text = "\n".join(excerpt for excerpt, _score in excerpts)[:excerpt_limit]
                 return index, hit, text, None
             except (ResearchFetchError, TimeoutError, asyncio.TimeoutError) as exc:
@@ -321,7 +320,7 @@ async def build_clean_web_context(*, discovery, fetcher, question: str, web_mode
     if not unique:
         result.warning = "Поиск не вернул релевантных результатов; актуальные факты не подтверждены."
 
-    context_limit = 7600 if local_business else (1600 if deep_read else 620)
+    context_limit = 4400 if local_business else (1600 if deep_read else 620)
     result.context_messages = [ChatMessage(role="system", content="\n\n".join(blocks)[:context_limit])]
     _cache_put(key, result)
     return result
